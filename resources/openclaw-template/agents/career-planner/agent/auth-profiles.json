@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "profiles": {
+    "zai:default": {
+      "type": "api_key",
+      "provider": "zai",
+      "key": ""
+    },
+    "google:default": {
+      "type": "api_key",
+      "provider": "google",
+      "key": ""
+    }
+  },
+  "usageStats": {
+    "zai:default": {
+      "errorCount": 0
+    },
+    "google:default": {
+      "errorCount": 0
+    }
+  }
+}

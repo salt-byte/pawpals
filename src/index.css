@@ -1,0 +1,29 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+@theme {
+  --font-sans: "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "ZCOOL XiaoWei", serif;
+  
+  --color-pet-cream: #FFF9F0;
+  --color-pet-orange: #FFB347;
+  --color-pet-pink: #FFD1DC;
+  --color-pet-mint: #B2E2D2;
+  --color-pet-brown: #8D6E63;
+}
+
+body {
+  background-color: var(--color-pet-cream);
+  color: var(--color-pet-brown);
+}
+
+.healing-card {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 24px;
+}
+
+.pet-shadow {
+  box-shadow: 0 8px 30px rgba(255, 179, 71, 0.15);
+}

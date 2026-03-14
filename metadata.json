@@ -1,0 +1,5 @@
+{
+  "name": "萌爪伴学 (PawPals)",
+  "description": "一个宠物治愈风格的成长陪伴学习应用，包含求职、考公、考研群聊及搭子匹配广场。",
+  "requestFramePermissions": ["camera"]
+}

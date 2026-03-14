@@ -1,0 +1,365 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.3.8",
+    "lastTouchedAt": "2026-03-12T05:37:35.894Z"
+  },
+  "env": {
+    "vars": {
+      "ANTHROPIC_API_KEY": "",
+      "ANTHROPIC_MODEL": "claude-opus-4-6",
+      "OPENAI_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "OPENAI_API_KEY": "",
+      "OPENAI_MODEL": "gemini-2.0-flash"
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-03-12T04:59:08.180Z",
+    "lastRunVersion": "2026.3.8",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {
+      "zai:default": {
+        "provider": "zai",
+        "mode": "api_key"
+      },
+      "openai:default": {
+        "provider": "openai",
+        "mode": "api_key"
+      },
+      "google:default": {
+        "provider": "google",
+        "mode": "api_key"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": ""
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "gemini": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "models": [
+          {
+            "id": "gemini-3-flash-preview",
+            "input": [
+              "text"
+            ],
+            "name": "gemini-3-flash-preview"
+          }
+        ]
+      },
+      "openai": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "https://api.openai.com/v1",
+        "models": [
+          {
+            "id": "gpt-5-mini",
+            "input": [
+              "text"
+            ],
+            "name": "gpt-5-mini"
+          },
+          {
+            "id": "gpt-5",
+            "input": [
+              "text"
+            ],
+            "name": "gpt-5"
+          }
+        ]
+      },
+      "minimax": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "https://api.minimax.io/v1",
+        "models": [
+          {
+            "id": "MiniMax-M2.5",
+            "input": [
+              "text"
+            ],
+            "name": "MiniMax-M2.5"
+          }
+        ]
+      },
+      "volcengine": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+        "models": [
+          {
+            "id": "doubao-seed-1-6-251015",
+            "input": [
+              "text"
+            ],
+            "name": "doubao-seed-1-6-251015"
+          }
+        ]
+      },
+      "lanyi": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "https://api.lanyiai.com/v1",
+        "models": [
+          {
+            "id": "claude-sonnet-4-6",
+            "input": [
+              "text"
+            ],
+            "name": "claude-sonnet-4-6"
+          }
+        ]
+      },
+      "vllm": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "http://1.95.142.151:3000/v1",
+        "models": [
+          {
+            "contextWindow": 128000,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "claude-sonnet-4-6",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 8192,
+            "name": "claude-sonnet-4-6",
+            "reasoning": false
+          }
+        ]
+      },
+      "zai": {
+        "api": "openai-completions",
+        "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+        "models": [
+          {
+            "api": "openai-completions",
+            "contextWindow": 204800,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "glm-5",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 131072,
+            "name": "GLM-5",
+            "reasoning": true
+          },
+          {
+            "api": "openai-completions",
+            "contextWindow": 204800,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "glm-4.7",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 131072,
+            "name": "GLM-4.7",
+            "reasoning": true
+          },
+          {
+            "api": "openai-completions",
+            "contextWindow": 204800,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "glm-4.7-flash",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 131072,
+            "name": "GLM-4.7 Flash",
+            "reasoning": true
+          },
+          {
+            "api": "openai-completions",
+            "contextWindow": 204800,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "glm-4.7-flashx",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 131072,
+            "name": "GLM-4.7 FlashX",
+            "reasoning": true
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "model": {
+        "primary": "anthropic/claude-opus-4-6"
+      },
+      "models": {
+        "zai/glm-5": {}
+      },
+      "subagents": {
+        "maxConcurrent": 8
+      },
+      "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace"
+    },
+    "list": [
+      {
+        "id": "main"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/career-planner/agent",
+        "id": "career-planner",
+        "name": "career-planner",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/career-planner"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/job-hunter/agent",
+        "id": "job-hunter",
+        "name": "job-hunter",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/job-hunter"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/resume-expert/agent",
+        "id": "resume-expert",
+        "name": "resume-expert",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/resume-expert"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/app-tracker/agent",
+        "id": "app-tracker",
+        "name": "app-tracker",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/app-tracker"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/networker/agent",
+        "id": "networker",
+        "name": "networker",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/networker"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/interview-coach/agent",
+        "id": "interview-coach",
+        "name": "interview-coach",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/interview-coach"
+      },
+      {
+        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/jd-analyst/agent",
+        "id": "jd-analyst",
+        "name": "jd-analyst",
+        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/jd-analyst"
+      }
+    ]
+  },
+  "tools": {
+    "profile": "full",
+    "web": {
+      "search": {
+        "enabled": true,
+        "apiKey": ""
+      },
+      "fetch": {
+        "enabled": true
+      }
+    },
+    "fs": {
+      "workspaceOnly": true
+    },
+    "exec": {
+      "enabled": false
+    }
+  },
+  "bindings": [],
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "session-memory": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "channels": {},
+  "plugins": {
+    "entries": {
+      "feishu": {
+        "enabled": true
+      }
+    },
+    "installs": {
+      "feishu": {
+        "source": "npm",
+        "spec": "@openclaw/feishu",
+        "installPath": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/extensions/feishu",
+        "version": "2026.3.2",
+        "resolvedName": "@openclaw/feishu",
+        "resolvedVersion": "2026.3.2",
+        "resolvedSpec": "@openclaw/feishu@2026.3.2",
+        "integrity": "sha512-CpwjmLCS8gpZ5fFCRiEA+1i/L+E73Vhz5//TiwQjWJOtVPZEu44db294g3HUR6nB5L0IEpZgKU/JU69HgYl77w==",
+        "shasum": "ad77e27633b480f5c815e1922252a2f07c1765bd",
+        "resolvedAt": "2026-03-04T20:39:29.685Z",
+        "installedAt": "2026-03-04T20:39:31.954Z"
+      }
+    }
+  }
+}

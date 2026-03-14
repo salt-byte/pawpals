@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PawPals Launcher</title>
+    <style>
+      :root {
+        --bg: #f7efe6;
+        --panel: #fffaf5;
+        --line: #ecdccf;
+        --text: #8a6759;
+        --text-strong: #6d5045;
+        --accent: #f5aa3c;
+        --console: #231d1a;
+        --console-text: #f4ece4;
+        --muted: #b89f91;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "SF Pro Text", "PingFang SC", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(245,170,60,.18), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(229,189,150,.2), transparent 30%),
+          var(--bg);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .shell {
+        width: min(920px, 100%);
+        display: grid;
+        grid-template-columns: 1.02fr .98fr;
+        background: rgba(255,255,255,.75);
+        border: 1px solid rgba(236,220,207,.8);
+        border-radius: 36px;
+        overflow: hidden;
+        box-shadow: 0 24px 80px rgba(106, 72, 53, .12);
+        backdrop-filter: blur(8px);
+      }
+      .hero {
+        padding: 44px 40px;
+        background: linear-gradient(180deg, rgba(255,250,245,.95), rgba(248,239,230,.82));
+        border-right: 1px solid rgba(236,220,207,.85);
+      }
+      .eyebrow {
+        font-size: 12px;
+        letter-spacing: .18em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+      h1 {
+        margin: 16px 0 12px;
+        font-size: 46px;
+        line-height: 1.05;
+        color: var(--text-strong);
+      }
+      p {
+        margin: 0;
+        line-height: 1.8;
+        font-size: 16px;
+      }
+      .status-card {
+        margin-top: 28px;
+        border-radius: 28px;
+        background: var(--panel);
+        border: 1px solid rgba(236,220,207,.9);
+        padding: 20px;
+      }
+      .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        padding: 8px 14px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+        background: rgba(245,170,60,.12);
+        color: var(--accent);
+      }
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      .button-row {
+        margin-top: 28px;
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      button {
+        border: none;
+        cursor: pointer;
+        transition: transform .18s ease, opacity .18s ease;
+      }
+      button:hover { transform: translateY(-1px); }
+      button:disabled { opacity: .55; transform: none; cursor: default; }
+      .primary {
+        background: var(--accent);
+        color: white;
+        padding: 16px 22px;
+        border-radius: 18px;
+        font-size: 15px;
+        font-weight: 800;
+        box-shadow: 0 14px 30px rgba(245,170,60,.22);
+      }
+      .secondary {
+        background: white;
+        color: var(--text);
+        padding: 16px 18px;
+        border-radius: 18px;
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .console-wrap {
+        padding: 28px;
+        background: rgba(247,239,230,.55);
+      }
+      .console {
+        height: 520px;
+        border-radius: 30px;
+        background: var(--console);
+        color: var(--console-text);
+        padding: 22px 22px 20px;
+        display: flex;
+        flex-direction: column;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+        overflow: hidden;
+      }
+      .console-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }
+      .traffic {
+        display: flex;
+        gap: 8px;
+      }
+      .traffic span {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+      .traffic span:nth-child(1) { background: #ff5f57; }
+      .traffic span:nth-child(2) { background: #febc2e; }
+      .traffic span:nth-child(3) { background: #28c840; }
+      .console-title {
+        font-size: 11px;
+        letter-spacing: .18em;
+        text-transform: uppercase;
+        color: rgba(244,236,228,.58);
+        font-weight: 800;
+      }
+      .console-body {
+        flex: 1;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.8;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .hint {
+        margin-top: 16px;
+        font-size: 12px;
+        color: rgba(244,236,228,.48);
+      }
+      @media (max-width: 860px) {
+        .shell { grid-template-columns: 1fr; }
+        .hero { border-right: 0; border-bottom: 1px solid rgba(236,220,207,.85); }
+        .console { min-height: 360px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="hero">
+        <div class="eyebrow">PawPals Launcher</div>
+        <h1>开始自动部署你的小龙虾</h1>
+        <p id="summary">
+          这一步会把 PawPals 自己的 OpenClaw 引擎部署到当前用户电脑本地，不会覆盖你原来那套 OpenClaw。
+        </p>
+
+        <div class="status-card">
+          <div class="status-chip" id="statusChip">
+            <span class="status-dot"></span>
+            <span id="statusText">等待开始</span>
+          </div>
+          <p id="detail" style="margin-top:14px;">
+            点下面按钮后，PawPals 会开始准备自己的本地环境、OpenClaw home、workspace 和 gateway。
+          </p>
+        </div>
+
+        <div class="button-row">
+          <button class="primary" id="startBtn">开始自动部署</button>
+          <button class="secondary" id="refreshBtn">刷新状态</button>
+        </div>
+      </section>
+
+      <section class="console-wrap">
+        <div class="console">
+          <div class="console-head">
+            <div class="traffic"><span></span><span></span><span></span></div>
+            <div class="console-title">real deployment log</div>
+          </div>
+          <div class="console-body" id="consoleBody">等待部署日志...</div>
+          <div class="hint">这里显示的是后台自动部署脚本写出的真实状态。</div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const startBtn = document.getElementById("startBtn");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const statusText = document.getElementById("statusText");
+      const detail = document.getElementById("detail");
+      const consoleBody = document.getElementById("consoleBody");
+      const desktopApi = window.pawpalsDesktop;
+
+      let polling = null;
+
+      function renderLauncherError(message) {
+        statusText.textContent = "部署失败";
+        detail.textContent = message;
+        consoleBody.textContent += `\n[launcher-error] ${message}\n`;
+        startBtn.disabled = false;
+        startBtn.textContent = "重新自动部署";
+      }
+
+      function renderStatus(data) {
+        if (!data) return;
+        const statusMap = {
+          idle: "等待开始",
+          running: "正在部署",
+          ready: "部署完成",
+          error: "部署失败",
+        };
+        statusText.textContent = statusMap[data.status] || data.status;
+
+        if (data.status === "ready") {
+          detail.textContent = "本地 OpenClaw 引擎已经部署完成，窗口会自动切进 PawPals 主界面。";
+          startBtn.textContent = "正在打开 PawPals...";
+          startBtn.disabled = true;
+        } else if (data.status === "running") {
+          detail.textContent = `当前阶段：${data.phase}。正在把 OpenClaw 部署到 ${data.openClawHome}`;
+          startBtn.textContent = "正在部署...";
+          startBtn.disabled = true;
+        } else if (data.status === "error") {
+          detail.textContent = data.error || "部署失败，请检查日志。";
+          startBtn.textContent = "重新自动部署";
+          startBtn.disabled = false;
+        } else {
+          startBtn.textContent = data.deployed ? "重新部署本地引擎" : "开始自动部署";
+          startBtn.disabled = false;
+        }
+
+        consoleBody.textContent = (data.logs && data.logs.length)
+          ? data.logs.join("\n")
+          : "等待部署日志...";
+        consoleBody.scrollTop = consoleBody.scrollHeight;
+      }
+
+      async function refreshStatus() {
+        if (!desktopApi || typeof desktopApi.getDeploymentStatus !== "function") {
+          throw new Error("Electron preload 未加载，PawPals 启动器暂时无法连接主进程。");
+        }
+        const data = await desktopApi.getDeploymentStatus();
+        renderStatus(data);
+        return data;
+      }
+
+      function ensurePolling() {
+        if (polling) return;
+        polling = window.setInterval(refreshStatus, 350);
+      }
+
+      startBtn.addEventListener("click", async () => {
+        startBtn.disabled = true;
+        startBtn.textContent = "正在部署...";
+        consoleBody.textContent = "$ pawpals deploy --local-openclaw\n正在启动后台自动部署...\n";
+        statusText.textContent = "正在部署";
+        detail.textContent = "正在向 Electron 主进程发起本地部署请求...";
+        ensurePolling();
+        try {
+          await refreshStatus();
+          if (!desktopApi || typeof desktopApi.startDeployment !== "function") {
+            throw new Error("Electron preload 未加载，部署请求没有发送出去。");
+          }
+          desktopApi.startDeployment();
+          window.setTimeout(() => refreshStatus().catch(renderLauncherError), 80);
+          window.setTimeout(() => refreshStatus().catch(renderLauncherError), 300);
+        } catch (error) {
+          renderLauncherError(error?.message || String(error));
+        }
+      });
+
+      refreshBtn.addEventListener("click", () => refreshStatus().catch(renderLauncherError));
+
+      refreshStatus()
+        .then((data) => {
+          if (data?.status === "running") ensurePolling();
+        })
+        .catch(renderLauncherError);
+    </script>
+  </body>
+</html>

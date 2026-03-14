@@ -1,0 +1,127 @@
+{
+  "providers": {
+    "zai": {
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "glm-5",
+          "name": "GLM-5",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 204800,
+          "maxTokens": 131072
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM-4.7",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 204800,
+          "maxTokens": 131072
+        },
+        {
+          "id": "glm-4.7-flash",
+          "name": "GLM-4.7 Flash",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 204800,
+          "maxTokens": 131072
+        },
+        {
+          "id": "glm-4.7-flashx",
+          "name": "GLM-4.7 FlashX",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 204800,
+          "maxTokens": 131072
+        }
+      ],
+      "apiKey": ""
+    },
+    "gemini": {
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "api": "openai-completions",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 8192
+        }
+      ]
+    },
+    "vllm": {
+      "baseUrl": "http://1.95.142.151:3000/v1",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "claude-sonnet-4-6",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 128000,
+          "maxTokens": 8192,
+          "api": "openai-completions"
+        }
+      ]
+    }
+  }
+}
