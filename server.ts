@@ -1678,6 +1678,52 @@ async function startServer() {
     }
   });
 
+  // API 连接测试
+  app.post("/api/test-connection", async (_req: any, res: any) => {
+    const config = loadJsonFile<any>(OPENCLAW_CONFIG_FILE, {});
+    const providers: Record<string, any> = config?.models?.providers || {};
+    const results: { provider: string; status: "ok" | "fail" | "skip"; reason?: string; model?: string; elapsed?: number }[] = [];
+
+    for (const [name, conf] of Object.entries(providers)) {
+      const apiKey: string = conf?.apiKey || "";
+      const baseUrl: string = (conf?.baseUrl || "").replace(/\/$/, "");
+      const models: any[] = conf?.models || [];
+      const firstModel = models[0]?.id;
+
+      if (!apiKey || apiKey.startsWith("${") || !baseUrl || !firstModel) {
+        results.push({ provider: name, status: "skip", reason: !apiKey || apiKey.startsWith("${") ? "API Key 未配置" : !firstModel ? "没有配置模型" : "baseUrl 未配置" });
+        continue;
+      }
+
+      const url = `${baseUrl}/chat/completions`;
+      const startTime = Date.now();
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({ model: firstModel, messages: [{ role: "user", content: "Hi" }], max_tokens: 5, stream: false }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const elapsed = Date.now() - startTime;
+        if (resp.ok) {
+          results.push({ provider: name, status: "ok", model: firstModel, elapsed });
+        } else {
+          const data: any = await resp.json().catch(() => ({}));
+          const errMsg = data?.error?.message || data?.message || `HTTP ${resp.status}`;
+          results.push({ provider: name, status: "fail", reason: errMsg, elapsed });
+        }
+      } catch (e: any) {
+        const elapsed = Date.now() - startTime;
+        results.push({ provider: name, status: "fail", reason: e.name === "AbortError" ? "超时（15秒）" : e.message, elapsed });
+      }
+    }
+
+    res.json({ results });
+  });
+
   // 启动定时自动备份
   startAutoBackup(APP_DATA_DIR, OPENCLAW_HOME, io);
 
@@ -1981,6 +2027,11 @@ async function startServer() {
       }
 
       saveSetupSelection(provider, model, { baseUrl });
+
+      // 重启 gateway，让它读取新的模型配置（与 switch-model 保持一致）
+      const gatewayPort = (GATEWAY_BASE.match(/:(\d+)/) || [])[1] || "18790";
+      exec(`lsof -ti :${gatewayPort} | xargs kill -TERM 2>/dev/null || true`, () => {});
+
       return res.json({ ok: true, setup: buildSetupState() });
     } catch (error: any) {
       return res.status(400).json({ ok: false, error: error.message || "保存失败" });

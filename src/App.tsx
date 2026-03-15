@@ -547,6 +547,8 @@ export default function App() {
   const [restoringSnapshot, setRestoringSnapshot] = useState<string | null>(null);
   const [sanitizing, setSanitizing] = useState(false);
   const [sanitizeResult, setSanitizeResult] = useState<string | null>(null);
+  const [connTesting, setConnTesting] = useState(false);
+  const [connResults, setConnResults] = useState<{provider:string;status:'ok'|'fail'|'skip';reason?:string;model?:string;elapsed?:number}[]|null>(null);
   const [setupStep, setSetupStep] = useState(1);
   const [selectedCompanyProvider, setSelectedCompanyProvider] = useState(MODEL_COMPANIES[0].provider);
   const [selectedSetupModel, setSelectedSetupModel] = useState(MODEL_COMPANIES[0].models[0].model);
@@ -2616,6 +2618,47 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {/* API 连接测试 */}
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-blue-500 text-sm">🔌</span>
+                      <p className="text-xs font-semibold text-blue-700">API 连接测试</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        setConnTesting(true);
+                        setConnResults(null);
+                        try {
+                          const r = await fetch('/api/test-connection', { method: 'POST' });
+                          const d = await r.json();
+                          setConnResults(d.results || []);
+                        } catch { setConnResults([]); }
+                        finally { setConnTesting(false); }
+                      }}
+                      disabled={connTesting}
+                      className="text-xs bg-blue-500 text-white px-3 py-1.5 rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                    >
+                      {connTesting ? '测试中…' : '一键测试'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-blue-600">检测每个已配置 provider 的 API Key 是否可用</p>
+                  {connResults && (
+                    <div className="space-y-1 mt-1">
+                      {connResults.length === 0 && <p className="text-[11px] text-blue-500">没有已配置的 provider</p>}
+                      {connResults.map(r => (
+                        <div key={r.provider} className="flex items-center gap-2 text-[11px]">
+                          <span>{r.status === 'ok' ? '✅' : r.status === 'fail' ? '❌' : '⏭️'}</span>
+                          <span className="font-mono font-bold text-pet-brown w-24 shrink-0">{r.provider}</span>
+                          {r.status === 'ok' && <span className="text-green-700">{r.model} · {r.elapsed}ms</span>}
+                          {r.status === 'fail' && <span className="text-red-600 truncate">{r.reason}</span>}
+                          {r.status === 'skip' && <span className="text-gray-500">{r.reason}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
               {/* 技能商店 */}
               <div className="healing-card p-6 space-y-4">
