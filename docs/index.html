@@ -261,9 +261,37 @@
       border: 2px solid rgba(255,255,255,0.3); color: white;
       padding: 14px 28px; border-radius: 16px;
       font-weight: 700; font-size: 15px; text-decoration: none;
-      transition: all .2s; margin-top: 14px;
+      transition: all .2s; margin-top: 14px; cursor: pointer;
+      background: transparent;
     }
     .btn-download:hover { background: rgba(255,255,255,0.1); }
+
+    /* ── DOWNLOAD DROPDOWN ── */
+    .dl-wrap { position: relative; display: inline-block; }
+    .dl-menu {
+      display: none; position: absolute; top: calc(100% + 8px); left: 50%;
+      transform: translateX(-50%);
+      background: white; border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+      min-width: 240px; overflow: hidden; z-index: 200;
+    }
+    .dl-wrap.open .dl-menu { display: block; }
+    .dl-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 13px 18px; text-decoration: none; color: var(--brown);
+      font-size: 14px; font-weight: 600; transition: background .15s;
+    }
+    .dl-item:hover { background: var(--orange-light); }
+    .dl-item .dl-sub { font-size: 11px; font-weight: 400; color: rgba(92,61,46,0.5); margin-top: 1px; }
+    .dl-item-inner { display: flex; flex-direction: column; }
+    .dl-divider { height: 1px; background: rgba(92,61,46,0.06); margin: 0 14px; }
+
+    /* path-card download variant */
+    .path-local { cursor: pointer; }
+    .path-local .dl-menu {
+      top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+      background: white; color: var(--brown);
+    }
 
     /* ── FOOTER ── */
     footer {
@@ -327,12 +355,29 @@
 
   <!-- 两条路 -->
   <div class="paths">
-    <a class="path-card path-local" href="https://github.com/salt-byte/pawpals/releases" target="_blank">
+    <div class="path-card path-local dl-wrap" id="heroLocalWrap" onclick="toggleDl('heroLocalWrap', event)">
       <div class="path-icon">💻</div>
       <div class="path-title">本地版</div>
       <div class="path-desc">下载 App，数据在本机，完全免费，离线可用</div>
-      <span class="path-tag">⬇ 免费下载</span>
-    </a>
+      <span class="path-tag">⬇ 选择平台下载</span>
+      <div class="dl-menu" onclick="event.stopPropagation()">
+        <a class="dl-item" href="https://github.com/salt-byte/pawpals/releases/download/v1.0.0/PawPals-1.0.0-arm64.dmg">
+          <span style="font-size:22px">🍎</span>
+          <div class="dl-item-inner">
+            <span>macOS（Apple Silicon）</span>
+            <span class="dl-sub">M1 / M2 / M3 / M4 · .dmg</span>
+          </div>
+        </a>
+        <div class="dl-divider"></div>
+        <a class="dl-item" href="https://github.com/salt-byte/pawpals/releases" target="_blank">
+          <span style="font-size:22px">📦</span>
+          <div class="dl-item-inner">
+            <span>其他版本 / 历史版本</span>
+            <span class="dl-sub">GitHub Releases 页面</span>
+          </div>
+        </a>
+      </div>
+    </div>
     <a class="path-card path-cloud" href="https://railway.app/new/template?template=https://github.com/salt-byte/pawpals" target="_blank">
       <div class="path-icon">☁️</div>
       <div class="path-title">云版</div>
@@ -463,9 +508,28 @@
         ☁️ 一键部署到 Railway
       </a>
       <br/>
-      <a class="btn-download" href="https://github.com/salt-byte/pawpals/releases" target="_blank">
-        💻 下载本地版（免费）
-      </a>
+      <div class="dl-wrap" id="footerLocalWrap" style="margin-top:14px;">
+        <button class="btn-download" onclick="toggleDl('footerLocalWrap', event)">
+          💻 下载本地版（免费）▾
+        </button>
+        <div class="dl-menu" onclick="event.stopPropagation()" style="bottom: calc(100% + 8px); top: auto;">
+          <a class="dl-item" href="https://github.com/salt-byte/pawpals/releases/download/v1.0.0/PawPals-1.0.0-arm64.dmg">
+            <span style="font-size:22px">🍎</span>
+            <div class="dl-item-inner">
+              <span>macOS（Apple Silicon）</span>
+              <span class="dl-sub">M1 / M2 / M3 / M4 · .dmg</span>
+            </div>
+          </a>
+          <div class="dl-divider"></div>
+          <a class="dl-item" href="https://github.com/salt-byte/pawpals/releases" target="_blank">
+            <span style="font-size:22px">📦</span>
+            <div class="dl-item-inner">
+              <span>其他版本 / 历史版本</span>
+              <span class="dl-sub">GitHub Releases 页面</span>
+            </div>
+          </a>
+        </div>
+      </div>
     </div>
   </div>
 </section>
@@ -475,6 +539,19 @@
   <p>🐾 萌爪伴学 PawPals · 基于 <a href="https://github.com/salt-byte/pawpals" target="_blank">开源代码</a> 构建 · MIT License</p>
   <p style="margin-top:8px;">由 <a href="https://github.com/salt-byte" target="_blank">@salt-byte</a> 制作 · 用 AI 让学习更有温度</p>
 </footer>
+
+<script>
+  function toggleDl(id, e) {
+    e.stopPropagation();
+    const wrap = document.getElementById(id);
+    const isOpen = wrap.classList.contains('open');
+    document.querySelectorAll('.dl-wrap.open').forEach(el => el.classList.remove('open'));
+    if (!isOpen) wrap.classList.add('open');
+  }
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.dl-wrap.open').forEach(el => el.classList.remove('open'));
+  });
+</script>
 
 </body>
 </html>
