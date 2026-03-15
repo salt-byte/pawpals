@@ -463,9 +463,7 @@ export default function App() {
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
   const t = (key: keyof typeof TRANSLATIONS['zh']) => TRANSLATIONS[lang][key] || key;
 
-  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>(
-    localStorage.getItem('pawpals_visited') ? 'auth' : 'landing'
-  );
+  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>('auth');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
