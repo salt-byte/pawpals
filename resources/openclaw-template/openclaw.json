@@ -248,53 +248,53 @@
       "subagents": {
         "maxConcurrent": 8
       },
-      "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace"
+      "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace"
     },
     "list": [
       {
         "id": "main"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/career-planner/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/career-planner/agent",
         "id": "career-planner",
         "name": "career-planner",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/career-planner"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/career-planner"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/job-hunter/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/job-hunter/agent",
         "id": "job-hunter",
         "name": "job-hunter",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/job-hunter"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/job-hunter"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/resume-expert/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/resume-expert/agent",
         "id": "resume-expert",
         "name": "resume-expert",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/resume-expert"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/resume-expert"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/app-tracker/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/app-tracker/agent",
         "id": "app-tracker",
         "name": "app-tracker",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/app-tracker"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/app-tracker"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/networker/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/networker/agent",
         "id": "networker",
         "name": "networker",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/networker"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/networker"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/interview-coach/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/interview-coach/agent",
         "id": "interview-coach",
         "name": "interview-coach",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/interview-coach"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/interview-coach"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/agents/jd-analyst/agent",
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/jd-analyst/agent",
         "id": "jd-analyst",
         "name": "jd-analyst",
-        "workspace": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/workspace/career/workspaces/jd-analyst"
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/jd-analyst"
       }
     ]
   },
@@ -312,9 +312,7 @@
     "fs": {
       "workspaceOnly": true
     },
-    "exec": {
-      "enabled": false
-    }
+    "exec": {}
   },
   "bindings": [],
   "messages": {
@@ -350,7 +348,7 @@
       "feishu": {
         "source": "npm",
         "spec": "@openclaw/feishu",
-        "installPath": "/Users/dengyudie/Downloads/萌爪伴学-(pawpals)/resources/openclaw-template/extensions/feishu",
+        "installPath": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/extensions/feishu",
         "version": "2026.3.2",
         "resolvedName": "@openclaw/feishu",
         "resolvedVersion": "2026.3.2",
