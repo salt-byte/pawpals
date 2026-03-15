@@ -7,6 +7,7 @@
         {
           "id": "glm-5",
           "name": "GLM-5",
+          "api": "openai-completions",
           "reasoning": true,
           "input": [
             "text"
@@ -18,12 +19,12 @@
             "cacheWrite": 0
           },
           "contextWindow": 204800,
-          "maxTokens": 131072,
-          "api": "openai-completions"
+          "maxTokens": 131072
         },
         {
           "id": "glm-4.7",
           "name": "GLM-4.7",
+          "api": "openai-completions",
           "reasoning": true,
           "input": [
             "text"
@@ -35,12 +36,12 @@
             "cacheWrite": 0
           },
           "contextWindow": 204800,
-          "maxTokens": 131072,
-          "api": "openai-completions"
+          "maxTokens": 131072
         },
         {
           "id": "glm-4.7-flash",
           "name": "GLM-4.7 Flash",
+          "api": "openai-completions",
           "reasoning": true,
           "input": [
             "text"
@@ -52,12 +53,12 @@
             "cacheWrite": 0
           },
           "contextWindow": 204800,
-          "maxTokens": 131072,
-          "api": "openai-completions"
+          "maxTokens": 131072
         },
         {
           "id": "glm-4.7-flashx",
           "name": "GLM-4.7 FlashX",
+          "api": "openai-completions",
           "reasoning": true,
           "input": [
             "text"
@@ -69,21 +70,95 @@
             "cacheWrite": 0
           },
           "contextWindow": 204800,
-          "maxTokens": 131072,
-          "api": "openai-completions"
+          "maxTokens": 131072
         }
-      ],
-      "apiKey": ""
+      ]
     },
     "gemini": {
-      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
       "apiKey": "",
       "api": "openai-completions",
       "models": [
         {
-          "id": "gemini-2.0-flash",
-          "name": "Gemini 2.0 Flash",
-          "api": "openai-completions",
+          "id": "gemini-3-flash-preview",
+          "name": "gemini-3-flash-preview",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "OPENAI_API_KEY",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "gpt-5-mini",
+          "name": "gpt-5-mini",
+          "input": [
+            "text"
+          ]
+        },
+        {
+          "id": "gpt-5",
+          "name": "gpt-5",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "minimax": {
+      "baseUrl": "https://api.minimax.io/v1",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax-M2.5",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "volcengine": {
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "doubao-seed-1-6-251015",
+          "name": "doubao-seed-1-6-251015",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "lanyi": {
+      "baseUrl": "https://api.lanyiai.com/v1",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "claude-sonnet-4-6",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "vllm": {
+      "baseUrl": "http://1.95.142.151:3000/v1",
+      "apiKey": "",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "claude-sonnet-4-6",
           "reasoning": false,
           "input": [
             "text"
@@ -94,8 +169,22 @@
             "cacheRead": 0,
             "cacheWrite": 0
           },
-          "contextWindow": 1000000,
+          "contextWindow": 128000,
           "maxTokens": 8192
+        }
+      ]
+    },
+    "custom-openai": {
+      "api": "openai-completions",
+      "apiKey": "sk-ZA9JqYmJPVbEr5PcCMl2J1pTbm2abkIWbK7wOqB8epvbfqiG",
+      "baseUrl": "http://1.95.142.151:3000/v1",
+      "models": [
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "claude-sonnet-4.6",
+          "input": [
+            "text"
+          ]
         }
       ]
     }

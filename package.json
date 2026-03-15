@@ -6,6 +6,7 @@
   "main": "electron/main.mjs",
   "scripts": {
     "dev": "tsx server.ts",
+    "start": "NODE_ENV=production node --import tsx/esm server.ts",
     "bootstrap:runtime": "node scripts/bootstrap-pawpals-runtime.mjs",
     "dev:isolated": "node scripts/dev-isolated.mjs",
     "desktop:dev": "node scripts/run-electron.mjs",
@@ -18,11 +19,14 @@
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
+    "archiver": "^7.0.1",
     "better-sqlite3": "^12.4.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "mammoth": "^1.12.0",
     "node-schedule": "^2.1.1",
     "openclaw": "^2026.3.8",
+    "pdfjs-dist": "^5.5.207",
     "socket.io": "^4.8.3",
     "tsx": "^4.21.0"
   },

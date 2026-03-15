@@ -4,9 +4,11 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import os from "os";
 import path from "path";
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync } from "fs";
 import { spawn, exec } from "child_process";
 import schedule from "node-schedule";
+import crypto from "crypto";
+import archiver from "archiver";
 
 dotenv.config();
 
@@ -48,6 +50,277 @@ const PYTHON_BIN = process.env.PAWPALS_PYTHON || process.env.PYTHON || "python3"
 ensureDir(APP_DATA_DIR);
 ensureDir(CAREER_DIR);
 ensureDir(COOKIE_DIR);
+
+const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
+const BACKUP_DIR = path.join(os.homedir(), "Documents", "PawPals备份");
+const BACKUP_META_FILE = path.join(APP_DATA_DIR, "backup-meta.json");
+
+// ── 本地备份系统 ────────────────────────────────────────────────────
+// 元数据：记录最近几次备份信息
+interface BackupMeta { lastBackupAt: number; backupCount: number; lastBackupPath: string }
+function _loadBackupMeta(): BackupMeta {
+  try { if (existsSync(BACKUP_META_FILE)) return JSON.parse(readFileSync(BACKUP_META_FILE, "utf-8")); } catch {}
+  return { lastBackupAt: 0, backupCount: 0, lastBackupPath: "" };
+}
+function _saveBackupMeta(m: BackupMeta) {
+  try { writeFileSync(BACKUP_META_FILE, JSON.stringify(m, null, 2)); } catch {}
+}
+
+// 把整个目录递归复制到目标
+function _copyDir(src: string, dest: string) {
+  if (!existsSync(src)) return;
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src)) {
+    const s = path.join(src, entry);
+    const d = path.join(dest, entry);
+    if (statSync(s).isDirectory()) _copyDir(s, d);
+    else copyFileSync(s, d);
+  }
+}
+
+// 执行一次本地备份：复制到 ~/Documents/PawPals备份/YYYY-MM-DD_HH-MM/
+function doLocalBackup(appDataDir: string, openClawHome: string): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+  const dest = path.join(BACKUP_DIR, ts);
+  mkdirSync(dest, { recursive: true });
+
+  // 备份核心数据文件
+  const filesToBackup = [
+    path.join(appDataDir, "setup-state.json"),
+    path.join(appDataDir, "deployment-state.json"),
+    path.join(appDataDir, "security.json"),
+  ];
+  for (const f of filesToBackup) {
+    if (existsSync(f)) copyFileSync(f, path.join(dest, path.basename(f)));
+  }
+
+  // 备份 workspace（聊天记录、简历草稿等）
+  const workspaceSrc = path.join(openClawHome, "workspace");
+  if (existsSync(workspaceSrc)) _copyDir(workspaceSrc, path.join(dest, "workspace"));
+
+  // 保留最近10份快照，删除旧的
+  const snapshots = readdirSync(BACKUP_DIR)
+    .filter(d => /^\d{4}-\d{2}/.test(d))
+    .sort()
+    .reverse();
+  for (const old of snapshots.slice(10)) {
+    try { exec(`rm -rf "${path.join(BACKUP_DIR, old)}"`); } catch {}
+  }
+
+  const meta = _loadBackupMeta();
+  meta.lastBackupAt = Date.now();
+  meta.backupCount += 1;
+  meta.lastBackupPath = dest;
+  _saveBackupMeta(meta);
+
+  console.log(`[backup] 本地备份完成 → ${dest}`);
+  return dest;
+}
+
+// 启动定时备份（每小时一次）
+function startAutoBackup(appDataDir: string, openClawHome: string, notifyIO?: any) {
+  ensureDir(BACKUP_DIR);
+  schedule.scheduleJob("0 * * * *", () => {
+    try {
+      const dest = doLocalBackup(appDataDir, openClawHome);
+      notifyIO?.emit("backup_done", { ok: true, path: dest, at: Date.now() });
+    } catch (e: any) {
+      console.error("[backup] 定时备份失败:", e.message);
+    }
+  });
+  console.log("[backup] 自动备份已启动（每小时）→", BACKUP_DIR);
+}
+
+// ── Login Throttle（仿 AlphaClaw login-throttle.js）────────────────────
+// 指数退避暴力破解保护：每个 IP 独立计数
+const kLoginWindowMs    = 5 * 60 * 1000;   // 5分钟窗口
+const kLoginMaxAttempts = 5;               // 窗口内最多5次
+const kLoginBaseLockMs  = 30 * 1000;       // 首次锁定30秒
+const kLoginMaxLockMs   = 30 * 60 * 1000;  // 最长锁定30分钟
+const kLoginStateTtlMs  = 60 * 60 * 1000;  // 1小时后清理状态
+
+interface LoginState { attempts: number; windowStart: number; lockUntil: number; failStreak: number; lastSeenAt: number; }
+const _loginStates = new Map<string, LoginState>();
+
+function _getLoginState(ip: string, now: number): LoginState {
+  const s = _loginStates.get(ip);
+  if (s) { s.lastSeenAt = now; return s; }
+  const n: LoginState = { attempts: 0, windowStart: now, lockUntil: 0, failStreak: 0, lastSeenAt: now };
+  _loginStates.set(ip, n);
+  return n;
+}
+function _checkThrottle(ip: string): { blocked: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const s = _getLoginState(ip, now);
+  if (s.lockUntil > now) return { blocked: true, retryAfterSec: Math.ceil((s.lockUntil - now) / 1000) };
+  if (now - s.windowStart >= kLoginWindowMs) { s.attempts = 0; s.windowStart = now; }
+  return { blocked: false, retryAfterSec: 0 };
+}
+function _recordFailure(ip: string) {
+  const now = Date.now();
+  const s = _getLoginState(ip, now);
+  if (now - s.windowStart >= kLoginWindowMs) { s.attempts = 0; s.windowStart = now; }
+  s.attempts += 1;
+  if (s.attempts < kLoginMaxAttempts) return;
+  s.failStreak += 1; s.attempts = 0; s.windowStart = now;
+  const lockMs = Math.min(kLoginBaseLockMs * Math.pow(2, s.failStreak - 1), kLoginMaxLockMs);
+  s.lockUntil = now + lockMs;
+}
+function _recordSuccess(ip: string) { _loginStates.delete(ip); }
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, s] of _loginStates.entries())
+    if (s.lockUntil <= now && now - s.lastSeenAt > kLoginStateTtlMs) _loginStates.delete(k);
+}, 10 * 60 * 1000);
+
+// ── PIN Auth System ────────────────────────────────────────────────────
+const kSessionTtlMs = 7 * 24 * 60 * 60 * 1000; // 7天
+const _sessions = new Map<string, { ip: string; createdAt: number }>();
+
+function _hashPin(pin: string): string {
+  return crypto.createHash("sha256").update("pawpals:" + pin).digest("hex");
+}
+function _loadSecurity(): { pinHash: string | null; enabled: boolean } {
+  try {
+    if (existsSync(SECURITY_FILE)) return JSON.parse(readFileSync(SECURITY_FILE, "utf-8"));
+  } catch {}
+  return { pinHash: null, enabled: false };
+}
+function _saveSecurity(data: { pinHash: string | null; enabled: boolean }) {
+  writeFileSync(SECURITY_FILE, JSON.stringify(data, null, 2));
+}
+function _isLocalhost(ip: string): boolean {
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+function _getClientIp(req: any): string {
+  return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
+    || req.socket?.remoteAddress || "unknown";
+}
+function _getSessionToken(req: any): string | null {
+  const cookie = req.headers.cookie || "";
+  const m = cookie.match(/paw_session=([^;]+)/);
+  if (m) return m[1];
+  const auth = req.headers.authorization || "";
+  if (auth.startsWith("Bearer paw_")) return auth.slice(7);
+  return null;
+}
+function _isAuthenticated(req: any): boolean {
+  const ip = _getClientIp(req);
+  if (_isLocalhost(ip)) return true;
+  const sec = _loadSecurity();
+  if (!sec.enabled || !sec.pinHash) return true; // PIN 未启用时放行
+  const token = _getSessionToken(req);
+  if (!token) return false;
+  const session = _sessions.get(token);
+  if (!session) return false;
+  if (Date.now() - session.createdAt > kSessionTtlMs) { _sessions.delete(token); return false; }
+  return true;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, s] of _sessions.entries())
+    if (now - s.createdAt > kSessionTtlMs) _sessions.delete(k);
+}, 60 * 60 * 1000);
+
+// ── Watchdog（gateway 崩溃自动重启）──────────────────────────────────
+const kWdCheckIntervalMs   = 30 * 1000;  // 每30秒检查
+const kWdCrashWindowMs     = 5 * 60 * 1000;  // 5分钟崩溃窗口
+const kWdCrashLoopThreshold = 3;             // 窗口内崩溃3次 = crash loop
+const kWdMaxRepairs         = 3;             // 最多自动修复3次
+
+const _wd = {
+  crashes: [] as number[],
+  repairCount: 0,
+  paused: false,
+  lastRestartAt: 0,
+};
+
+function _trimCrashWindow() {
+  const cutoff = Date.now() - kWdCrashWindowMs;
+  _wd.crashes = _wd.crashes.filter(t => t > cutoff);
+}
+
+async function _isGatewayAlive(gatewayBase: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3000);
+    await fetch(`${gatewayBase}/`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    return true;
+  } catch { return false; }
+}
+
+function _restartGateway(gatewayPort: string, openclawBin: string): Promise<void> {
+  const now = Date.now();
+  if (now - _wd.lastRestartAt < 10_000) return Promise.resolve();
+  _wd.lastRestartAt = now;
+  console.log("[watchdog] 重启 gateway...");
+  return new Promise((resolve) => {
+    exec(
+      `lsof -ti :${gatewayPort} | xargs kill -TERM 2>/dev/null; sleep 1; ${openclawBin} gateway --port ${gatewayPort} --allow-unconfigured &`,
+      (err) => {
+        if (err) console.error("[watchdog] 重启失败:", err.message);
+        else console.log("[watchdog] 重启命令已发出");
+        resolve();
+      }
+    );
+  });
+}
+
+function _runDoctor(openclawBin: string): Promise<string> {
+  return new Promise((resolve) => {
+    console.log("[watchdog] 运行 openclaw doctor --fix ...");
+    exec(`${openclawBin} doctor --fix --yes`, { timeout: 30_000 }, (err, stdout, stderr) => {
+      const out = (stdout + stderr).trim();
+      if (err) console.error("[watchdog] doctor 执行错误:", err.message);
+      else console.log("[watchdog] doctor 完成:", out.slice(0, 200));
+      resolve(out);
+    });
+  });
+}
+
+function startWatchdog(gatewayBase: string, openclawBin: string, notifyIO?: any) {
+  const gatewayPort = (gatewayBase.match(/:(\d+)/) || [])[1] || "18790";
+  setInterval(async () => {
+    if (_wd.paused) return;
+    const alive = await _isGatewayAlive(gatewayBase);
+    if (alive) return;
+
+    const now = Date.now();
+    _wd.crashes.push(now);
+    _trimCrashWindow();
+    console.log(`[watchdog] Gateway 不可达（近${kWdCrashWindowMs / 60000}分钟内崩溃 ${_wd.crashes.length} 次）`);
+    notifyIO?.emit("watchdog_alert", { type: "down", message: "Gateway 无响应，正在尝试恢复..." });
+
+    if (_wd.crashes.length >= kWdCrashLoopThreshold) {
+      if (_wd.repairCount >= kWdMaxRepairs) {
+        if (!_wd.paused) {
+          _wd.paused = true;
+          console.error("[watchdog] 已达最大修复次数，停止自动重启");
+          notifyIO?.emit("watchdog_alert", { type: "crash_loop", message: "⚠️ Gateway 反复崩溃，自动修复失败，请重启 PawPals 应用" });
+        }
+        return;
+      }
+      // 崩溃循环：先跑 doctor --fix 再重启
+      _wd.repairCount += 1;
+      _wd.crashes = [];
+      console.log(`[watchdog] 崩溃循环，第 ${_wd.repairCount} 次：运行 doctor --fix`);
+      notifyIO?.emit("watchdog_alert", { type: "repair", message: `🔧 Gateway 崩溃循环，第 ${_wd.repairCount} 次自动诊断修复中...` });
+      const doctorOut = await _runDoctor(openclawBin);
+      notifyIO?.emit("watchdog_alert", { type: "repair_done", message: `✅ 诊断完成，正在重启 Gateway...`, detail: doctorOut.slice(0, 300) });
+    }
+
+    await _restartGateway(gatewayPort, openclawBin);
+    // 15秒后确认是否恢复
+    setTimeout(async () => {
+      const recovered = await _isGatewayAlive(gatewayBase);
+      if (recovered) {
+        console.log("[watchdog] Gateway 已恢复");
+        notifyIO?.emit("watchdog_alert", { type: "recovered", message: "✅ Gateway 已恢复正常" });
+      }
+    }, 15_000);
+  }, kWdCheckIntervalMs);
+}
 
 const MODEL_PRESETS = [
   {
@@ -362,8 +635,23 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
 }
 
 // ── OpenClaw Gateway 配置 ─────────────────────────────────────────────
+// 从 openclaw.json 读取 gateway token（在 OPENCLAW_CONFIG_FILE 定义之后）
+function readGatewayToken(): string {
+  if (process.env.OPENCLAW_TOKEN) return process.env.OPENCLAW_TOKEN;
+  try {
+    const configFile = path.join(
+      process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || path.join(resolveAppDataDir(), "openclaw"),
+      "openclaw.json"
+    );
+    if (existsSync(configFile)) {
+      const cfg = JSON.parse(readFileSync(configFile, "utf-8")) as any;
+      return cfg?.gateway?.auth?.token || "";
+    }
+  } catch {}
+  return "";
+}
 const GATEWAY_BASE  = process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789";
-const GATEWAY_TOKEN = process.env.OPENCLAW_TOKEN || "57814e0d3db2edabe285be89c2ec0a6a1796c2e66d5a3e23";
+const GATEWAY_TOKEN = readGatewayToken();
 const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "BSAIdlkBgiO1X6FIw6jPmML4UFQRA9i";
 const MAX_CHAIN_DEPTH = 2;
 const CHAT_LOG      = path.join(CAREER_DIR, "chat_log.md");
@@ -1206,6 +1494,193 @@ async function startServer() {
   const PORT = Number(process.env.PAWPALS_PORT || process.env.PORT || 3000);
   app.use(express.json());
 
+  // ── Auth 中间件：非 localhost 访问需要 PIN ─────────────────────────
+  const AUTH_EXEMPT = ["/api/auth/", "/api/health"];
+  app.use((req: any, res: any, next: any) => {
+    const isExempt = AUTH_EXEMPT.some(p => req.path.startsWith(p));
+    if (isExempt || _isAuthenticated(req)) return next();
+    if (req.path.startsWith("/api/")) return res.status(401).json({ error: "未授权，请先输入访问密码", requirePin: true });
+    // 非 API 请求返回简单登录页
+    res.status(401).send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PawPals 访问验证</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fdf3e8;font-family:system-ui}form{background:#fff;padding:2rem;border-radius:1.5rem;box-shadow:0 4px 24px #f4956a22;text-align:center;width:320px}h2{margin:0 0 .5rem;color:#3d2b1f;font-size:1.3rem}p{color:#8c6b52;font-size:.85rem;margin:0 0 1.5rem}input{width:100%;padding:.75rem 1rem;border:2px solid #f4956a44;border-radius:.75rem;font-size:1.2rem;letter-spacing:.3em;text-align:center;outline:none;color:#3d2b1f}.err{color:#d4694a;font-size:.8rem;margin:.5rem 0 0}button{margin-top:1rem;width:100%;padding:.75rem;background:#f4956a;color:#fff;border:none;border-radius:.75rem;font-size:1rem;cursor:pointer;font-weight:600}</style></head><body><form id="f"><h2>🐾 PawPals</h2><p>请输入访问密码以继续</p><input id="pin" type="password" placeholder="••••••" autocomplete="current-password" autofocus><div class="err" id="err"></div><button type="submit">进入</button></form><script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:document.getElementById('pin').value})});const d=await r.json();if(d.ok)location.reload();else document.getElementById('err').textContent=d.error||'密码错误';});</script></body></html>`);
+  });
+
+  // ── Auth 路由 ──────────────────────────────────────────────────────
+  app.get("/api/auth/status", (req: any, res: any) => {
+    const sec = _loadSecurity();
+    const ip = _getClientIp(req);
+    res.json({
+      pinEnabled: sec.enabled && !!sec.pinHash,
+      isLocalhost: _isLocalhost(ip),
+      authenticated: _isAuthenticated(req),
+    });
+  });
+
+  app.post("/api/auth/login", (req: any, res: any) => {
+    const ip = _getClientIp(req);
+    const { blocked, retryAfterSec } = _checkThrottle(ip);
+    if (blocked) return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
+
+    const sec = _loadSecurity();
+    if (!sec.enabled || !sec.pinHash) return res.json({ ok: true, message: "未启用密码保护" });
+
+    const { pin } = req.body;
+    if (!pin || _hashPin(String(pin)) !== sec.pinHash) {
+      _recordFailure(ip);
+      return res.status(401).json({ ok: false, error: "密码错误" });
+    }
+    _recordSuccess(ip);
+    const token = "paw_" + crypto.randomBytes(32).toString("hex");
+    _sessions.set(token, { ip, createdAt: Date.now() });
+    res.setHeader("Set-Cookie", `paw_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${kSessionTtlMs / 1000}`);
+    return res.json({ ok: true, token });
+  });
+
+  app.post("/api/auth/logout", (req: any, res: any) => {
+    const token = _getSessionToken(req);
+    if (token) _sessions.delete(token);
+    res.setHeader("Set-Cookie", "paw_session=; Path=/; HttpOnly; Max-Age=0");
+    res.json({ ok: true });
+  });
+
+  // 设置 PIN（仅 localhost 可调用）
+  app.post("/api/auth/pin/set", (req: any, res: any) => {
+    if (!_isLocalhost(_getClientIp(req))) return res.status(403).json({ error: "只能在本机设置密码" });
+    const { pin, enabled } = req.body;
+    if (enabled === false) {
+      _saveSecurity({ pinHash: null, enabled: false });
+      return res.json({ ok: true, message: "已关闭密码保护" });
+    }
+    if (!pin || String(pin).length < 4) return res.status(400).json({ error: "密码至少4位" });
+    _saveSecurity({ pinHash: _hashPin(String(pin)), enabled: true });
+    return res.json({ ok: true, message: "密码已设置，外部访问需要验证" });
+  });
+
+  // ── 备份 API ────────────────────────────────────────────────────────
+  // 获取备份状态
+  app.get("/api/backup/status", (_req: any, res: any) => {
+    const meta = _loadBackupMeta();
+    const snapshotNames = existsSync(BACKUP_DIR)
+      ? readdirSync(BACKUP_DIR).filter(d => /^\d{4}-\d{2}/.test(d)).sort().reverse().slice(0, 15)
+      : [];
+    // 每个快照的简要信息
+    const snapshots = snapshotNames.map(name => {
+      const snapshotPath = path.join(BACKUP_DIR, name);
+      let sizeKb = 0;
+      try {
+        const stat = statSync(snapshotPath);
+        sizeKb = Math.round(stat.size / 1024);
+      } catch {}
+      // 解析时间戳：YYYY-MM-DD_HH-MM → ISO
+      const isoStr = name.replace(/_(\d{2})-(\d{2})$/, 'T$1:$2').replace(/_/, 'T');
+      const ts = new Date(isoStr).getTime() || 0;
+      return { name, ts, sizeKb };
+    });
+    res.json({
+      backupDir: BACKUP_DIR,
+      lastBackupAt: meta.lastBackupAt,
+      backupCount: meta.backupCount,
+      snapshots,
+    });
+  });
+
+  // 立即备份一次
+  app.post("/api/backup/now", (_req: any, res: any) => {
+    try {
+      ensureDir(BACKUP_DIR);
+      const dest = doLocalBackup(APP_DATA_DIR, OPENCLAW_HOME);
+      res.json({ ok: true, path: dest, message: "备份成功 ✅" });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // 导出全部数据为 ZIP（用户下载）
+  app.get("/api/backup/export", (req: any, res: any) => {
+    const filename = `PawPals备份_${new Date().toISOString().slice(0, 10)}.zip`;
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    archive.on("error", (err: any) => res.status(500).end(err.message));
+    archive.pipe(res);
+
+    // workspace（对话记录、文件等）
+    const workspacePath = path.join(OPENCLAW_HOME, "workspace");
+    if (existsSync(workspacePath)) archive.directory(workspacePath, "workspace");
+
+    // 关键 JSON 文件
+    const files: Record<string, string> = {
+      "setup-state.json": path.join(APP_DATA_DIR, "setup-state.json"),
+      "deployment-state.json": path.join(APP_DATA_DIR, "deployment-state.json"),
+    };
+    for (const [name, fp] of Object.entries(files)) {
+      if (existsSync(fp)) archive.file(fp, { name });
+    }
+
+    archive.finalize();
+  });
+
+  // 从快照恢复
+  app.post("/api/backup/restore/:snapshot", (req: any, res: any) => {
+    const { snapshot } = req.params;
+    if (!/^\d{4}-\d{2}/.test(snapshot)) return res.status(400).json({ error: "无效快照名" });
+    const snapshotPath = path.join(BACKUP_DIR, snapshot);
+    if (!existsSync(snapshotPath)) return res.status(404).json({ error: "快照不存在" });
+    try {
+      // 先备份当前状态（防止覆盖）
+      doLocalBackup(APP_DATA_DIR, OPENCLAW_HOME);
+      // 恢复 JSON 文件
+      for (const f of ["setup-state.json", "deployment-state.json", "security.json"]) {
+        const src = path.join(snapshotPath, f);
+        if (existsSync(src)) copyFileSync(src, path.join(APP_DATA_DIR, f));
+      }
+      // 恢复 workspace
+      const wsSrc = path.join(snapshotPath, "workspace");
+      if (existsSync(wsSrc)) _copyDir(wsSrc, path.join(OPENCLAW_HOME, "workspace"));
+      res.json({ ok: true, message: `已恢复到 ${snapshot}` });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // ── Step 8：Secrets 脱敏 ────────────────────────────────────────────
+  // 扫描 openclaw.json 中的明文 API Key，写入 .env，配置替换为 ${VAR}
+  app.post("/api/secrets/sanitize", (_req: any, res: any) => {
+    try {
+      const config = loadJsonFile<any>(OPENCLAW_CONFIG_FILE, {});
+      const providers = config?.models?.providers || {};
+      const envLines: string[] = [];
+      let count = 0;
+
+      for (const [providerName, providerConf] of Object.entries(providers) as [string, any][]) {
+        const key: string = providerConf?.apiKey || "";
+        // 跳过空值、模板引用、已知占位符
+        if (!key || key.startsWith("${") || key.toUpperCase().endsWith("_API_KEY")) continue;
+
+        const varName = `PAWPALS_KEY_${providerName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+        envLines.push(`${varName}=${key}`);
+        providerConf.apiKey = `\${${varName}}`;
+        count++;
+      }
+
+      if (count === 0) return res.json({ ok: true, sanitized: 0, message: "没有发现明文 API Key，无需脱敏" });
+
+      // 写 .env（追加，避免覆盖现有变量）
+      const envFile = path.join(APP_DATA_DIR, ".env");
+      const existing = existsSync(envFile) ? readFileSync(envFile, "utf-8") : "";
+      const toAppend = envLines.filter(l => !existing.includes(l.split("=")[0]));
+      if (toAppend.length > 0) appendFileSync(envFile, "\n" + toAppend.join("\n") + "\n");
+
+      saveJsonFile(OPENCLAW_CONFIG_FILE, config);
+      res.json({ ok: true, sanitized: count, message: `已脱敏 ${count} 个 API Key，真实值保存在 .env 文件` });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // 启动定时自动备份
+  startAutoBackup(APP_DATA_DIR, OPENCLAW_HOME, io);
+
   // 从文件加载历史消息，没有则用默认欢迎消息
   const defaultMessages = [
     {
@@ -1739,6 +2214,27 @@ print('OK:' + str(len(cookies)))
     });
   });
 
+  // OpenClaw gateway management API proxy
+  app.use("/api/gw", async (req: any, res: any) => {
+    const gwPath = `/api${req.path}`;
+    const query = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    const targetUrl = `${GATEWAY_BASE}${gwPath}${query}`;
+    try {
+      const isWriteMethod = !["GET", "HEAD"].includes(req.method.toUpperCase());
+      const gwRes = await fetch(targetUrl, {
+        method: req.method,
+        headers: { "Content-Type": "application/json" },
+        body: isWriteMethod ? JSON.stringify(req.body) : undefined,
+      });
+      const text = await gwRes.text();
+      let data: unknown;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      res.status(gwRes.status).json(data);
+    } catch {
+      res.status(502).json({ error: "Gateway 暂时无法连接" });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
@@ -1757,6 +2253,8 @@ print('OK:' + str(len(cookies)))
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // 启动 Watchdog，60秒后开始（给 gateway 足够启动时间）
+    setTimeout(() => startWatchdog(GATEWAY_BASE, OPENCLAW_BIN, io), 60_000);
   });
 
   // ── 主动推送：同时推 Web UI + 飞书 ────────────────────────────────

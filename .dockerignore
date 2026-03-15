@@ -1,0 +1,8 @@
+node_modules
+dist
+electron
+.env
+*.log
+__MACOSX
+dist.zip
+.DS_Store

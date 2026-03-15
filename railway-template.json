@@ -1,0 +1,65 @@
+{
+  "name": "PawPals — 萌爪伴学",
+  "description": "AI 学习伙伴应用，内置求职助理、考研陪伴、自习室等功能，基于 OpenClaw 多 Agent 框架",
+  "iconUrl": "https://api.dicebear.com/7.x/adventurer/svg?seed=PawPals",
+  "services": [
+    {
+      "name": "pawpals",
+      "source": {
+        "type": "git",
+        "repo": "https://github.com/salt-byte/pawpals"
+      },
+      "deploy": {
+        "startCommand": "npm run start",
+        "healthcheckPath": "/api/health"
+      },
+      "variables": [
+        {
+          "name": "NODE_ENV",
+          "description": "运行环境",
+          "defaultValue": "production",
+          "required": true
+        },
+        {
+          "name": "PAWPALS_HOME",
+          "description": "数据持久化目录（Railway Volume 挂载路径）",
+          "defaultValue": "/data/pawpals",
+          "required": true
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "OpenAI / 兼容 API Key（如使用 GLM、MiniMax 等也填这里）",
+          "required": false
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Anthropic Claude API Key（可选）",
+          "required": false
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "description": "Google Gemini API Key（可选）",
+          "required": false
+        },
+        {
+          "name": "OPENAI_BASE_URL",
+          "description": "自定义 API Base URL（使用第三方代理时填写，末尾需含 /v1）",
+          "required": false
+        },
+        {
+          "name": "OPENCLAW_BIN",
+          "description": "openclaw 可执行文件路径（默认 openclaw，已内置）",
+          "defaultValue": "openclaw",
+          "required": false
+        }
+      ],
+      "volumes": [
+        {
+          "name": "pawpals-data",
+          "mountPath": "/data/pawpals",
+          "description": "PawPals 数据持久化（聊天记录、配置、备份）"
+        }
+      ]
+    }
+  ]
+}

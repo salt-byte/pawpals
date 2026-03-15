@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 import { io, Socket } from 'socket.io-client';
-import { 
+import {
   Languages,
   LogIn,
   UserPlus,
@@ -8,12 +11,12 @@ import {
   Upload,
   ChevronRight,
   ChevronLeft,
-  MessageCircle, 
-  Users, 
-  LayoutGrid, 
-  Send, 
-  Plus, 
-  Heart, 
+  MessageCircle,
+  Users,
+  LayoutGrid,
+  Send,
+  Plus,
+  Heart,
   PawPrint,
   Search,
   Hash,
@@ -42,7 +45,16 @@ import {
   RefreshCw,
   CornerUpLeft,
   Paperclip,
-  X
+  X,
+  BarChart2,
+  Bot,
+  Clock,
+  Zap,
+  Package,
+  AlertCircle,
+  ToggleLeft,
+  ToggleRight,
+  Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -451,12 +463,14 @@ export default function App() {
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
   const t = (key: keyof typeof TRANSLATIONS['zh']) => TRANSLATIONS[lang][key] || key;
 
-  const [appStatus, setAppStatus] = useState<'auth' | 'onboarding' | 'main'>('auth');
+  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>(
+    localStorage.getItem('pawpals_visited') ? 'auth' : 'landing'
+  );
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
   const [showPetProfileWizard, setShowPetProfileWizard] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'square' | 'pet' | 'study' | 'hole' | 'contacts'>('pet');
+  const [activeTab, setActiveTab] = useState<'chat' | 'dashboard' | 'pet' | 'study' | 'hole' | 'contacts'>('pet');
   const localizedGroups = GROUPS.map(g => ({
     ...g,
     name: lang === 'zh' ? g.name : (g.id === 'job' ? 'Job Seekers' : g.id === 'civil' ? 'Civil Exam' : 'Grad Exam'),
@@ -512,6 +526,27 @@ export default function App() {
   const [setupState, setSetupState] = useState<SetupResponse | null>(null);
   const [deploymentStatus, setDeploymentStatus] = useState<DeploymentStatus | null>(null);
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+
+  // Dashboard data
+  const [dashAgents, setDashAgents] = useState<any[]>([]);
+  const [dashUsage, setDashUsage] = useState<any[]>([]);
+  const [dashCron, setDashCron] = useState<any[]>([]);
+  const [dashSkills, setDashSkills] = useState<any[]>([]);
+  const [dashLoading, setDashLoading] = useState(false);
+  const [dashError, setDashError] = useState<string | null>(null);
+  const [cronNewName, setCronNewName] = useState('');
+  const [cronNewMsg, setCronNewMsg] = useState('');
+  const [cronNewSchedule, setCronNewSchedule] = useState('0 9 * * *');
+  const [cronAdding, setCronAdding] = useState(false);
+  const [showAddCron, setShowAddCron] = useState(false);
+  const [skillSearch, setSkillSearch] = useState('');
+  const [skillSearchResults, setSkillSearchResults] = useState<any[]>([]);
+  const [skillSearching, setSkillSearching] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<any>(null);
+  const [backingUp, setBackingUp] = useState(false);
+  const [restoringSnapshot, setRestoringSnapshot] = useState<string | null>(null);
+  const [sanitizing, setSanitizing] = useState(false);
+  const [sanitizeResult, setSanitizeResult] = useState<string | null>(null);
   const [setupStep, setSetupStep] = useState(1);
   const [selectedCompanyProvider, setSelectedCompanyProvider] = useState(MODEL_COMPANIES[0].provider);
   const [selectedSetupModel, setSelectedSetupModel] = useState(MODEL_COMPANIES[0].models[0].model);
@@ -775,7 +810,7 @@ export default function App() {
       avatar: userProfile.avatar
     });
     setShowStudyCompleteModal(false);
-    setActiveTab('square');
+    setActiveTab('pet');
   };
 
   const toggleTimer = () => {
@@ -807,6 +842,82 @@ export default function App() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, activeChat]);
+
+  // Load dashboard data when switching to dashboard tab
+  useEffect(() => {
+    if (activeTab !== 'dashboard') return;
+    let cancelled = false;
+    const loadDash = async () => {
+      setDashLoading(true);
+      setDashError(null);
+      try {
+        const [agentsRes, usageRes, cronRes, skillsRes, backupRes] = await Promise.allSettled([
+          fetch('/api/gw/agents').then(r => r.json()),
+          fetch('/api/gw/usage/recent-token-history').then(r => r.json()),
+          fetch('/api/gw/cron/jobs').then(r => r.json()),
+          fetch('/api/gw/clawhub/list').then(r => r.json()),
+          fetch('/api/backup/status').then(r => r.json()),
+        ]);
+        if (cancelled) return;
+        if (agentsRes.status === 'fulfilled') setDashAgents(agentsRes.value?.agents || []);
+        if (usageRes.status === 'fulfilled') setDashUsage(Array.isArray(usageRes.value) ? usageRes.value : []);
+        if (cronRes.status === 'fulfilled') setDashCron(Array.isArray(cronRes.value) ? cronRes.value : []);
+        if (skillsRes.status === 'fulfilled') setDashSkills(skillsRes.value?.results || []);
+        if (backupRes.status === 'fulfilled') setBackupStatus(backupRes.value);
+      } catch {
+        if (!cancelled) setDashError('无法获取数据，请确认 AI 服务已启动');
+      } finally {
+        if (!cancelled) setDashLoading(false);
+      }
+    };
+    void loadDash();
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
+  const dashTotalTokens = dashUsage.reduce((sum: number, e: any) => sum + (e.totalTokens || 0), 0);
+  const dashTotalCost = dashUsage.reduce((sum: number, e: any) => sum + (e.costUsd || 0), 0);
+
+  const handleCronToggle = async (id: string, enabled: boolean) => {
+    await fetch('/api/gw/cron/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, enabled }) });
+    setDashCron(prev => prev.map((j: any) => j.id === id ? { ...j, enabled } : j));
+  };
+
+  const handleCronDelete = async (id: string) => {
+    await fetch(`/api/gw/cron/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    setDashCron(prev => prev.filter((j: any) => j.id !== id));
+  };
+
+  const handleCronAdd = async () => {
+    if (!cronNewName.trim() || !cronNewMsg.trim()) return;
+    setCronAdding(true);
+    try {
+      await fetch('/api/gw/cron/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: cronNewName, message: cronNewMsg, schedule: cronNewSchedule, enabled: true }) });
+      const res = await fetch('/api/gw/cron/jobs').then(r => r.json());
+      setDashCron(Array.isArray(res) ? res : []);
+      setCronNewName(''); setCronNewMsg(''); setShowAddCron(false);
+    } finally {
+      setCronAdding(false);
+    }
+  };
+
+  const handleSkillSearch = async () => {
+    if (!skillSearch.trim()) return;
+    setSkillSearching(true);
+    try {
+      const res = await fetch('/api/gw/clawhub/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: skillSearch, limit: 10 }) }).then(r => r.json());
+      setSkillSearchResults(res?.results || []);
+    } finally {
+      setSkillSearching(false);
+    }
+  };
+
+  const handleSkillInstall = async (slug: string) => {
+    await fetch('/api/gw/clawhub/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slug }) });
+    const res = await fetch('/api/gw/clawhub/list').then(r => r.json());
+    setDashSkills(res?.results || []);
+    setSkillSearchResults([]);
+    setSkillSearch('');
+  };
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -840,24 +951,55 @@ export default function App() {
     setAttachedImage(null);
   };
 
-  const handleFileAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
+    e.target.value = '';
+
     if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
       reader.onload = (ev) => {
         setAttachedImage({ name: file.name, dataUrl: String(ev.target?.result || '') });
         setAttachedFile(null);
       };
       reader.readAsDataURL(file);
+    } else if (file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}]\n\n${result.value}` });
+        setAttachedImage(null);
+      } catch (err) {
+        console.error('Word parse error:', err);
+        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}，解析失败，请粘贴文字内容]` });
+        setAttachedImage(null);
+      }
+    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const pages: string[] = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          pages.push(content.items.map((item: any) => item.str).join(' '));
+        }
+        const text = pages.join('\n\n');
+        setAttachedFile({ name: file.name, content: `[PDF: ${file.name}]\n\n${text}` });
+        setAttachedImage(null);
+      } catch (err) {
+        console.error('PDF parse error:', err);
+        setAttachedFile({ name: file.name, content: `[PDF 文件: ${file.name}，解析失败，请粘贴文字内容]` });
+        setAttachedImage(null);
+      }
     } else {
+      const reader = new FileReader();
       reader.onload = (ev) => {
         setAttachedFile({ name: file.name, content: String(ev.target?.result || '') });
         setAttachedImage(null);
       };
       reader.readAsText(file);
     }
-    e.target.value = '';
   };
 
   const handleCreatePost = () => {
@@ -1197,6 +1339,98 @@ export default function App() {
     </motion.div>
   );
 
+  if (appStatus === 'landing') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#FFF8F0] via-[#FFF3E8] to-[#FFE8D6] flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        {/* 背景装饰 */}
+        <div className="absolute top-0 left-0 w-full h-full pointer-events-none select-none">
+          <div className="absolute top-12 left-12 text-pet-orange/8 rotate-12"><PawPrint size={140} /></div>
+          <div className="absolute bottom-16 right-12 text-pet-orange/8 -rotate-12"><PawPrint size={180} /></div>
+          <div className="absolute top-1/3 right-1/4 text-pet-orange/5"><PawPrint size={90} /></div>
+        </div>
+
+        {/* Logo + 标题 */}
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex flex-col items-center mb-10 relative z-10"
+        >
+          <div className="w-20 h-20 bg-pet-orange rounded-3xl flex items-center justify-center text-white pet-shadow mb-5">
+            <PawPrint size={40} />
+          </div>
+          <h1 className="text-4xl font-display font-bold text-pet-brown tracking-tight">萌爪伴学</h1>
+          <p className="text-pet-brown/50 mt-2 text-sm">AI 学习伙伴 · 求职助理 · 自习室</p>
+        </motion.div>
+
+        {/* 两条路卡片 */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="w-full max-w-sm relative z-10 space-y-4"
+        >
+          <p className="text-center text-xs text-pet-brown/40 font-semibold uppercase tracking-widest mb-5">选择你的使用方式</p>
+
+          {/* 本地版 */}
+          <button
+            onClick={() => {
+              localStorage.setItem('pawpals_visited', '1');
+              setAppStatus('auth');
+            }}
+            className="w-full bg-white rounded-3xl p-6 pet-shadow flex items-center gap-5 hover:scale-[1.02] transition-transform text-left group"
+          >
+            <div className="w-14 h-14 bg-pet-orange/12 rounded-2xl flex items-center justify-center shrink-0 group-hover:bg-pet-orange/20 transition-colors">
+              <span className="text-2xl">💻</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <p className="font-bold text-pet-brown">本地版</p>
+                <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-semibold">推荐</span>
+              </div>
+              <p className="text-xs text-pet-brown/50 leading-relaxed">下载 App，数据存在本机，完全免费，离线可用</p>
+            </div>
+            <ChevronRight size={18} className="text-pet-brown/30 group-hover:text-pet-orange transition-colors shrink-0" />
+          </button>
+
+          {/* 云版 */}
+          <a
+            href="https://railway.app/new/template?template=https://github.com/salt-byte/pawpals"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full bg-gradient-to-r from-violet-500 to-indigo-600 rounded-3xl p-6 pet-shadow flex items-center gap-5 hover:scale-[1.02] transition-transform text-left group no-underline block"
+          >
+            <div className="w-14 h-14 bg-white/15 rounded-2xl flex items-center justify-center shrink-0 group-hover:bg-white/25 transition-colors">
+              <span className="text-2xl">☁️</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <p className="font-bold text-white">云版</p>
+                <span className="text-[10px] bg-white/20 text-white px-2 py-0.5 rounded-full font-semibold flex items-center gap-1">
+                  <Zap size={9} /> Railway
+                </span>
+              </div>
+              <p className="text-xs text-white/65 leading-relaxed">一键部署到云端，随时随地用，无需下载，$5/月起</p>
+            </div>
+            <ChevronRight size={18} className="text-white/40 group-hover:text-white transition-colors shrink-0" />
+          </a>
+
+          <p className="text-center text-[11px] text-pet-brown/30 pt-2">
+            已有账号？
+            <button
+              onClick={() => {
+                localStorage.setItem('pawpals_visited', '1');
+                setAppStatus('auth');
+              }}
+              className="text-pet-orange underline ml-1"
+            >
+              直接登录
+            </button>
+          </p>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (appStatus === 'auth') {
     return (
       <div className="min-h-screen bg-pet-cream flex items-center justify-center p-4 relative overflow-hidden">
@@ -1277,13 +1511,14 @@ export default function App() {
               <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-pet-brown/40">{t('or')}</span></div>
             </div>
 
-            <button 
+            <button
               onClick={() => setAppStatus('main')}
               className="w-full bg-white border-2 border-pet-cream text-pet-brown/60 py-4 rounded-2xl font-bold hover:bg-pet-cream transition-colors"
             >
               {t('guest')}
             </button>
           </div>
+
         </motion.div>
       </div>
     );
@@ -1359,11 +1594,11 @@ export default function App() {
             icon={<MessageCircle size={24} />}
             label={t('chat')}
           />
-          <NavButton 
-            active={activeTab === 'square'} 
-            onClick={() => setActiveTab('square')}
-            icon={<LayoutGrid size={24} />}
-            label={t('square')}
+          <NavButton
+            active={activeTab === 'dashboard'}
+            onClick={() => setActiveTab('dashboard')}
+            icon={<BarChart2 size={24} />}
+            label="数据"
           />
           <NavButton 
             active={activeTab === 'pet'} 
@@ -1800,7 +2035,7 @@ export default function App() {
                       className="bg-white rounded-2xl p-2 flex items-center gap-2 pet-shadow"
                     >
                       <input type="file" ref={fileInputRef} onChange={handleFileAttach} className="hidden"
-                        accept=".txt,.md,.csv,.json,.ts,.js,.py,.html,.css,.xml,.yaml,.yml,.log,.env,.sh,image/*" />
+                        accept=".pdf,.docx,.txt,.md,.csv,.json,.ts,.js,.py,.html,.css,.xml,.yaml,.yml,.log,.env,.sh,image/*" />
                       <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-pet-brown/40 hover:text-pet-orange transition-colors">
                         <Paperclip size={20} />
                       </button>
@@ -2114,99 +2349,324 @@ export default function App() {
               </div>
             </div>
           </section>
-        ) : activeTab === 'square' ? (
-          /* Square / Plaza Section */
-          <section className="flex-1 flex flex-col overflow-hidden">
+        ) : activeTab === 'dashboard' ? (
+          /* Dashboard Section */
+          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
             <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
-              <div className="flex flex-col md:flex-row md:justify-between md:items-end gap-4">
-                <div>
-                  <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-2">
-                    {lang === 'zh' ? '搭子广场' : 'Buddy Plaza'}
-                  </h1>
-                  <p className="text-sm text-pet-brown/60">
-                    {lang === 'zh' ? '寻找志同道合的小伙伴，一起成长不孤单 ✨' : 'Find like-minded buddies and grow together ✨'}
-                  </p>
+              <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">AI 控制台</h1>
+              <p className="text-sm text-pet-brown/60">查看你的 AI 团队状态、用量统计和各项配置</p>
+            </header>
+
+            {/* Dashboard Body */}
+            <div className="p-6 md:p-8 space-y-6">
+              {dashLoading && (
+                <div className="flex items-center justify-center gap-3 py-12 text-pet-brown/50">
+                  <div className="w-5 h-5 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                  <span className="text-sm">加载中…</span>
                 </div>
-                <div className="flex items-center gap-4">
-                  <button 
-                    onClick={() => setShowPostModal(true)}
-                    className="bg-pet-orange text-white px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 pet-shadow hover:scale-105 transition-transform"
+              )}
+              {dashError && (
+                <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-600">
+                  <AlertCircle size={18} />
+                  {dashError}
+                </div>
+              )}
+
+              {/* Stats Row */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[
+                  { label: 'AI 成员', value: dashAgents.length, icon: <Bot size={18} />, color: 'bg-pet-orange/10 text-pet-orange' },
+                  { label: '定时提醒', value: dashCron.length, icon: <Clock size={18} />, color: 'bg-purple-100 text-purple-600' },
+                  { label: '已用 Token', value: dashTotalTokens > 0 ? (dashTotalTokens >= 1000 ? `${(dashTotalTokens/1000).toFixed(1)}k` : dashTotalTokens.toString()) : '—', icon: <Zap size={18} />, color: 'bg-amber-100 text-amber-600' },
+                  { label: '累计消费', value: dashTotalCost > 0 ? `$${dashTotalCost.toFixed(3)}` : '—', icon: <BarChart2 size={18} />, color: 'bg-emerald-100 text-emerald-600' },
+                ].map(stat => (
+                  <div key={stat.label} className="healing-card p-5 flex flex-col gap-3">
+                    <div className={cn('w-9 h-9 rounded-xl flex items-center justify-center', stat.color)}>{stat.icon}</div>
+                    <div>
+                      <div className="text-2xl font-display font-bold text-pet-brown">{stat.value}</div>
+                      <div className="text-xs text-pet-brown/50 mt-0.5">{stat.label}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* AI 团队 */}
+                <div className="healing-card p-6 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <Bot size={18} className="text-pet-orange" />
+                    <h2 className="font-bold text-pet-brown">AI 成员列表</h2>
+                  </div>
+                  {dashAgents.length === 0 && !dashLoading ? (
+                    <p className="text-sm text-pet-brown/40">暂无 Agent 数据（AI 服务可能未启动）</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {dashAgents.map((agent: any) => (
+                        <div key={agent.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
+                          <div className="w-8 h-8 bg-pet-orange/20 rounded-lg flex items-center justify-center text-pet-orange font-bold text-sm">
+                            {agent.name?.slice(0, 1) || 'A'}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-pet-brown truncate">{agent.name || agent.id}</div>
+                            <div className="text-[11px] text-pet-brown/40 truncate">{agent.modelDisplay || agent.id}</div>
+                          </div>
+                          {agent.isDefault && (
+                            <span className="text-[10px] bg-pet-orange text-white px-2 py-0.5 rounded-full font-bold shrink-0">默认</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 定时提醒 */}
+                <div className="healing-card p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Clock size={18} className="text-purple-500" />
+                      <h2 className="font-bold text-pet-brown">定时提醒</h2>
+                    </div>
+                    <button
+                      onClick={() => setShowAddCron(v => !v)}
+                      className="text-xs font-bold text-pet-orange flex items-center gap-1 hover:underline"
+                    >
+                      <Plus size={14} /> 新增
+                    </button>
+                  </div>
+                  {showAddCron && (
+                    <div className="bg-pet-cream/60 rounded-xl p-4 space-y-3">
+                      <input value={cronNewName} onChange={e => setCronNewName(e.target.value)} placeholder="提醒名称" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                      <input value={cronNewMsg} onChange={e => setCronNewMsg(e.target.value)} placeholder="提醒内容（发给 AI）" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                      <input value={cronNewSchedule} onChange={e => setCronNewSchedule(e.target.value)} placeholder="Cron 表达式，如 0 9 * * *" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                      <button onClick={handleCronAdd} disabled={cronAdding} className="w-full bg-pet-orange text-white rounded-xl py-2 text-sm font-bold disabled:opacity-50">
+                        {cronAdding ? '保存中…' : '保存提醒'}
+                      </button>
+                    </div>
+                  )}
+                  {dashCron.length === 0 && !dashLoading ? (
+                    <p className="text-sm text-pet-brown/40">暂无定时提醒</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {dashCron.map((job: any) => (
+                        <div key={job.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-pet-brown truncate">{job.name}</div>
+                            <div className="text-[11px] text-pet-brown/40 truncate">{typeof job.schedule === 'string' ? job.schedule : JSON.stringify(job.schedule)}</div>
+                          </div>
+                          <button onClick={() => handleCronToggle(job.id, !job.enabled)} className="text-pet-brown/40 hover:text-pet-orange transition-colors">
+                            {job.enabled ? <ToggleRight size={22} className="text-pet-orange" /> : <ToggleLeft size={22} />}
+                          </button>
+                          <button onClick={() => handleCronDelete(job.id)} className="text-pet-brown/30 hover:text-red-400 transition-colors">
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 用量记录 */}
+              {dashUsage.length > 0 && (
+                <div className="healing-card p-6 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <Zap size={18} className="text-amber-500" />
+                    <h2 className="font-bold text-pet-brown">近期用量记录</h2>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-pet-pink/20">
+                    <table className="w-full text-xs">
+                      <thead className="bg-pet-cream/60">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">时间</th>
+                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">Agent</th>
+                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">模型</th>
+                          <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">Token</th>
+                          <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">费用</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dashUsage.slice(0, 10).map((entry: any, i: number) => (
+                          <tr key={i} className="border-t border-pet-pink/10 hover:bg-pet-cream/30 transition-colors">
+                            <td className="px-4 py-2 text-pet-brown/60 whitespace-nowrap">{entry.timestamp ? format(new Date(entry.timestamp), 'MM-dd HH:mm') : '—'}</td>
+                            <td className="px-4 py-2 text-pet-brown font-medium">{entry.agentId || '—'}</td>
+                            <td className="px-4 py-2 text-pet-brown/60 truncate max-w-[120px]">{entry.model || '—'}</td>
+                            <td className="px-4 py-2 text-right text-pet-brown font-mono">{entry.totalTokens?.toLocaleString() || '—'}</td>
+                            <td className="px-4 py-2 text-right text-emerald-600 font-mono">{entry.costUsd != null ? `$${entry.costUsd.toFixed(4)}` : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* 数据备份 */}
+              <div className="healing-card p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Download size={18} className="text-pet-orange" />
+                    <h2 className="font-bold text-pet-brown">数据备份</h2>
+                  </div>
+                  <span className="text-xs text-pet-brown/50">每小时自动备份到本地</span>
+                </div>
+                {/* 备份状态 + 立即备份 */}
+                <div className="flex items-center justify-between bg-pet-orange/5 rounded-xl p-3">
+                  <div>
+                    <p className="text-sm text-pet-brown font-medium">
+                      {backupStatus?.lastBackupAt
+                        ? `上次备份：${new Date(backupStatus.lastBackupAt).toLocaleString('zh-CN')}`
+                        : '尚未备份'}
+                    </p>
+                    <p className="text-xs text-pet-brown/50 mt-0.5">
+                      共 {backupStatus?.snapshots?.length || 0} 份快照 · 保存在「文稿/PawPals备份」
+                    </p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setBackingUp(true);
+                      try {
+                        const r = await fetch('/api/backup/now', { method: 'POST' });
+                        const d = await r.json();
+                        if (d.ok) {
+                          const r2 = await fetch('/api/backup/status');
+                          setBackupStatus(await r2.json());
+                        }
+                      } finally { setBackingUp(false); }
+                    }}
+                    disabled={backingUp}
+                    className="text-xs bg-pet-orange text-white px-3 py-1.5 rounded-lg hover:bg-pet-orange/90 disabled:opacity-50 shrink-0"
                   >
-                    <Plus size={20} />
-                    {lang === 'zh' ? '发布动态' : 'Post'}
+                    {backingUp ? '备份中...' : '立即备份'}
+                  </button>
+                </div>
+                {/* 版本历史列表 */}
+                {backupStatus?.snapshots?.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs font-semibold text-pet-brown/60 uppercase tracking-wide">版本历史</p>
+                    <div className="max-h-52 overflow-y-auto rounded-xl border border-pet-pink/20 divide-y divide-pet-pink/10">
+                      {backupStatus.snapshots.map((snap: any, idx: number) => {
+                        const label = snap.name.replace('T', ' ').replace(/-(\d{2})-(\d{2})$/, ' $1:$2');
+                        return (
+                          <div key={snap.name} className="flex items-center gap-3 px-3 py-2 hover:bg-pet-orange/5 transition-colors">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-pet-brown truncate">
+                                {idx === 0 ? '🟢 ' : ''}{label}
+                              </p>
+                              {snap.sizeKb > 0 && (
+                                <p className="text-[10px] text-pet-brown/40">{snap.sizeKb} KB</p>
+                              )}
+                            </div>
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`确认恢复到「${label}」？当前状态会先自动备份。`)) return;
+                                setRestoringSnapshot(snap.name);
+                                try {
+                                  const r = await fetch(`/api/backup/restore/${encodeURIComponent(snap.name)}`, { method: 'POST' });
+                                  const d = await r.json();
+                                  alert(d.message || (d.error ? `失败：${d.error}` : '恢复完成'));
+                                  if (d.ok) {
+                                    const r2 = await fetch('/api/backup/status');
+                                    setBackupStatus(await r2.json());
+                                  }
+                                } finally { setRestoringSnapshot(null); }
+                              }}
+                              disabled={restoringSnapshot === snap.name}
+                              className="text-[10px] border border-pet-orange/40 text-pet-orange px-2 py-0.5 rounded-lg hover:bg-pet-orange/10 disabled:opacity-40 shrink-0"
+                            >
+                              {restoringSnapshot === snap.name ? '恢复中...' : '恢复'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <a
+                  href="/api/backup/export"
+                  download
+                  className="flex items-center justify-center gap-2 w-full py-2.5 border-2 border-dashed border-pet-orange/30 rounded-xl text-pet-brown/60 hover:border-pet-orange hover:text-pet-orange transition-colors text-sm"
+                >
+                  <Download size={15} />
+                  导出全部数据（ZIP）
+                </a>
+                {/* Step 8：Secrets 脱敏 */}
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-amber-500 text-sm">🔐</span>
+                    <p className="text-xs font-semibold text-amber-700">API Key 安全脱敏</p>
+                  </div>
+                  <p className="text-[11px] text-amber-600">扫描配置文件中的明文 API Key，自动替换为环境变量引用，提升安全性。</p>
+                  {sanitizeResult && (
+                    <p className="text-[11px] text-green-700 bg-green-50 rounded px-2 py-1">{sanitizeResult}</p>
+                  )}
+                  <button
+                    onClick={async () => {
+                      setSanitizing(true);
+                      setSanitizeResult(null);
+                      try {
+                        const r = await fetch('/api/secrets/sanitize', { method: 'POST' });
+                        const d = await r.json();
+                        setSanitizeResult(d.message || (d.error ? `失败：${d.error}` : '完成'));
+                      } finally { setSanitizing(false); }
+                    }}
+                    disabled={sanitizing}
+                    className="text-xs bg-amber-500 text-white px-3 py-1.5 rounded-lg hover:bg-amber-600 disabled:opacity-50"
+                  >
+                    {sanitizing ? '扫描中...' : '一键脱敏'}
                   </button>
                 </div>
               </div>
 
-              <div className="flex gap-2 md:gap-3 mt-6 md:mt-8 overflow-x-auto pb-2 no-scrollbar">
-                {['全部', '求职', '考公', '考研', '生活'].map(tag => {
-                  const tagMap: any = {
-                    '全部': 'All',
-                    '求职': 'Jobs',
-                    '考公': 'Civil',
-                    '考研': 'Grad',
-                    '生活': 'Life'
-                  };
-                  return (
-                    <button 
-                      key={tag}
-                      className="px-4 py-2 rounded-full bg-white text-xs md:text-sm text-pet-brown/60 hover:bg-pet-orange hover:text-white transition-all cursor-pointer whitespace-nowrap"
-                    >
-                      {lang === 'zh' ? tag : tagMap[tag]}
-                    </button>
-                  );
-                })}
-              </div>
-            </header>
-
-            <div className="flex-1 overflow-y-auto p-6 md:p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-24 md:pb-8">
-              <AnimatePresence mode="popLayout">
-                {posts.map((post) => (
-                  <motion.div 
-                    layout
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    key={post.id}
-                    className="healing-card p-6 flex flex-col gap-4 hover:translate-y-[-4px] transition-transform"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div className="flex items-center gap-3">
-                        <div className="relative">
-                          <img src={post.avatar} alt={post.author} className="w-10 h-10 rounded-xl bg-white p-1" referrerPolicy="no-referrer" />
-                          {post.isChiefBot && (
-                            <div className="absolute -top-2 -right-2 bg-pet-orange text-white p-1 rounded-full border-2 border-white">
-                              <Trophy size={10} />
-                            </div>
-                          )}
+              {/* 技能商店 */}
+              <div className="healing-card p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Package size={18} className="text-blue-500" />
+                  <h2 className="font-bold text-pet-brown">技能商店</h2>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    value={skillSearch}
+                    onChange={e => setSkillSearch(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleSkillSearch()}
+                    placeholder="搜索技能，按回车查询…"
+                    className="flex-1 bg-pet-cream/60 rounded-xl border border-pet-pink/30 px-4 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none"
+                  />
+                  <button onClick={handleSkillSearch} disabled={skillSearching} className="bg-pet-orange text-white rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50 hover:scale-105 transition-transform">
+                    {skillSearching ? '…' : '搜索'}
+                  </button>
+                </div>
+                {skillSearchResults.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="text-xs text-pet-brown/40 font-bold uppercase tracking-wide">搜索结果</div>
+                    {skillSearchResults.map((s: any) => (
+                      <div key={s.slug} className="flex items-center gap-3 p-3 bg-blue-50 rounded-xl">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-bold text-pet-brown">{s.name || s.slug}</div>
+                          <div className="text-[11px] text-pet-brown/50 truncate">{s.description}</div>
                         </div>
-                        <div>
-                          <div className="flex items-center gap-1">
-                            <h3 className="font-bold text-pet-brown text-sm">{post.author}</h3>
-                            {post.isBot && <span className="bg-pet-brown/10 text-[8px] px-1 rounded text-pet-brown/60 uppercase font-bold">Bot</span>}
-                          </div>
-                          <span className="text-[10px] text-pet-brown/40">{format(new Date(post.timestamp), 'yyyy-MM-dd HH:mm')}</span>
-                        </div>
+                        <button onClick={() => handleSkillInstall(s.slug)} className="text-xs bg-pet-orange text-white px-3 py-1.5 rounded-xl font-bold hover:scale-105 transition-transform shrink-0">
+                          安装
+                        </button>
                       </div>
-                      <span className="px-2 py-1 rounded-lg bg-pet-pink/30 text-[10px] font-bold text-pet-brown/60">
-                        #{post.tag}
-                      </span>
+                    ))}
+                  </div>
+                )}
+                {dashSkills.length === 0 && !dashLoading ? (
+                  <p className="text-sm text-pet-brown/40">暂无已安装技能</p>
+                ) : (
+                  <div>
+                    <div className="text-xs text-pet-brown/40 font-bold uppercase tracking-wide mb-2">已安装</div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                      {dashSkills.map((s: any) => (
+                        <div key={s.slug || s.id} className="flex items-center gap-2 p-3 bg-pet-cream/60 rounded-xl">
+                          <Package size={14} className="text-blue-400 shrink-0" />
+                          <span className="text-xs font-medium text-pet-brown truncate">{s.name || s.slug}</span>
+                        </div>
+                      ))}
                     </div>
-                    <p className="text-pet-brown/80 text-sm leading-relaxed flex-1">
-                      {post.content}
-                    </p>
-                    <div className="flex justify-between items-center pt-4 border-t border-pet-pink/10">
-                      <button className="flex items-center gap-1.5 text-pet-brown/40 hover:text-red-400 transition-colors text-xs">
-                        <Heart size={16} />
-                        {post.likes}
-                      </button>
-                      <button className="text-pet-orange text-xs font-bold hover:underline">
-                        私聊搭子
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
+                  </div>
+                )}
+              </div>
             </div>
           </section>
         ) : (
@@ -2288,11 +2748,11 @@ export default function App() {
           icon={<MessageCircle size={20} />}
           label={t('chat')}
         />
-        <NavButton 
-          active={activeTab === 'square'} 
-          onClick={() => { setActiveTab('square'); setShowChatDetail(false); }}
-          icon={<LayoutGrid size={20} />}
-          label={t('square')}
+        <NavButton
+          active={activeTab === 'dashboard'}
+          onClick={() => { setActiveTab('dashboard'); setShowChatDetail(false); }}
+          icon={<BarChart2 size={20} />}
+          label="数据"
         />
         <NavButton 
           active={activeTab === 'pet'} 
