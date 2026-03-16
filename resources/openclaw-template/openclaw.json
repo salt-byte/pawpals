@@ -67,7 +67,8 @@
             "input": [
               "text"
             ],
-            "name": "gemini-3-flash-preview"
+            "name": "gemini-3-flash-preview",
+            "reasoning": false
           }
         ]
       },
@@ -81,14 +82,16 @@
             "input": [
               "text"
             ],
-            "name": "gpt-5-mini"
+            "name": "gpt-5-mini",
+            "reasoning": false
           },
           {
             "id": "gpt-5",
             "input": [
               "text"
             ],
-            "name": "gpt-5"
+            "name": "gpt-5",
+            "reasoning": false
           }
         ]
       },
@@ -102,7 +105,8 @@
             "input": [
               "text"
             ],
-            "name": "MiniMax-M2.5"
+            "name": "MiniMax-M2.5",
+            "reasoning": false
           }
         ]
       },
@@ -116,7 +120,8 @@
             "input": [
               "text"
             ],
-            "name": "doubao-seed-1-6-251015"
+            "name": "doubao-seed-1-6-251015",
+            "reasoning": false
           }
         ]
       },
@@ -130,7 +135,8 @@
             "input": [
               "text"
             ],
-            "name": "claude-sonnet-4-6"
+            "name": "claude-sonnet-4-6",
+            "reasoning": false
           }
         ]
       },
