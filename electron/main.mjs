@@ -89,6 +89,13 @@ async function startDesktopRuntime() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadURL(runtime.appUrl);
     }
+    // Auto-restart if server dies unexpectedly
+    startedRuntime.server?.on("exit", (code) => {
+      if (code !== 0 && !app.isQuitting) {
+        runtime = null;
+        setTimeout(() => startDesktopRuntime().catch(() => {}), 2000);
+      }
+    });
     return startedRuntime;
   }).finally(() => {
     runtimeStartPromise = null;
@@ -119,5 +126,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  app.isQuitting = true;
   runtime?.stop();
 });

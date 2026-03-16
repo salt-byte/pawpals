@@ -2030,7 +2030,7 @@ async function startServer() {
 
       // 重启 gateway，让它读取新的模型配置（与 switch-model 保持一致）
       const gatewayPort = (GATEWAY_BASE.match(/:(\d+)/) || [])[1] || "18790";
-      exec(`lsof -ti :${gatewayPort} | xargs kill -TERM 2>/dev/null || true`, () => {});
+      exec(`pgrep -x openclaw-gateway | xargs kill -TERM 2>/dev/null || lsof -ti :${gatewayPort} | head -1 | xargs kill -TERM 2>/dev/null || true`, () => {});
 
       return res.json({ ok: true, setup: buildSetupState() });
     } catch (error: any) {
@@ -2056,7 +2056,7 @@ async function startServer() {
 
       // 重启 gateway，让它读新的模型配置
       const gatewayPort = (GATEWAY_BASE.match(/:(\d+)/) || [])[1] || "18790";
-      exec(`lsof -ti :${gatewayPort} | xargs kill -TERM 2>/dev/null || true`, () => {});
+      exec(`pgrep -x openclaw-gateway | xargs kill -TERM 2>/dev/null || lsof -ti :${gatewayPort} | head -1 | xargs kill -TERM 2>/dev/null || true`, () => {});
 
       return res.json({ ok: true, setup: buildSetupState() });
     } catch (error: any) {
