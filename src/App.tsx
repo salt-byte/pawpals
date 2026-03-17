@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
+// Disable worker — Electron's file:// protocol can't load Web Workers from asset URLs
+pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 import { io, Socket } from 'socket.io-client';
 import {
   Languages,
@@ -55,6 +56,10 @@ import {
   ToggleLeft,
   ToggleRight,
   Trash2,
+  FolderOpen,
+  FolderPlus,
+  FileText,
+  Globe,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -128,14 +133,38 @@ function ToolActivityCard({ activity }: { activity: ToolActivityEvent }) {
 
 const JOB_AGENTS = [
   { name: 'all',    emoji: '📣', isAll: true },
-  { name: '职业规划师', emoji: '🎯' },
-  { name: '岗位猎手',   emoji: '🔍' },
-  { name: 'JD分析师',   emoji: '📋' },
-  { name: '简历专家',   emoji: '📝' },
-  { name: '投递管家',   emoji: '📊' },
-  { name: '人脉顾问',   emoji: '🤝' },
-  { name: '面试教练',   emoji: '🎤' },
+  { name: '职业规划师', emoji: '🎯', role: '背景分析、目标岗位、求职 Roadmap' },
+  { name: '岗位猎手',   emoji: '🔍', role: '搜索岗位、每日扫描多平台' },
+  { name: 'JD分析师',   emoji: '📋', role: '拆解岗位要求、分析匹配度' },
+  { name: '简历专家',   emoji: '📝', role: '优化简历、撰写 Cover Letter' },
+  { name: '投递管家',   emoji: '📊', role: '记录投递进度、设置 follow-up' },
+  { name: '人脉顾问',   emoji: '🤝', role: '找联系人、起草 cold email' },
+  { name: '面试教练',   emoji: '🎤', role: '模拟面试、复盘提升' },
 ];
+
+const CIVIL_AGENTS = [
+  { name: 'all', emoji: '📣', isAll: true },
+  { name: '备考规划师', emoji: '🎯', role: '制定备考计划和时间表' },
+  { name: '行测刷题师', emoji: '📝', role: '行政能力测试专项训练' },
+  { name: '申论导师',   emoji: '✍️', role: '申论写作批改指导' },
+  { name: '时政播报员', emoji: '📰', role: '时事政策分析解读' },
+  { name: '面试教练',   emoji: '🎤', role: '结构化面试模拟训练' },
+];
+
+const GRAD_AGENTS = [
+  { name: 'all', emoji: '📣', isAll: true },
+  { name: '备考规划师', emoji: '🎯', role: '制定考研备考计划' },
+  { name: '英语导师',   emoji: '🌍', role: '英语一/二阅读写作' },
+  { name: '政治导师',   emoji: '🏛️', role: '马原毛概习概' },
+  { name: '数学导师',   emoji: '📐', role: '数一/数二/数三' },
+  { name: '专业课导师', emoji: '📚', role: '专业课答疑辅导' },
+];
+
+const GROUP_AGENTS: Record<string, typeof JOB_AGENTS> = {
+  job: JOB_AGENTS,
+  civil: CIVIL_AGENTS,
+  grad: GRAD_AGENTS,
+};
 
 const GROUPS: ChatGroup[] = [
   { id: 'job', name: '求职汪成长营', icon: '🐕', description: '简历修改、面经分享、互相打气', type: 'group' },
@@ -468,7 +497,7 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
   const [showPetProfileWizard, setShowPetProfileWizard] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'dashboard' | 'pet' | 'study' | 'hole' | 'contacts'>('pet');
+  const [activeTab, setActiveTab] = useState<'chat' | 'dashboard' | 'pet' | 'study' | 'hole' | 'contacts' | 'manage' | 'square'>('pet');
   const localizedGroups = GROUPS.map(g => ({
     ...g,
     name: lang === 'zh' ? g.name : (g.id === 'job' ? 'Job Seekers' : g.id === 'civil' ? 'Civil Exam' : 'Grad Exam'),
@@ -483,6 +512,7 @@ export default function App() {
 
   const [activeChat, setActiveChat] = useState<ChatGroup | null>(localizedGroups[0]);
   const [showChatDetail, setShowChatDetail] = useState(false);
+  const [showMemberPanel, setShowMemberPanel] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [treeHolePosts, setTreeHolePosts] = useState<TreeHolePost[]>([]);
@@ -491,6 +521,7 @@ export default function App() {
   const [replyTo, setReplyTo] = useState<{ id: string; sender: string; content: string } | null>(null);
   const [attachedFile, setAttachedFile] = useState<{ name: string; content: string } | null>(null);
   const [attachedImage, setAttachedImage] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [mentionPicker, setMentionPicker] = useState<{ visible: boolean; query: string; idx: number }>({ visible: false, query: '', idx: 0 });
   const [bossLoginStatus, setBossLoginStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
@@ -542,6 +573,15 @@ export default function App() {
   const [skillSearching, setSkillSearching] = useState(false);
   const [backupStatus, setBackupStatus] = useState<any>(null);
   const [backingUp, setBackingUp] = useState(false);
+
+  // Manage panel state
+  const [managePaths, setManagePaths] = useState<string[]>([]);
+  const [manageNewPath, setManageNewPath] = useState('');
+  const [manageFiles, setManageFiles] = useState<{name:string;path:string;size:number;mtime:string}[]>([]);
+  const [manageFilesLoading, setManageFilesLoading] = useState(false);
+  const [managePathsLoading, setManagePathsLoading] = useState(false);
+  const [manageUploadStatus, setManageUploadStatus] = useState<string | null>(null);
+  const manageUploadRef = useRef<HTMLInputElement>(null);
   const [restoringSnapshot, setRestoringSnapshot] = useState<string | null>(null);
   const [sanitizing, setSanitizing] = useState(false);
   const [sanitizeResult, setSanitizeResult] = useState<string | null>(null);
@@ -877,6 +917,61 @@ export default function App() {
   const dashTotalTokens = dashUsage.reduce((sum: number, e: any) => sum + (e.totalTokens || 0), 0);
   const dashTotalCost = dashUsage.reduce((sum: number, e: any) => sum + (e.costUsd || 0), 0);
 
+  // Load manage panel data
+  useEffect(() => {
+    if (activeTab !== 'manage') return;
+    loadManagePaths();
+    loadManageFiles();
+  }, [activeTab]);
+
+  const loadManagePaths = async () => {
+    setManagePathsLoading(true);
+    try {
+      const r = await fetch('/api/manage/paths').then(r => r.json());
+      setManagePaths(r.paths || []);
+    } catch {}
+    setManagePathsLoading(false);
+  };
+
+  const loadManageFiles = async () => {
+    setManageFilesLoading(true);
+    try {
+      const r = await fetch('/api/manage/files').then(r => r.json());
+      setManageFiles(r.files || []);
+    } catch {}
+    setManageFilesLoading(false);
+  };
+
+  const handleAddManagePath = async () => {
+    const p = manageNewPath.trim();
+    if (!p) return;
+    await fetch('/api/manage/paths', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p }) });
+    setManageNewPath('');
+    loadManagePaths();
+  };
+
+  const handleRemoveManagePath = async (p: string) => {
+    await fetch('/api/manage/paths', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p }) });
+    loadManagePaths();
+  };
+
+  const handleManageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setManageUploadStatus('上传中…');
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const r = await fetch('/api/manage/upload', { method: 'POST', body: formData }).then(r => r.json());
+      setManageUploadStatus(r.ok ? `✓ 已上传：${r.filename}` : `✗ ${r.error}`);
+      if (r.ok) loadManageFiles();
+    } catch {
+      setManageUploadStatus('✗ 上传失败');
+    }
+    if (manageUploadRef.current) manageUploadRef.current.value = '';
+    setTimeout(() => setManageUploadStatus(null), 4000);
+  };
+
   const handleCronToggle = async (id: string, enabled: boolean) => {
     await fetch('/api/gw/cron/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, enabled }) });
     setDashCron(prev => prev.map((j: any) => j.id === id ? { ...j, enabled } : j));
@@ -977,7 +1072,7 @@ export default function App() {
     } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableWorker: true } as any).promise;
         const pages: string[] = [];
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
@@ -1017,12 +1112,57 @@ export default function App() {
     setShowPostModal(false);
   };
 
+  const handleDroppedFile = async (file: File) => {
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        setAttachedImage({ name: file.name, dataUrl: String(ev.target?.result || '') });
+        setAttachedFile(null);
+      };
+      reader.readAsDataURL(file);
+    } else if (file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}]\n\n${result.value}` });
+        setAttachedImage(null);
+      } catch {
+        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}，解析失败，请粘贴文字内容]` });
+        setAttachedImage(null);
+      }
+    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableWorker: true } as any).promise;
+        const pages: string[] = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          pages.push(content.items.map((item: any) => item.str).join(' '));
+        }
+        setAttachedFile({ name: file.name, content: `[PDF: ${file.name}]\n\n${pages.join('\n\n')}` });
+        setAttachedImage(null);
+      } catch {
+        setAttachedFile({ name: file.name, content: `[PDF 文件: ${file.name}，解析失败，请粘贴文字内容]` });
+        setAttachedImage(null);
+      }
+    } else {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        setAttachedFile({ name: file.name, content: String(ev.target?.result || '') });
+        setAttachedImage(null);
+      };
+      reader.readAsText(file);
+    }
+  };
+
   const filteredMessages = messages.filter(m => m.groupId === activeChat?.id);
   const filteredActivities = toolActivities.filter(a => a.groupId === activeChat?.id);
 
   const handleSelectChat = (chat: ChatGroup) => {
     setActiveChat(chat);
     setShowChatDetail(true);
+    setShowMemberPanel(false);
     if (chat.id === 'job' && !platformsConfigured.current) {
       setShowPlatformDialog(true);
     }
@@ -1612,11 +1752,23 @@ export default function App() {
             icon={<Timer size={24} />}
             label={t('study')}
           />
-          <NavButton 
-            active={activeTab === 'hole'} 
+          <NavButton
+            active={activeTab === 'hole'}
             onClick={() => setActiveTab('hole')}
             icon={<Wind size={24} />}
             label={t('hole')}
+          />
+          <NavButton
+            active={activeTab === 'square'}
+            onClick={() => setActiveTab('square')}
+            icon={<Globe size={24} />}
+            label={t('square')}
+          />
+          <NavButton
+            active={activeTab === 'manage'}
+            onClick={() => setActiveTab('manage')}
+            icon={<FolderOpen size={24} />}
+            label="管理"
           />
         </div>
 
@@ -1785,9 +1937,27 @@ export default function App() {
 
             {/* Chat Window */}
             <section className={cn(
-              "flex-1 flex flex-col bg-pet-cream/30 transition-all duration-300",
+              "flex-1 flex bg-pet-cream/30 transition-all duration-300 overflow-hidden",
               showChatDetail ? "flex" : "hidden md:flex"
             )}>
+              {/* 主聊天区 */}
+              <div
+                className="flex-1 flex flex-col min-w-0 relative"
+                onDragOver={(e) => { e.preventDefault(); if (activeChat) setIsDragOver(true); }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={async (e) => {
+                  e.preventDefault();
+                  setIsDragOver(false);
+                  const file = e.dataTransfer.files?.[0];
+                  if (file && activeChat) await handleDroppedFile(file);
+                }}
+              >
+                {isDragOver && (
+                  <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-pet-orange/10 border-4 border-dashed border-pet-orange rounded-2xl pointer-events-none">
+                    <Upload size={48} className="text-pet-orange mb-3" />
+                    <p className="text-pet-orange font-bold text-lg">松开即可发送文件</p>
+                  </div>
+                )}
               {activeChat ? (
                 <>
                   <header className="h-16 bg-white/80 backdrop-blur-md border-b border-pet-pink/20 px-4 md:px-6 flex items-center justify-between">
@@ -1805,12 +1975,18 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex gap-3 md:gap-4 text-pet-brown/60 items-center pr-24 md:pr-32">
-                      <span
-                        title="AI 操作权限说明：所有文件操作仅限工作区目录，网络请求均展示在对话中，不会静默访问系统文件"
-                        className="hidden md:flex items-center gap-1 text-[10px] bg-emerald-50 border border-emerald-200 text-emerald-600 px-2 py-0.5 rounded-full cursor-help select-none"
-                      >
-                        🔒 操作透明
-                      </span>
+{activeChat?.type === 'group' && (
+                        <button
+                          onClick={() => setShowMemberPanel(v => !v)}
+                          className={cn(
+                            "p-2 rounded-xl transition-colors",
+                            showMemberPanel ? "bg-pet-orange/15 text-pet-orange" : "text-pet-brown/50 hover:bg-pet-cream hover:text-pet-brown"
+                          )}
+                          title="查看群成员"
+                        >
+                          <Users size={18} />
+                        </button>
+                      )}
                     </div>
                   </header>
 
@@ -1953,29 +2129,15 @@ export default function App() {
                            bossLoginStatus === 'error' ? '❌ 失败，重试' : '🔑 登录 Boss直聘'}
                         </button>
 
-                        {/* 打开浏览器后显示"我已登录"按钮 */}
                         {bossLoginStatus === 'loading' && (
-                          <>
-                            <span className="text-xs text-pet-brown/50 animate-pulse">在浏览器里登录 Boss直聘后点这里 →</span>
-                            <button
-                              onClick={async () => {
-                                try {
-                                  const r = await fetch('/api/boss-save-cookies', { method: 'POST' });
-                                  const d = await r.json();
-                                  if (!d.ok) { setBossLoginStatus('error'); setTimeout(() => setBossLoginStatus('idle'), 4000); }
-                                } catch { setBossLoginStatus('error'); setTimeout(() => setBossLoginStatus('idle'), 4000); }
-                              }}
-                              className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-pet-orange text-white hover:bg-pet-orange/90"
-                            >
-                              ✓ 我已登录
-                            </button>
-                          </>
+                          <span className="text-xs text-pet-brown/50 animate-pulse">浏览器已打开，请完成登录，检测到登录成功后会自动关闭...</span>
                         )}
                       </div>
                     )}
                     {/* @ Mention Picker — only in job group */}
-                    {activeChat?.id === 'job' && mentionPicker.visible && (() => {
-                      const filtered = JOB_AGENTS.filter(a => a.name.includes(mentionPicker.query));
+                    {activeChat?.type === 'group' && mentionPicker.visible && (() => {
+                      const agents = GROUP_AGENTS[activeChat.id] || [];
+                      const filtered = agents.filter(a => a.name.includes(mentionPicker.query));
                       return filtered.length > 0 ? (
                         <div className="mb-2 bg-white rounded-2xl pet-shadow overflow-hidden border border-pet-pink/20">
                           {filtered.map((a, i) => (
@@ -2048,7 +2210,7 @@ export default function App() {
                         onChange={(e) => {
                           const val = e.target.value;
                           setInputValue(val);
-                          if (activeChat?.id === 'job') {
+                          if (activeChat?.type === 'group') {
                             const atPos = val.lastIndexOf('@');
                             if (atPos >= 0) {
                               const query = val.slice(atPos + 1);
@@ -2062,7 +2224,7 @@ export default function App() {
                         }}
                         onKeyDown={(e) => {
                           if (!mentionPicker.visible) return;
-                          const filtered = JOB_AGENTS.filter(a => a.name.includes(mentionPicker.query));
+                          const filtered = (GROUP_AGENTS[activeChat?.id || ''] || []).filter(a => a.name.includes(mentionPicker.query));
                           if (e.key === 'ArrowDown') {
                             e.preventDefault();
                             setMentionPicker(p => ({ ...p, idx: (p.idx + 1) % filtered.length }));
@@ -2080,7 +2242,7 @@ export default function App() {
                             setMentionPicker({ visible: false, query: '', idx: 0 });
                           }
                         }}
-                        placeholder={activeChat?.id === 'job' ? '发消息，@ 呼叫 Agent...' : (lang === 'zh' ? '输入治愈的话语...' : 'Type healing words...')}
+                        placeholder={activeChat?.type === 'group' ? '发消息，@ 呼叫 Agent...' : (lang === 'zh' ? '输入治愈的话语...' : 'Type healing words...')}
                         className="flex-1 bg-transparent border-none focus:ring-0 text-sm py-2"
                       />
                       <button
@@ -2101,6 +2263,46 @@ export default function App() {
                   <p>{lang === 'zh' ? '选择一个群聊开始陪伴吧' : 'Select a chat to start companionship'}</p>
                 </div>
               )}
+              </div>
+
+              {/* 群成员侧边面板 */}
+              <AnimatePresence>
+                {showMemberPanel && activeChat?.type === 'group' && (
+                  <motion.div
+                    initial={{ width: 0, opacity: 0 }}
+                    animate={{ width: 240, opacity: 1 }}
+                    exit={{ width: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="bg-white border-l border-pet-pink/20 flex flex-col overflow-hidden shrink-0"
+                  >
+                    <div className="px-4 py-3 border-b border-pet-pink/10">
+                      <h3 className="text-xs font-bold text-pet-brown/50 uppercase tracking-wider">群成员</h3>
+                      <p className="text-[10px] text-pet-brown/30 mt-0.5">{(GROUP_AGENTS[activeChat.id] || []).filter(a => !(a as any).isAll).length} 位 AI 助手</p>
+                    </div>
+                    <div className="flex-1 overflow-y-auto py-2">
+                      {(GROUP_AGENTS[activeChat.id] || [])
+                        .filter(a => !(a as any).isAll)
+                        .map(agent => (
+                          <div
+                            key={agent.name}
+                            className="flex items-start gap-2.5 px-4 py-2.5 hover:bg-pet-cream/50 transition-colors cursor-default"
+                          >
+                            <div className="w-8 h-8 rounded-xl bg-pet-orange/10 flex items-center justify-center text-base shrink-0 mt-0.5">
+                              {agent.emoji}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-pet-brown truncate">{agent.name}</div>
+                              <div className="text-[10px] text-pet-brown/40 leading-tight mt-0.5 line-clamp-2">{(agent as any).role || ''}</div>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                    <div className="px-4 py-3 border-t border-pet-pink/10">
+                      <p className="text-[10px] text-pet-brown/30 text-center">@ 呼叫助手参与对话</p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </section>
           </>
         ) : activeTab === 'contacts' ? (
@@ -2710,7 +2912,7 @@ export default function App() {
               </div>
             </div>
           </section>
-        ) : (
+        ) : activeTab === 'hole' ? (
           /* Tree Hole Section */
           <section className="flex-1 flex flex-col p-6 md:p-12 overflow-y-auto pb-24 md:pb-12">
             <div className="max-w-2xl mx-auto w-full space-y-8">
@@ -2778,7 +2980,180 @@ export default function App() {
               </div>
             </div>
           </section>
-        )}
+        ) : activeTab === 'square' ? (
+          /* 搭子广场 */
+          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
+            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40 flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">{t('square')}</h1>
+                <p className="text-sm text-pet-brown/60">找到你的学习搭子，一起成长 🐾</p>
+              </div>
+              <button
+                onClick={() => setShowPostModal(true)}
+                className="flex items-center gap-2 bg-pet-orange text-white px-4 py-2.5 rounded-2xl font-bold text-sm pet-shadow hover:scale-105 transition-transform"
+              >
+                <Plus size={18} />
+                发帖
+              </button>
+            </header>
+            <div className="p-6 md:p-8 max-w-2xl mx-auto w-full space-y-4">
+              {posts.length === 0 ? (
+                <div className="text-center py-20 text-pet-brown/40">
+                  <Globe size={48} className="mx-auto mb-4 opacity-30" />
+                  <p className="text-lg font-display">还没有帖子</p>
+                  <p className="text-sm mt-1">来发第一帖吧！</p>
+                </div>
+              ) : (
+                posts.map((post: any) => (
+                  <div key={post.id} className="bg-white rounded-3xl p-5 pet-shadow space-y-3">
+                    <div className="flex items-center gap-3">
+                      <img src={post.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${post.author}`} className="w-10 h-10 rounded-full" />
+                      <div>
+                        <p className="font-bold text-pet-brown text-sm">{post.author}</p>
+                        <p className="text-xs text-pet-brown/40">{post.createdAt ? new Date(post.createdAt).toLocaleString('zh-CN') : ''}</p>
+                      </div>
+                      {post.tag && (
+                        <span className="ml-auto bg-pet-orange/10 text-pet-orange text-xs font-bold px-3 py-1 rounded-full">{post.tag}</span>
+                      )}
+                    </div>
+                    <p className="text-pet-brown text-sm leading-relaxed">{post.content}</p>
+                    <div className="flex items-center gap-4 pt-1">
+                      <button className="flex items-center gap-1.5 text-xs text-pet-brown/40 hover:text-pet-orange transition-colors">
+                        <Heart size={14} /> {post.likes ?? 0}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        ) : activeTab === 'manage' ? (
+          /* Manage Panel */
+          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
+            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
+              <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">管理</h1>
+              <p className="text-sm text-pet-brown/60">管理 AI 可访问的文件路径，上传新文件到工作区</p>
+            </header>
+
+            <div className="p-6 md:p-8 space-y-8 max-w-3xl">
+              {/* Allowed Paths */}
+              <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-9 h-9 rounded-2xl bg-pet-orange/10 flex items-center justify-center">
+                    <FolderPlus size={18} className="text-pet-orange" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-pet-brown">允许访问的路径</h2>
+                    <p className="text-xs text-pet-brown/50">AI 只能读取这些目录下的文件</p>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    value={manageNewPath}
+                    onChange={e => setManageNewPath(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleAddManagePath()}
+                    placeholder="输入完整路径，如 /Users/xxx/Documents"
+                    className="flex-1 bg-pet-cream rounded-2xl px-4 py-3 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none font-mono"
+                  />
+                  <button
+                    onClick={handleAddManagePath}
+                    className="bg-pet-orange text-white px-5 py-3 rounded-2xl font-bold text-sm hover:opacity-90 transition-opacity"
+                  >
+                    添加
+                  </button>
+                </div>
+
+                {managePathsLoading ? (
+                  <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
+                    <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                    加载中…
+                  </div>
+                ) : managePaths.length === 0 ? (
+                  <p className="text-pet-brown/30 text-sm py-4 text-center">暂无已添加的路径</p>
+                ) : (
+                  <div className="space-y-2">
+                    {managePaths.map((p, i) => (
+                      <div key={i} className="flex items-center gap-3 bg-pet-cream rounded-2xl px-4 py-3">
+                        <FolderOpen size={16} className="text-pet-orange shrink-0" />
+                        <span className="flex-1 text-sm font-mono text-pet-brown truncate">{p}</span>
+                        <button
+                          onClick={() => handleRemoveManagePath(p)}
+                          className="text-pet-brown/30 hover:text-red-400 transition-colors"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Upload Files */}
+              <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-9 h-9 rounded-2xl bg-purple-100 flex items-center justify-center">
+                    <Upload size={18} className="text-purple-600" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-pet-brown">上传文件</h2>
+                    <p className="text-xs text-pet-brown/50">文件将保存到 AI 工作区，可被直接引用</p>
+                  </div>
+                </div>
+
+                <input
+                  ref={manageUploadRef}
+                  type="file"
+                  className="hidden"
+                  onChange={handleManageUpload}
+                  accept=".pdf,.txt,.md,.docx,.doc,.csv,.json"
+                />
+                <button
+                  onClick={() => manageUploadRef.current?.click()}
+                  className="w-full border-2 border-dashed border-pet-pink/40 rounded-2xl py-8 flex flex-col items-center gap-3 text-pet-brown/50 hover:border-pet-orange/40 hover:text-pet-orange transition-colors"
+                >
+                  <Upload size={28} />
+                  <span className="text-sm font-medium">点击选择文件上传</span>
+                  <span className="text-xs">支持 PDF、Word、TXT、Markdown、CSV、JSON</span>
+                </button>
+
+                {manageUploadStatus && (
+                  <div className={cn(
+                    "text-sm px-4 py-3 rounded-2xl",
+                    manageUploadStatus.startsWith('✓') ? "bg-emerald-50 text-emerald-700" :
+                    manageUploadStatus.startsWith('✗') ? "bg-red-50 text-red-600" :
+                    "bg-pet-cream text-pet-brown/60"
+                  )}>
+                    {manageUploadStatus}
+                  </div>
+                )}
+
+                {/* File List */}
+                {manageFilesLoading ? (
+                  <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
+                    <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                    加载中…
+                  </div>
+                ) : manageFiles.length > 0 && (
+                  <div className="space-y-2 pt-2">
+                    <p className="text-xs font-bold text-pet-brown/40 uppercase tracking-wider">工作区文件</p>
+                    <div className="divide-y divide-pet-pink/10 rounded-2xl border border-pet-pink/20 overflow-hidden">
+                      {manageFiles.map((f, i) => (
+                        <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-pet-cream/40 transition-colors">
+                          <FileText size={16} className="text-pet-brown/40 shrink-0" />
+                          <span className="flex-1 text-sm text-pet-brown truncate">{f.name}</span>
+                          <span className="text-xs text-pet-brown/30 shrink-0">
+                            {f.size > 1024 * 1024 ? `${(f.size / 1024 / 1024).toFixed(1)}MB` : `${Math.round(f.size / 1024)}KB`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        ) : null}
       </main>
 
       {/* Mobile Bottom Navigation */}
