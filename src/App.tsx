@@ -801,6 +801,11 @@ export default function App() {
       }
     } catch {
       setSetupState(null);
+      // API 失败（服务器未就绪/旧版本）→ 默认弹出 setup wizard
+      if (!options?.forceOpen) {
+        setShowSetupWizard(true);
+        setSetupStep(1);
+      }
     }
   };
 
@@ -3693,13 +3698,15 @@ export default function App() {
                           setActiveTab('chat');
                           handleSelectChat(buildChiefChat());
                           if (!petProfileConfigured) {
-                            // 直接显示宠物档案向导，不等 wake 成功（避免 gateway 未就绪导致向导不出现）
+                            // 先弹向导让用户填名字+性格，填完再 wake（确保 wake 用的是真实名字）
                             setTimeout(() => {
                               setOnboardingStep(1);
                               setShowPetProfileWizard(true);
                             }, 300);
+                          } else {
+                            // 已配置过宠物，直接 wake
+                            requestChiefWake();
                           }
-                          requestChiefWake();
                         }}
                         className="rounded-2xl bg-pet-orange px-5 py-3 text-sm font-bold text-white pet-shadow hover:scale-[1.02] transition-transform"
                       >
