@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import mammoth from 'mammoth';
-// Disable worker — Electron's file:// protocol can't load Web Workers from asset URLs
-pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+// Use Vite-bundled worker URL — works in both dev and packaged Electron
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 import { io, Socket } from 'socket.io-client';
 import {
   Languages,
@@ -492,7 +493,9 @@ export default function App() {
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
   const t = (key: keyof typeof TRANSLATIONS['zh']) => TRANSLATIONS[lang][key] || key;
 
-  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>('auth');
+  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>(() =>
+    localStorage.getItem('pawpals_authed') === '1' ? 'main' : 'auth'
+  );
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
@@ -527,6 +530,7 @@ export default function App() {
   const [bossLoginStatus, setBossLoginStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [showPlatformDialog, setShowPlatformDialog] = useState(false);
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+  const [platformTab, setPlatformTab] = useState<'domestic' | 'overseas'>('domestic');
   const platformsConfigured = useRef(!!localStorage.getItem('platformsConfigured'));
   const [postContent, setPostContent] = useState('');
   const [postTag, setPostTag] = useState<Post['tag']>('生活');
@@ -645,6 +649,7 @@ export default function App() {
     id: 'pixel',
     name: pet.name,
     icon: pet.type === 'cat' ? '🐈' : pet.type === 'dog' ? '🐕' : '🐇',
+    avatar: pet.avatar,
     description: '你的专属伴学官',
     type: 'contact',
   });
@@ -658,13 +663,35 @@ export default function App() {
     });
   };
 
+  // 启动时从服务器加载宠物档案（重装 app 后恢复数据）
+  useEffect(() => {
+    fetch('/api/pet').then(r => r.json()).then(data => {
+      if (data && data.name) {
+        setPet(prev => ({ ...prev, ...data }));
+        setPetProfileConfigured(true);
+        localStorage.setItem('petProfileConfigured', '1');
+        localStorage.setItem('pet', JSON.stringify(data));
+      }
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     socketRef.current = io();
 
     socketRef.current.on('init_messages', (msgs: Message[]) => {
       messagesRef.current = msgs;
-      if (msgs.some((msg) => msg.groupId === 'pixel')) {
+      const hasPixelHistory = msgs.some((msg) => msg.groupId === 'pixel');
+      if (hasPixelHistory) {
         chiefWakeRequestedRef.current = true;
+      } else if (!chiefWakeRequestedRef.current && localStorage.getItem('petProfileConfigured')) {
+        // 宠物已建档但私聊没有历史 → 自动触发 wake（每次新 session 都主动打招呼）
+        chiefWakeRequestedRef.current = true;
+        const savedPet = localStorage.getItem('pet');
+        const p = savedPet ? JSON.parse(savedPet) : null;
+        socketRef.current?.emit('wake_chief_session', {
+          petName: p?.name || '团团',
+          petPersonality: p?.personality || '',
+        });
       }
       setMessages(msgs);
     });
@@ -694,7 +721,13 @@ export default function App() {
         setToolActivities(prev => prev.filter(a => a.id !== activity.id));
       }, 30000);
     });
-    socketRef.current.on('stream_done', ({ id }: { id: string }) => {
+    socketRef.current.on('stream_done', ({ id, error }: { id: string; error?: boolean }) => {
+      if (error) {
+        // gateway 连接失败 → 移除空气泡，不留白
+        setMessages(prev => prev.filter(m => m.id !== id));
+        messagesRef.current = messagesRef.current.filter(m => m.id !== id);
+        return;
+      }
       setMessages(prev => prev.map(m =>
         m.id === id ? { ...m, isLoading: false } : m
       ));
@@ -1072,7 +1105,7 @@ export default function App() {
     } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableWorker: true } as any).promise;
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const pages: string[] = [];
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
@@ -1133,7 +1166,7 @@ export default function App() {
     } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableWorker: true } as any).promise;
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const pages: string[] = [];
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
@@ -1159,6 +1192,8 @@ export default function App() {
   const filteredMessages = messages.filter(m => m.groupId === activeChat?.id);
   const filteredActivities = toolActivities.filter(a => a.groupId === activeChat?.id);
 
+  const jobWakeRequestedRef = useRef(false);
+
   const handleSelectChat = (chat: ChatGroup) => {
     setActiveChat(chat);
     setShowChatDetail(true);
@@ -1168,6 +1203,13 @@ export default function App() {
     }
     if (chat.id === 'pixel') {
       requestChiefWake();
+    }
+    if (chat.id === 'job' && !jobWakeRequestedRef.current) {
+      const hasJobHistory = messagesRef.current.some(m => m.groupId === 'job');
+      if (!hasJobHistory) {
+        jobWakeRequestedRef.current = true;
+        socketRef.current?.emit('wake_job_session', { petName: pet.name, petPersonality: pet.personality });
+      }
     }
   };
 
@@ -1295,9 +1337,19 @@ export default function App() {
 
   const handleFinishPetProfile = () => {
     localStorage.setItem('petProfileConfigured', '1');
+    localStorage.setItem('pet', JSON.stringify(pet));
     setPetProfileConfigured(true);
     setShowPetProfileWizard(false);
     setAppStatus('main');
+    // 持久化到服务器文件系统（重装 app 后也能恢复）
+    fetch('/api/pet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pet),
+    }).catch(() => {});
+    // 宠物创建完成后，主动触发团团在私聊打招呼
+    socketRef.current?.emit('wake_chief_session', { petName: pet.name, petPersonality: pet.personality });
+    chiefWakeRequestedRef.current = true;
   };
 
   const renderPetProfileCard = () => (
@@ -1638,8 +1690,8 @@ export default function App() {
               />
             </div>
 
-            <button 
-              onClick={() => setAppStatus('main')}
+            <button
+              onClick={() => { localStorage.setItem('pawpals_authed', '1'); setAppStatus('main'); }}
               className="w-full bg-pet-orange text-white py-4 rounded-2xl font-bold pet-shadow hover:scale-[1.02] transition-transform flex items-center justify-center gap-2"
             >
               {authMode === 'login' ? <LogIn size={20} /> : <UserPlus size={20} />}
@@ -1652,7 +1704,7 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => setAppStatus('main')}
+              onClick={() => { localStorage.setItem('pawpals_authed', '1'); setAppStatus('main'); }}
               className="w-full bg-white border-2 border-pet-cream text-pet-brown/60 py-4 rounded-2xl font-bold hover:bg-pet-cream transition-colors"
             >
               {t('guest')}
@@ -1892,8 +1944,8 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="relative">
-                      <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-2xl pet-shadow">
-                        {pet.type === 'cat' ? '🐈' : pet.type === 'dog' ? '🐕' : '🐇'}
+                      <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center pet-shadow overflow-hidden">
+                        <img src={pet.avatar} alt={pet.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                       </div>
                       <div className="absolute -top-1 -right-1 w-4 h-4 bg-pet-orange text-white text-[8px] flex items-center justify-center rounded-full font-bold border border-white">
                         {pet.level}
@@ -1968,7 +2020,9 @@ export default function App() {
                       >
                         <Plus className="rotate-45" size={24} />
                       </button>
-                      <span className="text-2xl hidden sm:inline">{activeChat.icon}</span>
+                      {(activeChat as any).avatar
+                        ? <img src={(activeChat as any).avatar} alt={activeChat.name} className="w-10 h-10 rounded-xl object-cover hidden sm:block" referrerPolicy="no-referrer" />
+                        : <span className="text-2xl hidden sm:inline">{activeChat.icon}</span>}
                       <div>
                         <h2 className="font-bold text-pet-brown text-sm md:text-base">{activeChat.name}</h2>
                         <p className="text-[10px] md:text-xs text-pet-brown/60 truncate max-w-[150px] md:max-w-none">{activeChat.description}</p>
@@ -2016,9 +2070,9 @@ export default function App() {
                         )}
                       >
                         <img
-                          src={msg.avatar}
+                          src={msg.isChiefBot ? pet.avatar : msg.avatar}
                           alt={msg.sender}
-                          className="w-8 h-8 md:w-10 md:h-10 rounded-xl md:rounded-2xl bg-white p-1"
+                          className="w-8 h-8 md:w-10 md:h-10 rounded-xl md:rounded-2xl bg-white p-1 object-cover"
                           referrerPolicy="no-referrer"
                         />
                         <div className={cn(
@@ -3639,7 +3693,11 @@ export default function App() {
                           setActiveTab('chat');
                           handleSelectChat(buildChiefChat());
                           if (!petProfileConfigured) {
-                            onboardingAfterWakeRef.current = true;
+                            // 直接显示宠物档案向导，不等 wake 成功（避免 gateway 未就绪导致向导不出现）
+                            setTimeout(() => {
+                              setOnboardingStep(1);
+                              setShowPetProfileWizard(true);
+                            }, 300);
                           }
                           requestChiefWake();
                         }}
@@ -3850,36 +3908,76 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
               className="bg-white rounded-3xl p-6 w-full max-w-sm pet-shadow"
             >
-              <div className="text-center mb-5">
+              <div className="text-center mb-4">
                 <div className="text-4xl mb-2">🐕</div>
                 <h2 className="text-lg font-bold text-pet-brown">你一般用哪些招聘渠道？</h2>
                 <p className="text-xs text-pet-brown/50 mt-1">助理们会帮你自动搜索和投递</p>
               </div>
-              {[
-                { id: 'boss',     label: 'Boss直聘',   emoji: '💼', desc: '支持自动投递' },
-                { id: 'linkedin', label: 'LinkedIn',   emoji: '🔗', desc: '国际岗位' },
-                { id: 'zhilian', label: '智联招聘',    emoji: '📋', desc: '综合平台' },
-                { id: 'lagou',   label: '拉勾网',      emoji: '🎯', desc: '互联网垂直' },
-                { id: 'campus',  label: '校园招聘',    emoji: '🎓', desc: '校招专场' },
-              ].map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => setSelectedPlatforms(prev =>
-                    prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]
-                  )}
-                  className={`w-full flex items-center gap-3 p-3 rounded-2xl mb-2 border-2 transition-all text-left
-                    ${selectedPlatforms.includes(p.id)
-                      ? 'border-pet-orange bg-pet-orange/10'
-                      : 'border-transparent bg-pet-cream hover:bg-pet-orange/5'}`}
-                >
-                  <span className="text-xl">{p.emoji}</span>
-                  <div className="flex-1">
-                    <div className="font-semibold text-pet-brown text-sm">{p.label}</div>
-                    <div className="text-xs text-pet-brown/50">{p.desc}</div>
-                  </div>
-                  {selectedPlatforms.includes(p.id) && <span className="text-pet-orange font-bold">✓</span>}
-                </button>
-              ))}
+
+              {/* 标签页切换 */}
+              <div className="flex bg-pet-cream rounded-2xl p-1 mb-4">
+                {(['domestic', 'overseas'] as const).map(tab => (
+                  <button
+                    key={tab}
+                    onClick={() => setPlatformTab(tab)}
+                    className={`flex-1 py-2 rounded-xl text-sm font-semibold transition-all ${
+                      platformTab === tab
+                        ? 'bg-white text-pet-orange shadow-sm'
+                        : 'text-pet-brown/50 hover:text-pet-brown/70'
+                    }`}
+                  >
+                    {tab === 'domestic' ? '🇨🇳 国内' : '🌍 国外'}
+                  </button>
+                ))}
+              </div>
+
+              {/* 平台列表 */}
+              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                {(platformTab === 'domestic' ? [
+                  { id: 'boss',     label: 'Boss直聘',   emoji: '💼', desc: '支持自动投递' },
+                  { id: 'liepin',   label: '猎聘',        emoji: '🎯', desc: '中高端职位' },
+                  { id: 'lagou',    label: '拉勾网',      emoji: '🔧', desc: '互联网垂直' },
+                  { id: 'zhilian',  label: '智联招聘',    emoji: '📋', desc: '综合招聘平台' },
+                  { id: 'nowcoder', label: '牛客网',       emoji: '🐮', desc: '技术/校招' },
+                  { id: 'campus',   label: '校招平台',    emoji: '🎓', desc: '应届生·实习僧' },
+                  { id: 'company-cn', label: '各大公司官网', emoji: '🏢', desc: '直接投递更靠谱' },
+                ] : [
+                  { id: 'linkedin',  label: 'LinkedIn',    emoji: '🔗', desc: '国际首选' },
+                  { id: 'jobright',  label: 'JobRight',    emoji: '🤖', desc: 'AI 智能匹配' },
+                  { id: 'simplify',  label: 'Simplify',    emoji: '⚡', desc: '一键自动填表' },
+                  { id: 'handshake', label: 'Handshake',   emoji: '🤝', desc: '校招实习首选' },
+                  { id: 'wellfound', label: 'Wellfound',   emoji: '🚀', desc: '初创公司' },
+                  { id: 'indeed',    label: 'Indeed',      emoji: '🔍', desc: '综合职位聚合' },
+                  { id: 'company-us', label: '各大公司官网', emoji: '🏢', desc: 'Careers 页直投' },
+                ]).map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedPlatforms(prev =>
+                      prev.includes(p.id) ? prev.filter(x => x !== p.id) : [...prev, p.id]
+                    )}
+                    className={`w-full flex items-center gap-3 p-3 rounded-2xl border-2 transition-all text-left ${
+                      selectedPlatforms.includes(p.id)
+                        ? 'border-pet-orange bg-pet-orange/10'
+                        : 'border-transparent bg-pet-cream hover:bg-pet-orange/5'
+                    }`}
+                  >
+                    <span className="text-xl">{p.emoji}</span>
+                    <div className="flex-1">
+                      <div className="font-semibold text-pet-brown text-sm">{p.label}</div>
+                      <div className="text-xs text-pet-brown/50">{p.desc}</div>
+                    </div>
+                    {selectedPlatforms.includes(p.id) && <span className="text-pet-orange font-bold text-sm">✓</span>}
+                  </button>
+                ))}
+              </div>
+
+              {/* 已选数量提示 */}
+              {selectedPlatforms.length > 0 && (
+                <p className="text-xs text-pet-orange/80 text-center mt-3">
+                  已选 {selectedPlatforms.length} 个渠道
+                </p>
+              )}
+
               <div className="flex gap-3 mt-4">
                 <button
                   onClick={() => { platformsConfigured.current = true; localStorage.setItem('platformsConfigured', '1'); setShowPlatformDialog(false); }}
@@ -4380,8 +4478,10 @@ function ChatListItem({ item, active, onClick }: { item: ChatGroup, active: bool
         active ? "bg-white pet-shadow" : "hover:bg-white/40"
       )}
     >
-      <div className="w-12 h-12 bg-pet-cream rounded-xl flex items-center justify-center text-2xl group-hover:rotate-12 transition-transform">
-        {item.icon}
+      <div className="w-12 h-12 bg-pet-cream rounded-xl flex items-center justify-center text-2xl overflow-hidden">
+        {(item as any).avatar
+          ? <img src={(item as any).avatar} alt={item.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+          : item.icon}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-center mb-0.5">

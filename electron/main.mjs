@@ -58,6 +58,7 @@ function createWindow() {
     title: "PawPals",
     backgroundColor: "#f7f1ea",
     autoHideMenuBar: true,
+    icon: path.join(__dirname, "../resources/icon.icns"),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

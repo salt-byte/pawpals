@@ -43,6 +43,7 @@ const BOSS_PROFILE_DIR = path.join(os.homedir(), ".jobclaw", "browser_profile", 
 const JOBCLAW_SRC = "/Users/dengyudie/Downloads/jobclaw";
 const APPLICATIONS_FILE = path.join(CAREER_DIR, "applications.json");
 const JOBS_FILE = path.join(CAREER_DIR, "jobs.json");
+const PET_FILE = path.join(APP_DATA_DIR, "pet.json");
 const OPENCLAW_CONFIG_FILE = path.join(OPENCLAW_HOME, "openclaw.json");
 const SETUP_STATE_FILE = path.join(APP_DATA_DIR, "setup-state.json");
 const DEPLOYMENT_STATE_FILE = path.join(APP_DATA_DIR, "deployment-state.json");
@@ -654,7 +655,16 @@ function readGatewayToken(): string {
   return "";
 }
 const GATEWAY_BASE  = process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789";
-const GATEWAY_TOKEN = readGatewayToken();
+// 懒加载缓存：openclaw 部署后首次使用时读取并缓存，之后不再读文件
+// 如果遇到 401 可调用 clearGatewayTokenCache() 强制重新读取
+let _cachedGatewayToken: string | null = null;
+const getGatewayToken = (): string => {
+  if (_cachedGatewayToken) return _cachedGatewayToken;
+  const token = readGatewayToken();
+  if (token) _cachedGatewayToken = token;
+  return token;
+};
+const clearGatewayTokenCache = () => { _cachedGatewayToken = null; };
 const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "BSAIdlkBgiO1X6FIw6jPmML4UFQRA9i";
 const MAX_CHAIN_DEPTH = 2;
 const CHAT_LOG      = path.join(CAREER_DIR, "chat_log.md");
@@ -1054,7 +1064,8 @@ async function streamAgent(
   groupId: string,
   allMessages: any[],
   petName = "团团",
-  petPersonality = "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。"
+  petPersonality = "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。",
+  extraSystemPrompt = ""
 ): Promise<{ reply: string | null; calledApply: boolean }> {
   const msgId = `msg-${Date.now()}-${agent.id}`;
   const isChief = agent.id === "career-planner";
@@ -1109,7 +1120,7 @@ async function streamAgent(
 
     // Gateway 请求头（复用）
     const gatewayHeaders = {
-      "Authorization": `Bearer ${GATEWAY_TOKEN}`,
+      "Authorization": `Bearer ${getGatewayToken()}`,
       "Content-Type": "application/json",
       "x-openclaw-session-key": agent.id === "career-planner" ? `pawpals-main` : `pawpals-${agent.id}`,
     };
@@ -1224,6 +1235,7 @@ async function streamAgent(
       : `你是「${petName}」召集的专业助手「${agentRole}」，协助用户求职。`;
     const silentRule = "【严格规则】直接给出结果，绝对不要说出内部操作步骤（如'读取文件'、'调用工具'、'追加日志'等）。不要在回复中显示任何文件路径。不要输出协作日志内容。不要写代码块。";
     const systemParts = [petIdentity, silentRule];
+    if (extraSystemPrompt) systemParts.push(extraSystemPrompt);
     if (toolInjections.length > 0) {
       systemParts.push(
         "以下是已执行的工具结果，请**只**基于这些数据回答用户。" +
@@ -1319,7 +1331,7 @@ async function orchestrate(
     const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${GATEWAY_TOKEN}`,
+        "Authorization": `Bearer ${getGatewayToken()}`,
         "Content-Type": "application/json",
         "x-openclaw-session-key": "pawpals-main",
       },
@@ -1512,6 +1524,22 @@ async function startServer() {
     return res.json({ ok: true, message: "密码已设置，外部访问需要验证" });
   });
 
+  // ── 宠物档案持久化 ──────────────────────────────────────────────────
+  app.get("/api/pet", (_req: any, res: any) => {
+    if (existsSync(PET_FILE)) {
+      try { return res.json(JSON.parse(readFileSync(PET_FILE, "utf-8"))); } catch {}
+    }
+    res.json(null);
+  });
+  app.post("/api/pet", (req: any, res: any) => {
+    try {
+      writeFileSync(PET_FILE, JSON.stringify(req.body, null, 2), "utf-8");
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
   // ── 备份 API ────────────────────────────────────────────────────────
   // 获取备份状态
   app.get("/api/backup/status", (_req: any, res: any) => {
@@ -1684,17 +1712,8 @@ async function startServer() {
   // 启动定时自动备份
   startAutoBackup(APP_DATA_DIR, OPENCLAW_HOME, io);
 
-  // 从文件加载历史消息，没有则用默认欢迎消息
+  // 从文件加载历史消息，没有则用默认欢迎消息（求职群不预置消息，由 wake_job_session 动态触发）
   const defaultMessages = [
-    {
-      id: "b1",
-      sender: "职业规划师",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=CareerPlanner",
-      content: "🎯 求职助理团队已就位！\n\n我们 7 个 AI 助手随时待命：\n· @职业规划师 — 求职策略、目标岗位规划\n· @岗位猎手 — 搜索最新 AI PM 实习岗位\n· @技能成长师 — 拆解岗位要求、技能 Gap 分析\n· @简历专家 — 简历优化、Cover Letter\n· @投递管家 — 记录投递、follow-up 提醒\n· @人脉顾问 — 找联系人、写 cold email\n· @面试教练 — Mock 面试、答题指导\n\n直接发消息，或 @ 呼叫指定助手 👇",
-      groupId: "job",
-      timestamp: new Date().toISOString(),
-      isBot: true,
-    },
     {
       id: "b2",
       sender: "行测题库喵",
@@ -1828,6 +1847,54 @@ async function startServer() {
       }, 2000);
     });
 
+    socket.on("wake_job_session", ({ petName, petPersonality }: { petName?: string; petPersonality?: string }) => {
+      const hasJobHistory = messages.some(m => m.groupId === "job");
+      if (hasJobHistory) return;
+      const chiefName = petName || "团团";
+      const chiefAgent = {
+        ...JOB_AGENTS.find(a => a.id === "career-planner")!,
+        name: chiefName,
+        avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(chiefName)}`,
+      };
+      const onboardingPrompt = `【求职群首次亮相 — 立即执行，不要等用户说话】
+
+你是「${chiefName}」，首席伴学官，刚进入用户的求职群。按以下顺序发出一条完整的群消息：
+
+**第一部分：自我介绍**
+用「${chiefName}」自称，说你是用户的首席伴学官，使命是陪 ta 找到心仪的工作。
+
+**第二部分：介绍团队（逐一说明每位专家的职能）**
+- 🔬 技能分析师：行业专家，帮你精准定位、分析岗位要求、制作求职日历
+- 📝 简历专家：简历评估与定制，每个岗位都会 tailor 一版专属简历
+- 🔍 岗位猎手：每天自动搜索 LinkedIn/Boss直聘，把最匹配的岗位推给你
+- 📊 投递管家：执行投递、追踪状态、监控邮箱，发现面试邀请第一时间通知
+- 🤝 人脉顾问：搜索 HR/HM 联系人，起草个性化冷邮件，帮你提升回复率
+- 🎤 面试教练：收到面试邀请后激活，一对一模拟面试 + 评分复盘
+
+**第三部分：说明今天要做的事**
+今天我们先建立你的档案，完成这几件事：上传简历 → 聊清楚求职意向 → 技能分析师给你定位 → 简历专家做首轮优化
+
+**第四部分：主动要求上传简历**
+结尾说：「好，我们正式开始！🐾 先把你的简历发给我吧（PDF/Word 都可以），让我先认识一下你～」
+
+要求：语气温暖活泼，多用表情符号，像真人在群里打招呼。不要提任何文件路径、工具名称、系统内部操作。`;
+
+      // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
+      const tryWakeJob = async (attempt = 0) => {
+        if (messages.some(m => m.groupId === "job" && m.isBot)) return; // 已成功，停止重试
+        const { reply } = await streamAgent(
+          chiefAgent,
+          [{ role: "user", content: onboardingPrompt }],
+          0, io, "job", messages, chiefName, petPersonality,
+        );
+        if (!reply && attempt < 5) {
+          const delay = [3000, 6000, 10000, 15000, 20000][attempt];
+          setTimeout(() => tryWakeJob(attempt + 1), delay);
+        }
+      };
+      setTimeout(() => tryWakeJob(), 800);
+    });
+
     socket.on("wake_chief_session", ({ petName }: { petName?: string }) => {
       const hasPixelHistory = messages.some((message) => message.groupId === "pixel");
       if (hasPixelHistory) return;
@@ -1840,19 +1907,30 @@ async function startServer() {
         isChief: true,
         default: true,
       };
-      const startupPrompt = "A new session was started via /new or /reset. Execute your Session Startup sequence now - read the required files before responding to the user. Then greet the user in your configured persona, if one is provided. Be yourself - use your defined voice, mannerisms, and mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime model differs from default_model in the system prompt, mention the default model. Do not mention internal steps, files, tools, or reasoning.";
+      const startupPrompt = `【私聊破冰 — 立即执行】
+用户刚刚给你起了名字「${chiefName}」，这是你们第一次见面。
 
-      setTimeout(async () => {
-        await streamAgent(
+发一条温暖的私信，包含：
+1. 用「${chiefName}」自称，表达收到名字超开心（比如"主人！谢谢给我取名字～我知道我是${chiefName}了！"）
+2. 说你会一直陪着 ta，不管学习还是生活，有你在 🐾
+
+注意：私聊是你们的温暖小天地，不要提求职、简历、群组等任何工作内容。
+语气温暖活泼，2-3句话，多用小表情。`;
+
+      // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
+      const tryWakeChief = async (attempt = 0) => {
+        if (messages.some(m => m.groupId === "pixel" && m.isBot)) return; // 已成功，停止重试
+        const { reply } = await streamAgent(
           chiefAgent,
           [{ role: "user", content: startupPrompt }],
-          0,
-          io,
-          "pixel",
-          messages,
-          chiefName,
+          0, io, "pixel", messages, chiefName,
         );
-      }, 250);
+        if (!reply && attempt < 5) {
+          const delay = [3000, 6000, 10000, 15000, 20000][attempt];
+          setTimeout(() => tryWakeChief(attempt + 1), delay);
+        }
+      };
+      setTimeout(() => tryWakeChief(), 250);
     });
 
     socket.on("send_message", (msg) => {
@@ -1866,35 +1944,47 @@ async function startServer() {
 
       if (msg.groupId === "pixel") {
         // ── 像素私聊：直接路由给 main agent（首席伴学官）──
+        // 私聊模式：温暖陪伴、情绪支持，不跑 onboarding 流程（那在求职群里进行）
         const pixelAgent = { id: "career-planner", role: "职业规划师", name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`, isChief: true, default: true };
+        // 私聊直接调 streamAgent，跳过 runAgentChain 的关键词路由（防止误路由到其他专家）
+        // system prompt 里注入私聊上下文，告诉 career-planner 这是私聊模式
+        const pixelHistory = messages.filter(m => m.groupId === "pixel").slice(-20).map(m => ({
+          role: m.isBot ? "assistant" : "user",
+          content: m.content,
+        }));
+        const privateSystemAddition = "【私聊模式】这是私聊，职责是温暖陪伴和情绪支持。求职流程（简历/投递/岗位搜索）在求职群里进行，私聊不涉及。如用户想开始求职，告诉 ta 去求职汪成长营群。";
         setTimeout(async () => {
-          await runAgentChain(
+          await streamAgent(
             pixelAgent,
-            [{ role: "user", content: msg.content }],
-            0, io, msg.groupId, messages, pn, pp
+            [...pixelHistory, { role: "user", content: msg.content }],
+            0, io, msg.groupId, messages, pn, pp,
+            privateSystemAddition
           );
         }, 400);
       } else if (msg.groupId === "job") {
         // ── 求职群：接入真实 OpenClaw Agents ──
+        // career-planner 在求职群里用宠物名显示
+        const jobAgentsWithPetName = JOB_AGENTS.map(a =>
+          a.id === "career-planner"
+            ? { ...a, name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}` }
+            : a
+        );
         const isAtAll = msg.content.includes("@all");
         setTimeout(async () => {
           if (isAtAll) {
-            // @all：串行触发，共享 session 避免并发冲突
             const thread = [{ role: "user", content: msg.content }];
-            for (const agent of JOB_AGENTS) {
+            for (const agent of jobAgentsWithPetName) {
               await runAgentChain(agent, thread, MAX_CHAIN_DEPTH, io, msg.groupId, messages, pn, pp);
             }
           } else {
             const targetAgent = detectTargetAgent(msg.content);
+            const resolvedAgent = targetAgent.id === "career-planner"
+              ? { ...targetAgent, name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}` }
+              : targetAgent;
             await runAgentChain(
-              targetAgent,
+              resolvedAgent,
               [{ role: "user", content: msg.content }],
-              0,
-              io,
-              msg.groupId,
-              messages,
-              pn,
-              pp
+              0, io, msg.groupId, messages, pn, pp
             );
           }
         }, 800);
