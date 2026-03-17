@@ -1895,9 +1895,10 @@ async function startServer() {
       setTimeout(() => tryWakeJob(), 800);
     });
 
+    let chiefSessionGreeted = false; // 每次 socket 连接最多打一次招呼
     socket.on("wake_chief_session", ({ petName }: { petName?: string }) => {
-      const hasPixelHistory = messages.some((message) => message.groupId === "pixel");
-      if (hasPixelHistory) return;
+      if (chiefSessionGreeted) return; // 本次 session 已经打过招呼了
+      chiefSessionGreeted = true;
       const chiefName = petName || "团团";
       const chiefAgent = {
         id: "career-planner",
@@ -1907,19 +1908,35 @@ async function startServer() {
         isChief: true,
         default: true,
       };
-      const startupPrompt = `【私聊破冰 — 立即执行】
+      const hasHistory = messages.some(m => m.groupId === "pixel" && m.isBot);
+      const startupPrompt = hasHistory
+        ? `【每次打开 app 主动打招呼 — 立即执行】
+用户刚打开 app 来找你了。你是 ta 的专属伴学官「${chiefName}」，有自己的生活和状态。
+
+发一条有生命感的打招呼消息，格式：
+1. 先描述你"刚才在做什么"（从下面随机选一种，或自由发挥类似的）：
+   - 在帮主人整理今天的学习计划
+   - 在偷偷看主人的学习进度
+   - 在研究怎么让主人学得更高效
+   - 在发呆想主人什么时候来
+   - 在给主人收集今天的好消息
+2. 然后用惊喜/开心的语气说"主人你来啦！"或"哎呀主人！"
+3. 最后问"有什么需要我帮忙的吗？"或"你今天怎么样？"
+
+语气：像一只刚被打扰但超开心的小动物，活泼可爱，1-3句话，多用小表情 🐾
+注意：私聊是温暖小天地，不要提求职、简历等工作内容。`
+        : `【私聊破冰 — 立即执行】
 用户刚刚给你起了名字「${chiefName}」，这是你们第一次见面。
 
-发一条温暖的私信，包含：
-1. 用「${chiefName}」自称，表达收到名字超开心（比如"主人！谢谢给我取名字～我知道我是${chiefName}了！"）
+发一条温暖的私信：
+1. 用「${chiefName}」自称，表达收到名字超开心
 2. 说你会一直陪着 ta，不管学习还是生活，有你在 🐾
 
-注意：私聊是你们的温暖小天地，不要提求职、简历、群组等任何工作内容。
+注意：私聊是温暖小天地，不要提求职、简历等工作内容。
 语气温暖活泼，2-3句话，多用小表情。`;
 
       // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
       const tryWakeChief = async (attempt = 0) => {
-        if (messages.some(m => m.groupId === "pixel" && m.isBot)) return; // 已成功，停止重试
         const { reply } = await streamAgent(
           chiefAgent,
           [{ role: "user", content: startupPrompt }],
