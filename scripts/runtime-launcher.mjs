@@ -100,6 +100,10 @@ function spawnCommand(spec, args, options = {}) {
 }
 
 function pipeChildLogs(child, stdoutFile, stderrFile, deployLogFile) {
+  // 确保日志目录存在（首次启动目录可能尚未创建）
+  if (deployLogFile) {
+    try { fs.mkdirSync(path.dirname(deployLogFile), { recursive: true }); } catch {}
+  }
   const out = fs.createWriteStream(stdoutFile, { flags: "a" });
   const err = fs.createWriteStream(stderrFile, { flags: "a" });
   child.stdout?.on("data", (chunk) => {
