@@ -139,6 +139,33 @@ if (!fs.existsSync(path.join(runtime.openClawHome, "openclaw.json"))) {
   appendDeploymentLog(`Reusing existing PawPals OpenClaw home at ${runtime.openClawHome}`);
 }
 
+// 始终确保 openclaw.json 开启了 HTTP chat completions（旧版部署可能没有这个配置）
+const configPath = path.join(runtime.openClawHome, "openclaw.json");
+if (fs.existsSync(configPath)) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    cfg.gateway ??= {};
+    cfg.gateway.http ??= {};
+    cfg.gateway.http.endpoints ??= {};
+    cfg.gateway.http.endpoints.chatCompletions ??= {};
+    if (!cfg.gateway.http.endpoints.chatCompletions.enabled) {
+      cfg.gateway.http.endpoints.chatCompletions.enabled = true;
+      fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+      appendDeploymentLog("Enabled HTTP chatCompletions endpoint in openclaw.json");
+    }
+  } catch {}
+}
+
+// 始终确保 workspace 子代理是最新的（openclaw.json 已存在时也要同步）
+if (sourceRoot) {
+  const templateWorkspaces = path.join(sourceRoot, "workspace", "career", "workspaces");
+  const deployedWorkspaces = path.join(runtime.workspaceRoot, "workspaces");
+  if (fs.existsSync(templateWorkspaces) && !fs.existsSync(deployedWorkspaces)) {
+    fs.cpSync(templateWorkspaces, deployedWorkspaces, { recursive: true, force: true, dereference: false });
+    appendDeploymentLog(`Copied sub-agent workspaces from template to ${deployedWorkspaces}`);
+  }
+}
+
 ensureCareerFiles();
 appendDeploymentLog(`Ensured PawPals workspace at ${runtime.workspaceRoot}`);
 
