@@ -691,6 +691,7 @@ export default function App() {
         socketRef.current?.emit('wake_chief_session', {
           petName: p?.name || '团团',
           petPersonality: p?.personality || '',
+          userNickname: p?.userNickname || '主人',
         });
       }
       setMessages(msgs);
@@ -1211,7 +1212,7 @@ export default function App() {
     }
     if (chat.id === 'job' && !jobWakeRequestedRef.current) {
       jobWakeRequestedRef.current = true;
-      socketRef.current?.emit('wake_job_session', { petName: pet.name, petPersonality: pet.personality });
+      socketRef.current?.emit('wake_job_session', { petName: pet.name, petPersonality: pet.personality, userNickname: pet.userNickname || '主人' });
     }
   };
 
@@ -1350,7 +1351,7 @@ export default function App() {
       body: JSON.stringify(pet),
     }).catch(() => {});
     // 宠物创建完成后，主动触发团团在私聊打招呼
-    socketRef.current?.emit('wake_chief_session', { petName: pet.name, petPersonality: pet.personality });
+    socketRef.current?.emit('wake_chief_session', { petName: pet.name, petPersonality: pet.personality, userNickname: pet.userNickname || '主人' });
     chiefWakeRequestedRef.current = true;
   };
 
@@ -1395,10 +1396,10 @@ export default function App() {
         <div className="flex justify-between items-center">
           <div>
             <h2 className="text-2xl font-display font-bold text-pet-brown">{t('onboardingTitle')}</h2>
-            <p className="text-pet-brown/40 text-xs mt-1">{t('step')} {onboardingStep} / 3</p>
+            <p className="text-pet-brown/40 text-xs mt-1">{t('step')} {onboardingStep} / 4</p>
           </div>
           <div className="flex gap-1">
-            {[1, 2, 3].map(s => (
+            {[1, 2, 3, 4].map(s => (
               <div key={s} className={cn("w-2 h-2 rounded-full", s <= onboardingStep ? "bg-pet-orange" : "bg-pet-cream")} />
             ))}
           </div>
@@ -1427,9 +1428,12 @@ export default function App() {
                 <label className="text-xs font-bold text-pet-brown/60 uppercase tracking-wider block mb-2 px-1">{t('petType')}</label>
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { type: 'cat', icon: '🐈', label: t('cat') },
-                    { type: 'dog', icon: '🐕', label: t('dog') },
-                    { type: 'rabbit', icon: '🐇', label: t('rabbit') },
+                    { type: 'cat', icon: '🐈', label: '猫咪' },
+                    { type: 'dog', icon: '🐕', label: '狗狗' },
+                    { type: 'rabbit', icon: '🐇', label: '兔兔' },
+                    { type: 'figure', icon: '🎎', label: '手办' },
+                    { type: 'idol', icon: '⭐', label: '明星' },
+                    { type: 'other', icon: '✨', label: '其他' },
                   ].map(item => (
                     <button 
                       key={item.type}
@@ -1493,31 +1497,69 @@ export default function App() {
                   placeholder="它是一个怎样的伴学官？严厉的、温柔的、还是幽默的？"
                 />
               </div>
-              <div className="bg-pet-orange/5 p-4 rounded-2xl border border-pet-orange/10">
-                <div className="flex items-center gap-2 mb-2">
-                  <Sparkles size={14} className="text-pet-orange" />
-                  <span className="text-[10px] font-bold text-pet-orange uppercase tracking-wider">档案预览</span>
+              <div className=”bg-pet-orange/5 p-4 rounded-2xl border border-pet-orange/10”>
+                <div className=”flex items-center gap-2 mb-2”>
+                  <Sparkles size={14} className=”text-pet-orange” />
+                  <span className=”text-[10px] font-bold text-pet-orange uppercase tracking-wider”>档案预览</span>
                 </div>
-                <p className="text-[10px] text-pet-brown/60 leading-relaxed">
-                  该宠物将作为你的“首席伴学官”，在自习时监督你，在聊天时鼓励你。它会根据你设定的性格与你互动。
+                <p className=”text-[10px] text-pet-brown/60 leading-relaxed”>
+                  该宠物将作为你的”首席伴学官”，在自习时监督你，在聊天时鼓励你。它会根据你设定的性格与你互动。
                 </p>
+              </div>
+            </motion.div>
+          )}
+
+          {onboardingStep === 4 && (
+            <motion.div
+              key=”step4”
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className=”space-y-6”
+            >
+              <div>
+                <label className=”text-xs font-bold text-pet-brown/60 uppercase tracking-wider block mb-2 px-1”>
+                  它叫你什么？
+                </label>
+                <input
+                  type=”text”
+                  value={pet.userNickname ?? ''}
+                  onChange={(e) => setPet(prev => ({ ...prev, userNickname: e.target.value }))}
+                  className=”w-full bg-pet-cream rounded-2xl p-4 border-none focus:ring-2 focus:ring-pet-orange/30 text-pet-brown font-bold”
+                  placeholder=”例如：主人、宝、你的名字...”
+                />
+                <p className=”text-[10px] text-pet-brown/40 mt-2 px-1”>不填默认叫「主人」</p>
+              </div>
+              <div className=”flex flex-wrap gap-2”>
+                {['主人', '宝', '亲爱的', '少爷', '公主'].map(nick => (
+                  <button
+                    key={nick}
+                    onClick={() => setPet(prev => ({ ...prev, userNickname: nick }))}
+                    className={cn(
+                      “px-3 py-1.5 rounded-xl text-xs font-bold transition-all”,
+                      pet.userNickname === nick ? “bg-pet-orange text-white” : “bg-pet-cream text-pet-brown/60 hover:bg-pet-pink/20”
+                    )}
+                  >
+                    {nick}
+                  </button>
+                ))}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <div className="flex gap-4 pt-4">
+        <div className=”flex gap-4 pt-4”>
           {onboardingStep > 1 && (
-            <button 
+            <button
               onClick={() => setOnboardingStep(prev => prev - 1)}
-              className="p-4 bg-pet-cream text-pet-brown/60 rounded-2xl hover:bg-pet-pink/20 transition-colors"
+              className=”p-4 bg-pet-cream text-pet-brown/60 rounded-2xl hover:bg-pet-pink/20 transition-colors”
             >
               <ChevronLeft size={24} />
             </button>
           )}
-          <button 
+          <button
             onClick={() => {
-              if (onboardingStep < 3) {
+              if (onboardingStep < 4) {
                 setOnboardingStep(prev => prev + 1);
               } else {
                 handleFinishPetProfile();
@@ -1525,8 +1567,8 @@ export default function App() {
             }}
             className="flex-1 bg-pet-orange text-white py-4 rounded-2xl font-bold pet-shadow hover:scale-[1.02] transition-transform flex items-center justify-center gap-2"
           >
-            {onboardingStep === 3 ? t('startJourney') : t('next')}
-            {onboardingStep < 3 && <ChevronRight size={20} />}
+            {onboardingStep === 4 ? t('startJourney') : t('next')}
+            {onboardingStep < 4 && <ChevronRight size={20} />}
           </button>
         </div>
       </div>
@@ -2051,8 +2093,19 @@ export default function App() {
                     className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6"
                   >
                     <div className="text-center">
-                      <span className="bg-white/50 px-3 py-1 rounded-full text-[10px] text-pet-brown/40 uppercase tracking-widest">
-                        欢迎来到 {activeChat.name}
+                      <span className="bg-white/50 px-3 py-1 rounded-full text-[10px] text-pet-brown/40 tracking-widest">
+                        {activeChat.id === 'pixel'
+                          ? (() => {
+                              const states = [
+                                `📞 刚刚接通了${activeChat.name}的电话`,
+                                `✨ ${activeChat.name} 正在赶来的路上`,
+                                `🌙 ${activeChat.name} 刚从梦里醒来`,
+                                `📖 ${activeChat.name} 放下手里的书来找你了`,
+                                `🎵 ${activeChat.name} 停下哼歌来陪你`,
+                              ];
+                              return states[Math.floor(Date.now() / 86400000) % states.length];
+                            })()
+                          : `欢迎来到 ${activeChat.name}`}
                       </span>
                     </div>
                     

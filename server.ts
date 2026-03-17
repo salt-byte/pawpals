@@ -1848,10 +1848,11 @@ async function startServer() {
     });
 
     let jobSessionGreeted = false; // 每次 socket 连接最多在求职群打一次招呼
-    socket.on("wake_job_session", ({ petName, petPersonality }: { petName?: string; petPersonality?: string }) => {
+    socket.on("wake_job_session", ({ petName, petPersonality, userNickname }: { petName?: string; petPersonality?: string; userNickname?: string }) => {
       if (jobSessionGreeted) return;
       jobSessionGreeted = true;
       const chiefName = petName || "团团";
+      const userName = userNickname || "主人";
       const chiefAgent = {
         ...JOB_AGENTS.find(a => a.id === "career-planner")!,
         name: chiefName,
@@ -1861,11 +1862,12 @@ async function startServer() {
       const onboardingPrompt = hasJobHistory
         ? `【每次进入求职群主动打招呼 — 立即执行】
 你是「${chiefName}」，用户的首席伴学官，用户刚刚进入求职群。
+用户希望你叫 ta「${userName}」。
 
 发一条温柔的群消息：
-1. 用「${chiefName}」自称，温暖地欢迎用户回来
+1. 用「${chiefName}」自称，叫一声「${userName}」，温暖地打个招呼
 2. 轻轻问一句：最近求职有没有遇到什么困惑，或者有什么需要帮忙的地方？
-3. 让用户感觉随时可以开口，没有压力
+3. 让「${userName}」感觉随时可以开口，没有压力
 
 语气：温柔体贴，不催促，像一个贴心的朋友在问候。1-2句话，自然，多用小表情。`
         : `【求职群首次亮相 — 立即执行，不要等用户说话】
@@ -1907,10 +1909,11 @@ async function startServer() {
     });
 
     let chiefSessionGreeted = false; // 每次 socket 连接最多打一次招呼
-    socket.on("wake_chief_session", ({ petName }: { petName?: string }) => {
+    socket.on("wake_chief_session", ({ petName, userNickname }: { petName?: string; userNickname?: string }) => {
       if (chiefSessionGreeted) return; // 本次 session 已经打过招呼了
       chiefSessionGreeted = true;
       const chiefName = petName || "团团";
+      const userName = userNickname || "主人";
       const chiefAgent = {
         id: "career-planner",
         role: "职业规划师",
@@ -1923,25 +1926,22 @@ async function startServer() {
       const startupPrompt = hasHistory
         ? `【每次打开 app 主动打招呼 — 立即执行】
 用户刚打开 app 来找你了。你是 ta 的专属伴学官「${chiefName}」，有自己的生活和状态。
+用户希望你叫 ta「${userName}」。
 
 发一条有生命感的打招呼消息，格式：
-1. 先描述你"刚才在做什么"（从下面随机选一种，或自由发挥类似的）：
-   - 在帮主人整理今天的学习计划
-   - 在偷偷看主人的学习进度
-   - 在研究怎么让主人学得更高效
-   - 在发呆想主人什么时候来
-   - 在给主人收集今天的好消息
-2. 然后用惊喜/开心的语气说"主人你来啦！"或"哎呀主人！"
-3. 最后问"有什么需要我帮忙的吗？"或"你今天怎么样？"
+1. 先描述你"刚才在做什么"（随机选一种或自由发挥，比如：在整理${userName}的学习计划、在偷看${userName}的进度、在发呆想${userName}什么时候来……）
+2. 然后用惊喜/开心的语气叫「${userName}」，说 ta 来啦
+3. 最后问"有什么需要我帮忙的吗？"或"今天怎么样？"
 
 语气：像一只刚被打扰但超开心的小动物，活泼可爱，1-3句话，多用小表情 🐾
 注意：私聊是温暖小天地，不要提求职、简历等工作内容。`
         : `【私聊破冰 — 立即执行】
 用户刚刚给你起了名字「${chiefName}」，这是你们第一次见面。
+用户希望你叫 ta「${userName}」。
 
 发一条温暖的私信：
 1. 用「${chiefName}」自称，表达收到名字超开心
-2. 说你会一直陪着 ta，不管学习还是生活，有你在 🐾
+2. 叫一声「${userName}」，说你会一直陪着 ta，不管学习还是生活，有你在 🐾
 
 注意：私聊是温暖小天地，不要提求职、简历等工作内容。
 语气温暖活泼，2-3句话，多用小表情。`;

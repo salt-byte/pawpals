@@ -2,10 +2,11 @@ export interface Pet {
   level: number;
   energy: number;
   name: string;
-  type: 'cat' | 'dog' | 'rabbit';
+  type: 'cat' | 'dog' | 'rabbit' | 'figure' | 'idol' | 'other';
   exp: number;
   personality?: string;
   avatar?: string;
+  userNickname?: string; // 宠物对用户的称呼，默认"主人"
 }
 
 export interface Task {
