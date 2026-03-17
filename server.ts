@@ -4,11 +4,12 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import os from "os";
 import path from "path";
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec } from "child_process";
 import schedule from "node-schedule";
 import crypto from "crypto";
 import archiver from "archiver";
+import multer from "multer";
 
 dotenv.config();
 
@@ -38,6 +39,8 @@ const OPENCLAW_HOME = (process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HO
 const CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(OPENCLAW_HOME, "workspace", "career");
 const COOKIE_DIR = process.env.PAWPALS_COOKIE_DIR || path.join(APP_DATA_DIR, "jobclaw", "cookies");
 const COOKIE_FILE = path.join(COOKIE_DIR, "boss.json");
+const BOSS_PROFILE_DIR = path.join(os.homedir(), ".jobclaw", "browser_profile", "boss");
+const JOBCLAW_SRC = "/Users/dengyudie/Downloads/jobclaw";
 const APPLICATIONS_FILE = path.join(CAREER_DIR, "applications.json");
 const JOBS_FILE = path.join(CAREER_DIR, "jobs.json");
 const OPENCLAW_CONFIG_FILE = path.join(OPENCLAW_HOME, "openclaw.json");
@@ -297,7 +300,7 @@ function startWatchdog(gatewayBase: string, openclawBin: string, notifyIO?: any)
         if (!_wd.paused) {
           _wd.paused = true;
           console.error("[watchdog] 已达最大修复次数，停止自动重启");
-          notifyIO?.emit("watchdog_alert", { type: "crash_loop", message: "⚠️ Gateway 反复崩溃，自动修复失败，请重启 PawPals 应用" });
+          notifyIO?.emit("watchdog_alert", { type: "crash_loop", message: "[WARN] Gateway 反复崩溃，自动修复失败，请重启 PawPals 应用" });
         }
         return;
       }
@@ -307,7 +310,7 @@ function startWatchdog(gatewayBase: string, openclawBin: string, notifyIO?: any)
       console.log(`[watchdog] 崩溃循环，第 ${_wd.repairCount} 次：运行 doctor --fix`);
       notifyIO?.emit("watchdog_alert", { type: "repair", message: `🔧 Gateway 崩溃循环，第 ${_wd.repairCount} 次自动诊断修复中...` });
       const doctorOut = await _runDoctor(openclawBin);
-      notifyIO?.emit("watchdog_alert", { type: "repair_done", message: `✅ 诊断完成，正在重启 Gateway...`, detail: doctorOut.slice(0, 300) });
+      notifyIO?.emit("watchdog_alert", { type: "repair_done", message: `[OK] 诊断完成，正在重启 Gateway...`, detail: doctorOut.slice(0, 300) });
     }
 
     await _restartGateway(gatewayPort, openclawBin);
@@ -316,7 +319,7 @@ function startWatchdog(gatewayBase: string, openclawBin: string, notifyIO?: any)
       const recovered = await _isGatewayAlive(gatewayBase);
       if (recovered) {
         console.log("[watchdog] Gateway 已恢复");
-        notifyIO?.emit("watchdog_alert", { type: "recovered", message: "✅ Gateway 已恢复正常" });
+        notifyIO?.emit("watchdog_alert", { type: "recovered", message: "[OK] Gateway 已恢复正常" });
       }
     }, 15_000);
   }, kWdCheckIntervalMs);
@@ -681,6 +684,7 @@ function appendChatLog(agent: { name: string }, userMsg: string, replySnippet: s
   } catch {}
 }
 
+
 // ── 各 agent 可用工具分配 ─────────────────────────────────────────────
 // 每个 agent 只能调用自己职责范围内的工具，防止越权操作
 const AGENT_TOOLS: Record<string, string[]> = {
@@ -781,40 +785,35 @@ async function executeTool(name: string, args: any): Promise<string> {
       const query = args.query || "";
       const city  = args.location || "101010100"; // 默认北京
 
-      if (existsSync(COOKIE_FILE)) {
-        // ── 有 Boss cookies → curl_cffi 模拟 Chrome TLS 直接调 Boss API ──
+      if (existsSync(BOSS_PROFILE_DIR)) {
+        // ── 有登录 profile → 用 jobclaw BossScraper ──
         const script = `
-import json, pathlib, urllib.parse, sys
-from curl_cffi import requests as cf
-
-cookie_path = pathlib.Path(${JSON.stringify(COOKIE_FILE)})
-cookies_raw = json.loads(cookie_path.read_text())['cookies']
-cookie_dict = {c['name']: c['value'] for c in cookies_raw}
+import asyncio, json, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(JOBCLAW_SRC)})
+from jobclaw.scraper.boss import BossScraper
+from jobclaw.config import Settings
 
 query = ${JSON.stringify(query)}
-city  = ${JSON.stringify(city)}
-params = urllib.parse.urlencode({'scene':1,'query':query,'city':city,'page':1,'pageSize':15})
-url = 'https://www.zhipin.com/wapi/zpgeek/search/joblist.json?' + params
-referer = 'https://www.zhipin.com/web/geek/job?' + urllib.parse.urlencode({'query':query,'city':city})
 
-r = cf.get(url, cookies=cookie_dict, impersonate='chrome120',
-           headers={'Referer': referer, 'Accept-Language': 'zh-CN,zh;q=0.9'})
-d = r.json()
-if d.get('code') != 0:
-    print('FAIL:' + str(d.get('code')) + ' ' + str(d.get('message'))); sys.exit(1)
+async def main():
+    settings = Settings()
+    async with BossScraper(settings) as scraper:
+        jobs = await scraper.scrape_jobs(query, limit=15)
+    lines = []
+    structured = []
+    for i, j in enumerate(jobs, 1):
+        if j.salary:
+            sal = str(j.salary.min_annual // 1000) + '-' + str(j.salary.max_annual // 1000) + 'K'
+        else:
+            sal = '薪资面议'
+        lines.append(f"{i}. **{j.title}** @ {j.company} [{sal}]\\n   📍 {j.location}\\n   🔗 {j.url}")
+        structured.append(json.dumps({'company': j.company, 'title': j.title, 'url': str(j.url), 'salary': sal, 'city': j.location, 'source': 'boss'}, ensure_ascii=False))
+    print('\\n\\n'.join(lines))
+    print('---JOBS_JSON---')
+    print('\\n'.join(structured))
 
-jobs = d.get('zpData', {}).get('jobList', [])
-lines = []
-structured = []
-for i, j in enumerate(jobs, 1):
-    salary = j.get('salaryDesc', '薪资面议')
-    url_path = j.get('encryptJobId', '')
-    job_url = f"https://www.zhipin.com/job_detail/{url_path}.html" if url_path else 'https://www.zhipin.com'
-    lines.append(f"{i}. **{j.get('jobName')}** @ {j.get('brandName')} [{salary}]\\n   📍 {j.get('cityName','')} · {j.get('areaDistrict','')}  ⏱ {j.get('experienceName','')} · {j.get('degreeName','')}\\n   🔗 {job_url}")
-    structured.append(json.dumps({'company': j.get('brandName',''), 'title': j.get('jobName',''), 'url': job_url, 'salary': salary, 'city': j.get('cityName',''), 'source': 'boss'}, ensure_ascii=False))
-print('\\n\\n'.join(lines))
-print('---JOBS_JSON---')
-print('\\n'.join(structured))
+asyncio.run(main())
 `;
         return new Promise<string>((resolve) => {
           const child = spawn(PYTHON_BIN, ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
@@ -877,7 +876,7 @@ print('\\n'.join(structured))
       const overdue = apps.filter(a =>
         a.status === "applied" && a.followUpDate && a.followUpDate <= today
       );
-      if (!overdue.length) return "✅ 没有逾期的 follow-up！";
+      if (!overdue.length) return "[OK] 没有逾期的 follow-up！";
       return `⏰ 需要 follow-up 的投递（${overdue.length} 条）：\n\n` +
         overdue.map(a => `· **${a.company}** — ${a.role}（follow-up 日期：${a.followUpDate}）`).join("\n");
     }
@@ -898,7 +897,7 @@ print('\\n'.join(structured))
       };
       apps.push(newApp);
       writeFileSync(APPLICATIONS_FILE, JSON.stringify(apps, null, 2));
-      return `✅ 已记录投递：${args.company} — ${args.role}，follow-up 提醒设在 ${followUpDate}。`;
+      return `[OK] 已记录投递：${args.company} — ${args.role}，follow-up 提醒设在 ${followUpDate}。`;
     }
 
     if (name === "read_jobs") {
@@ -912,96 +911,56 @@ print('\\n'.join(structured))
 
     if (name === "apply_job") {
       const { job_url, company, title, greeting } = args;
-      if (!existsSync(COOKIE_FILE)) {
-        return "❌ 未找到 Boss直聘 登录信息，请先在群里登录 Boss直聘。";
+      if (!existsSync(BOSS_PROFILE_DIR)) {
+        return "[ERR] 未找到 Boss直聘 登录信息，请先点击「登录 Boss直聘」完成登录。";
       }
-      const safeGreeting = greeting || `您好！我是邓雨蝶，USC数据科学在读，曾在智谱AI做AI产品经理，对${title}岗位很感兴趣，期待与您沟通！`;
+      // Build greeting from profile if not provided by AI
+      let safeGreeting = greeting;
+      if (!safeGreeting) {
+        try {
+          const profileMd = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf-8");
+          // Extract name, latest experience, and target role from profile
+          const nameMatch = profileMd.match(/^#[^—\n]+—\s*(.+)/m);
+          const expMatch = profileMd.match(/\*\*([^*]+)\*\*\s*—\s*AI PM[^,\n]*/m);
+          const name = nameMatch?.[1]?.trim() || "我";
+          const latestExp = expMatch?.[1]?.trim() || "";
+          safeGreeting = `您好！我是${name}，USC数据科学硕士在读${latestExp ? `，曾在${latestExp}担任AI产品经理` : ""}，对「${title}」岗位非常感兴趣，期待与您进一步沟通！`;
+        } catch {
+          safeGreeting = `您好！对「${title}」岗位非常感兴趣，期待与您沟通！`;
+        }
+      }
       const script = `
-import asyncio, json, pathlib, sys
-from playwright.async_api import async_playwright
+import asyncio, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(JOBCLAW_SRC)})
+from jobclaw.applier.boss import BossApplier
+from jobclaw.config import Settings
+from jobclaw.domain import Profile
+from jobclaw.models import Job, JobSource
 
 async def apply():
-    cookie_path = pathlib.Path(${JSON.stringify(COOKIE_FILE)})
-    cookies = json.loads(cookie_path.read_text())['cookies']
-    job_url  = ${JSON.stringify(job_url)}
-    greeting = ${JSON.stringify(safeGreeting)}
+    settings = Settings(boss_greeting=${JSON.stringify(safeGreeting)})
+    profile = Profile(name='邓雨蝶', email='yudieden@usc.edu',
+                      skills=['AI产品经理','Python','数据分析'],
+                      desired_roles=['AI PM', 'AI Strategy'])
+    job = Job(source=JobSource.BOSS, title=${JSON.stringify(title)},
+              company=${JSON.stringify(company)}, url=${JSON.stringify(job_url)}, location='')
+    async with BossApplier(settings) as applier:
+        result = await applier.apply(job, profile)
+    status = result.status.value
+    reason = result.extra.get('reason', '')
+    if status == 'submitted':
+        print('OK:' + (result.extra.get('greeting_sent') or safeGreeting)[:80])
+    elif reason == 'already_applied':
+        print('ALREADY')
+    elif reason == 'daily_limit':
+        print('FAIL:今日沟通上限已达到，明天再继续')
+    elif reason == 'captcha':
+        print('FAIL:触发了验证码，请手动处理')
+    else:
+        print('FAIL:' + reason)
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
-        )
-        ctx = await browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport={'width': 1280, 'height': 800},
-        )
-        await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-        await ctx.add_cookies(cookies)
-
-        page = await ctx.new_page()
-        await page.goto(job_url, wait_until='domcontentloaded', timeout=30000)
-        await asyncio.sleep(1.5)
-
-        # 被重定向到登录页
-        if '/web/user' in page.url or 'passport' in page.url:
-            print('NEED_LOGIN'); await browser.close(); return
-
-        # 已经在沟通了
-        for sel in ["a:has-text('继续沟通')"]:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    print('ALREADY_APPLIED'); await browser.close(); return
-            except: pass
-
-        # 找「立即沟通」按钮
-        btn = None
-        for sel in ["a.btn-startchat", ".job-detail-box .btn-startchat",
-                    "a[ka='job_detail_chat']", "a:has-text('立即沟通')"]:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    btn = el; break
-            except: pass
-
-        if not btn:
-            print('NO_BUTTON'); await browser.close(); return
-
-        await btn.click()
-        await asyncio.sleep(2.5)
-
-        # 找输入框
-        chat_input = None
-        for sel in ["#chat-input", ".chat-input textarea",
-                    "div.edit-area [contenteditable='true']", "textarea[name='msg']"]:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    chat_input = el; break
-            except: pass
-
-        if chat_input:
-            await chat_input.click()
-            await chat_input.fill('')
-            await page.keyboard.type(greeting, delay=40)
-            await asyncio.sleep(0.8)
-            sent = False
-            for sel in ["button.btn-send", "button:has-text('发送')", ".chat-op button"]:
-                try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await el.click(); sent = True; break
-                except: pass
-            if not sent:
-                await page.keyboard.press('Enter')
-            await asyncio.sleep(1)
-        else:
-            # 没有输入框 → Boss 已自动发默认消息
-            print('DEFAULT_SENT'); await browser.close(); return
-
-        await browser.close()
-        print('SUCCESS')
-
+safeGreeting = ${JSON.stringify(safeGreeting)}
 asyncio.run(apply())
 `;
       return new Promise<string>((resolve) => {
@@ -1011,16 +970,14 @@ asyncio.run(apply())
         child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
         child.on("close", () => {
           const o = out.trim();
-          if (o.includes("SUCCESS") || o.includes("DEFAULT_SENT")) {
-            resolve(`✅ 已成功向 **${company}** 的「${title}」岗位发送打招呼消息！`);
-          } else if (o.includes("ALREADY_APPLIED")) {
-            resolve(`ℹ️ 你之前已经和 **${company}** 沟通过了，无需重复投递。`);
-          } else if (o.includes("NEED_LOGIN")) {
-            resolve("❌ cookies 已过期，请重新登录 Boss直聘。");
-          } else if (o.includes("NO_BUTTON")) {
-            resolve(`⚠️ 未找到「立即沟通」按钮（可能岗位已下线或不接受投递）：${job_url}`);
+          if (o.startsWith("OK:")) {
+            resolve(`[OK] 已成功向 **${company}** 的「${title}」岗位发送打招呼消息！`);
+          } else if (o.includes("ALREADY")) {
+            resolve(`[INFO] 你之前已经和 **${company}** 沟通过了，无需重复投递。`);
+          } else if (o.startsWith("FAIL:")) {
+            resolve(`[ERR] 投递失败：${o.slice(5)}`);
           } else {
-            resolve(`❌ 投递失败：${err.slice(0, 200) || o || "未知错误"}`);
+            resolve(`[ERR] 投递失败：${err.slice(0, 200) || o || "未知错误"}`);
           }
         });
       });
@@ -1588,7 +1545,7 @@ async function startServer() {
     try {
       ensureDir(BACKUP_DIR);
       const dest = doLocalBackup(APP_DATA_DIR, OPENCLAW_HOME);
-      res.json({ ok: true, path: dest, message: "备份成功 ✅" });
+      res.json({ ok: true, path: dest, message: "备份成功 [OK]" });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
     }
@@ -2153,116 +2110,243 @@ async function startServer() {
   });
 
   // Boss直聘 登录：用系统真实浏览器打开登录页，用户正常登录
+  // Boss直聘登录：用 jobclaw 打开持久化 Playwright 浏览器，自动检测登录成功
   app.post("/api/boss-login", async (req, res) => {
-    try {
-      spawn("open", ["https://www.zhipin.com/web/user/?ka=header-login"]);
-      res.json({ ok: true });
+    res.json({ ok: true }); // 立即返回，登录在后台进行
+    io.emit("receive_message", {
+      id: `boss-remind-${Date.now()}`,
+      sender: "投递管家",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker",
+      content: "🔑 正在打开 Boss直聘 登录窗口，请在弹出的浏览器中完成登录（扫码或密码均可）。\n\n登录成功后浏览器会自动关闭，无需手动操作 ✨",
+      groupId: "job",
+      timestamp: new Date().toISOString(),
+      isBot: true,
+    });
 
-      // 投递管家主动发提示，告诉用户登录完要回来点按钮
-      setTimeout(() => {
-        io.emit("receive_message", {
-          id: `boss-remind-${Date.now()}`,
-          sender: "投递管家",
-          avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker",
-          content: "🔑 已帮你打开 Boss直聘 登录页面！\n\n请在浏览器里完成登录（扫码或密码均可），**登录成功后回到这里点「✓ 我已登录」按钮**，我来帮你自动保存 cookies 🍪",
-          groupId: "job",
-          timestamp: new Date().toISOString(),
-          isBot: true,
-        });
-      }, 1000);
-    } catch (e: any) {
-      res.json({ ok: false, error: e.message });
-    }
-  });
-
-  // 用户登录完成后点"已登录"，自动从 Chrome 提取 Boss直聘 cookies
-  app.post("/api/boss-save-cookies", async (req, res) => {
     const script = `
-import browser_cookie3, json, pathlib, time, sys, glob
+import asyncio, sys
+from pathlib import Path
+from playwright.async_api import async_playwright
 
-home = pathlib.Path.home()
-domain = '.zhipin.com'
+PROFILE_DIR = Path.home() / '.jobclaw' / 'browser_profile' / 'boss'
+PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+for lock in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
+    (PROFILE_DIR / lock).unlink(missing_ok=True)
 
-def extract(jar):
-    found = []
-    for c in jar:
-        if c.value:
-            found.append({
-                'name': c.name, 'value': c.value,
-                'domain': getattr(c, 'domain', domain),
-                'path': getattr(c, 'path', '/'),
-                'secure': bool(getattr(c, 'secure', False)),
-            })
-    return found
+UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-cookies = []
+async def login():
+    async with async_playwright() as pw:
+        ctx = await pw.chromium.launch_persistent_context(
+            str(PROFILE_DIR), headless=False,
+            args=['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+            user_agent=UA, viewport={'width': 1280, 'height': 800},
+        )
+        await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto('https://www.zhipin.com/web/user/?ka=header-login', wait_until='domcontentloaded', timeout=30000)
+        for _ in range(300):  # 5 min timeout
+            await asyncio.sleep(1)
+            try:
+                if page.is_closed(): break
+                url = page.url
+                if '/web/geek/job' in url or '/web/geek/home' in url or 'zpgeek' in url:
+                    print('OK'); await ctx.close(); return
+            except: pass
+        print('TIMEOUT')
+        try: await ctx.close()
+        except: pass
 
-# 1. 遍历所有 Chrome/Chromium profile（包括 Edge）
-browser_dirs = {
-    'chrome': home / 'Library' / 'Application Support' / 'Google' / 'Chrome',
-    'edge':   home / 'Library' / 'Application Support' / 'Microsoft Edge',
-    'brave':  home / 'Library' / 'Application Support' / 'BraveSoftware' / 'Brave-Browser',
-}
-for bname, bdir in browser_dirs.items():
-    if not bdir.exists(): continue
-    for cookie_file in sorted(bdir.glob('*/Cookies')):
-        try:
-            loader = getattr(browser_cookie3, bname if bname != 'edge' else 'edge', browser_cookie3.chrome)
-            jar = loader(cookie_file=str(cookie_file), domain_name=domain)
-            found = extract(jar)
-            if found:
-                print(f'{bname}/{cookie_file.parent.name}: {len(found)} cookies')
-                cookies = found
-                break
-        except Exception as e:
-            pass
-    if cookies: break
-
-# 2. Firefox
-if not cookies:
-    try:
-        jar = browser_cookie3.firefox(domain_name=domain)
-        cookies = extract(jar)
-        if cookies: print(f'firefox: {len(cookies)} cookies')
-    except: pass
-
-# 3. Safari
-if not cookies:
-    try:
-        jar = browser_cookie3.safari(domain_name=domain)
-        cookies = extract(jar)
-        if cookies: print(f'safari: {len(cookies)} cookies')
-    except: pass
-
-if not cookies:
-    print('NO_COOKIES'); sys.exit(1)
-
-out = pathlib.Path(${JSON.stringify(COOKIE_FILE)})
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps({'saved_at': time.time(), 'cookies': cookies}, ensure_ascii=False))
-print('OK:' + str(len(cookies)))
+asyncio.run(login())
 `;
     const child = spawn(PYTHON_BIN, ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => console.error("[cookies]", d.toString().trim()));
-    child.on("close", (code: number) => {
-      const success = out.includes("OK:");
-      const count = success ? out.match(/OK:(\d+)/)?.[1] : "0";
+    child.stderr.on("data", (d: Buffer) => console.error("[boss-login]", d.toString().trim()));
+    child.on("close", () => {
+      const success = out.includes("OK");
       io.emit("boss_login_result", { ok: success });
       io.emit("receive_message", {
         id: `boss-login-${Date.now()}`,
         sender: "投递管家",
         avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker",
         content: success
-          ? `✅ Boss直聘 登录成功！已提取 ${count} 个 cookies，现在可以帮你自动投递了 🚀`
-          : "❌ 没找到 Boss直聘 cookies，请确认已在浏览器里登录 zhipin.com",
+          ? "[OK] Boss直聘 登录成功！浏览器已自动关闭，现在可以帮你搜岗位、自动投递了 [rocket]"
+          : "[ERR] 登录超时或被取消，请重试",
         groupId: "job",
         timestamp: new Date().toISOString(),
         isBot: true,
       });
-      res.json({ ok: success });
     });
+  });
+
+  // 保留兼容旧版本的 save-cookies 接口（用于手动 cookie 注入场景）
+  app.post("/api/boss-save-cookies", (_req: any, res: any) => res.json({ ok: true, note: "login is now automatic" }));
+
+  // Dashboard: real agents list from openclaw config
+  app.get("/api/gw/agents", (_req: any, res: any) => {
+    try {
+      const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_FILE, "utf8"));
+      const agents = (config?.agents?.list || []).filter((a: any) => a.id !== "main");
+      res.json({ agents });
+    } catch {
+      res.json({ agents: [] });
+    }
+  });
+
+  // Dashboard: cron jobs from openclaw cron state
+  const CRON_FILE = path.join(OPENCLAW_HOME, "cron", "jobs.json");
+  const readCronJobs = () => {
+    try {
+      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
+      return (raw?.jobs || []).map((j: any) => ({
+        id: j.id,
+        name: j.name,
+        enabled: j.enabled,
+        schedule: j.schedule?.expr || j.schedule || "",
+      }));
+    } catch { return []; }
+  };
+  const writeCronJobs = (jobs: any[]) => {
+    try {
+      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
+      raw.jobs = jobs;
+      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
+    } catch {}
+  };
+
+  app.get("/api/gw/cron/jobs", (_req: any, res: any) => res.json(readCronJobs()));
+
+  app.post("/api/gw/cron/toggle", (req: any, res: any) => {
+    try {
+      const { id, enabled } = req.body;
+      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
+      const job = (raw?.jobs || []).find((j: any) => j.id === id);
+      if (job) { job.enabled = enabled; writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2)); }
+      res.json({ ok: true });
+    } catch { res.json({ ok: false }); }
+  });
+
+  app.delete("/api/gw/cron/jobs/:id", (req: any, res: any) => {
+    try {
+      const { id } = req.params;
+      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
+      raw.jobs = (raw?.jobs || []).filter((j: any) => j.id !== id);
+      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
+      res.json(readCronJobs());
+    } catch { res.json([]); }
+  });
+
+  app.post("/api/gw/cron/jobs", (req: any, res: any) => {
+    try {
+      const { name, message, schedule, enabled } = req.body;
+      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
+      raw.jobs = raw.jobs || [];
+      raw.jobs.push({
+        id: `pawpals-${Date.now()}`,
+        name,
+        enabled: enabled !== false,
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now(),
+        schedule: { kind: "cron", expr: schedule, tz: "Asia/Shanghai" },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: { kind: "agentTurn", message },
+        delivery: { mode: "announce", channel: "feishu", to: "chat:oc_db61de856d9dd58df095f46c044c2231", accountId: "job-hunter" },
+        state: {},
+      });
+      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
+      res.json(readCronJobs());
+    } catch { res.json([]); }
+  });
+
+  // Dashboard: usage history — reads real token data from openclaw gateway
+  app.get("/api/gw/usage/recent-token-history", (_req: any, res: any) => {
+    exec(`${OPENCLAW_BIN} gateway usage-cost --json`, { timeout: 8000 }, (_err, stdout) => {
+      try {
+        const parsed = JSON.parse(stdout || "{}");
+        const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+        res.json(sessions.map((entry: any) => ({
+          timestamp: entry.updatedAt || new Date().toISOString(),
+          sessionId: entry.sessionId || "",
+          agentId: entry.agentId || "main",
+          model: entry.model,
+          provider: entry.provider,
+          inputTokens: entry.inputTokens || 0,
+          outputTokens: entry.outputTokens || 0,
+          cacheReadTokens: entry.cacheReadTokens || 0,
+          cacheWriteTokens: entry.cacheWriteTokens || 0,
+          totalTokens: entry.totalTokens || 0,
+          costUsd: entry.costUsd,
+        })).reverse());
+      } catch { res.json([]); }
+    });
+  });
+
+  // ── Manage Panel ──────────────────────────────────────────────────────────
+  const MANAGE_CONFIG_FILE = path.join(CAREER_DIR, "manage_config.json");
+  const MANAGE_UPLOADS_DIR = path.join(CAREER_DIR, "uploads");
+  ensureDir(MANAGE_UPLOADS_DIR);
+
+  function readManageConfig() {
+    try {
+      if (existsSync(MANAGE_CONFIG_FILE)) return JSON.parse(readFileSync(MANAGE_CONFIG_FILE, "utf8"));
+    } catch {}
+    return { allowedPaths: [] };
+  }
+  function writeManageConfig(cfg: any) {
+    writeFileSync(MANAGE_CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  }
+
+  app.get("/api/manage/paths", (_req: any, res: any) => {
+    const cfg = readManageConfig();
+    res.json({ paths: cfg.allowedPaths || [] });
+  });
+
+  app.post("/api/manage/paths", (req: any, res: any) => {
+    const { path: newPath } = req.body;
+    if (!newPath || typeof newPath !== "string") return res.status(400).json({ error: "path required" });
+    const cfg = readManageConfig();
+    const paths: string[] = cfg.allowedPaths || [];
+    if (!paths.includes(newPath)) paths.push(newPath);
+    cfg.allowedPaths = paths;
+    writeManageConfig(cfg);
+    res.json({ ok: true, paths });
+  });
+
+  app.delete("/api/manage/paths", (req: any, res: any) => {
+    const { path: rmPath } = req.body;
+    const cfg = readManageConfig();
+    cfg.allowedPaths = (cfg.allowedPaths || []).filter((p: string) => p !== rmPath);
+    writeManageConfig(cfg);
+    res.json({ ok: true, paths: cfg.allowedPaths });
+  });
+
+  // List uploaded files
+  app.get("/api/manage/files", (_req: any, res: any) => {
+    try {
+      const files = readdirSync(MANAGE_UPLOADS_DIR).map(name => {
+        const full = path.join(MANAGE_UPLOADS_DIR, name);
+        const s = statSync(full);
+        return { name, path: full, size: s.size, mtime: s.mtime.toISOString() };
+      });
+      res.json({ files });
+    } catch {
+      res.json({ files: [] });
+    }
+  });
+
+  // Upload file to workspace uploads dir
+  const upload = multer({ dest: MANAGE_UPLOADS_DIR });
+  app.post("/api/manage/upload", upload.single("file"), (req: any, res: any) => {
+    if (!req.file) return res.status(400).json({ error: "no file" });
+    const ext = path.extname(req.file.originalname);
+    const destName = req.file.originalname.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5]/g, "_");
+    const destPath = path.join(MANAGE_UPLOADS_DIR, destName);
+    copyFileSync(req.file.path, destPath);
+    // remove multer tmp file
+    try { unlinkSync(req.file.path); } catch {}
+    res.json({ ok: true, filename: destName, path: destPath });
   });
 
   // OpenClaw gateway management API proxy

@@ -89,6 +89,12 @@ async function startDesktopRuntime() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadURL(runtime.appUrl);
     }
+    // Mark first run complete so future launches skip the launcher
+    const { firstRunFile, pawPalsHome } = getDeploymentFiles();
+    try {
+      fs.mkdirSync(pawPalsHome, { recursive: true });
+      if (!fs.existsSync(firstRunFile)) fs.writeFileSync(firstRunFile, new Date().toISOString(), "utf8");
+    } catch {}
     // Auto-restart if server dies unexpectedly
     startedRuntime.server?.on("exit", (code) => {
       if (code !== 0 && !app.isQuitting) {
@@ -105,6 +111,10 @@ async function startDesktopRuntime() {
 }
 
 app.whenReady().then(async () => {
+  // Clear stale deployment state on startup so launcher always shows "等待开始"
+  const { stateFile, firstRunFile } = getDeploymentFiles();
+  try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
+
   ipcMain.handle("pawpals:get-deployment-status", async () => readDeploymentStatus());
   ipcMain.on("pawpals:start-deployment", () => {
     startDesktopRuntime().catch((error) => {
@@ -112,7 +122,17 @@ app.whenReady().then(async () => {
     });
   });
 
-  createWindow();
+  // First launch: show launcher so user can click "开始自动部署"
+  // Subsequent launches: skip launcher and boot directly into the app
+  const isFirstRun = !fs.existsSync(firstRunFile);
+  if (isFirstRun) {
+    createWindow();
+  } else {
+    startDesktopRuntime().catch((error) => {
+      dialog.showErrorBox("PawPals failed to start", String(error));
+    });
+    createWindow();
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

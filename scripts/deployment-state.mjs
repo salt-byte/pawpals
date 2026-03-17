@@ -9,12 +9,13 @@ function ensureDir(dir) {
 export function getDeploymentFiles() {
   const runtime = resolveRuntimePaths();
   const stateFile = path.join(runtime.pawPalsHome, "deployment-state.json");
+  const firstRunFile = path.join(runtime.pawPalsHome, "first-run-complete");
   const logFile = path.join(runtime.pawPalsHome, "deployment.log");
   const serverLogFile = path.join(runtime.pawPalsHome, "pawpals-server.log");
   const serverErrFile = path.join(runtime.pawPalsHome, "pawpals-server.err.log");
   const gatewayLogFile = path.join(runtime.pawPalsHome, "pawpals-gateway.log");
   const gatewayErrFile = path.join(runtime.pawPalsHome, "pawpals-gateway.err.log");
-  return { ...runtime, stateFile, logFile, serverLogFile, serverErrFile, gatewayLogFile, gatewayErrFile };
+  return { ...runtime, stateFile, firstRunFile, logFile, serverLogFile, serverErrFile, gatewayLogFile, gatewayErrFile };
 }
 
 function readState(stateFile) {
