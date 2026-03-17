@@ -1210,11 +1210,8 @@ export default function App() {
       requestChiefWake();
     }
     if (chat.id === 'job' && !jobWakeRequestedRef.current) {
-      const hasJobHistory = messagesRef.current.some(m => m.groupId === 'job');
-      if (!hasJobHistory) {
-        jobWakeRequestedRef.current = true;
-        socketRef.current?.emit('wake_job_session', { petName: pet.name, petPersonality: pet.personality });
-      }
+      jobWakeRequestedRef.current = true;
+      socketRef.current?.emit('wake_job_session', { petName: pet.name, petPersonality: pet.personality });
     }
   };
 

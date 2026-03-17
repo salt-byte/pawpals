@@ -1847,16 +1847,31 @@ async function startServer() {
       }, 2000);
     });
 
+    let jobSessionGreeted = false; // 每次 socket 连接最多在求职群打一次招呼
     socket.on("wake_job_session", ({ petName, petPersonality }: { petName?: string; petPersonality?: string }) => {
-      const hasJobHistory = messages.some(m => m.groupId === "job");
-      if (hasJobHistory) return;
+      if (jobSessionGreeted) return;
+      jobSessionGreeted = true;
       const chiefName = petName || "团团";
       const chiefAgent = {
         ...JOB_AGENTS.find(a => a.id === "career-planner")!,
         name: chiefName,
         avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(chiefName)}`,
       };
-      const onboardingPrompt = `【求职群首次亮相 — 立即执行，不要等用户说话】
+      const hasJobHistory = messages.some(m => m.groupId === "job" && m.isBot);
+      const onboardingPrompt = hasJobHistory
+        ? `【每次进入求职群主动打招呼 — 立即执行】
+你是「${chiefName}」，用户的首席伴学官，用户刚刚进入求职群。
+
+发一条简短的群消息，包含：
+1. 用「${chiefName}」自称，热情欢迎用户回来
+2. 主动提醒一件可以推进的求职事项，比如：
+   - 简历有没有更新
+   - 今天有没有新的匹配岗位
+   - 有没有待跟进的投递
+3. 结尾邀请用户告诉你今天想做什么，或者直接上传简历/聊岗位
+
+语气：积极主动，像一个工作狂助理在等你分配任务。2-3句话，多用表情符号。`
+        : `【求职群首次亮相 — 立即执行，不要等用户说话】
 
 你是「${chiefName}」，首席伴学官，刚进入用户的求职群。按以下顺序发出一条完整的群消息：
 
@@ -1872,7 +1887,7 @@ async function startServer() {
 - 🎤 面试教练：收到面试邀请后激活，一对一模拟面试 + 评分复盘
 
 **第三部分：说明今天要做的事**
-今天我们先建立你的档案，完成这几件事：上传简历 → 聊清楚求职意向 → 技能分析师给你定位 → 简历专家做首轮优化
+今天我们先建立你的档案：上传简历 → 聊清楚求职意向 → 技能分析师给你定位 → 简历专家做首轮优化
 
 **第四部分：主动要求上传简历**
 结尾说：「好，我们正式开始！🐾 先把你的简历发给我吧（PDF/Word 都可以），让我先认识一下你～」
@@ -1881,7 +1896,6 @@ async function startServer() {
 
       // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
       const tryWakeJob = async (attempt = 0) => {
-        if (messages.some(m => m.groupId === "job" && m.isBot)) return; // 已成功，停止重试
         const { reply } = await streamAgent(
           chiefAgent,
           [{ role: "user", content: onboardingPrompt }],
