@@ -5460,7 +5460,23 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
     );
   });
 
-  // 每天 18:00 PM — 首席伴学官：每日求职进度周报
+  // 每天 14:00 PM — 专业老师：午间行业速递
+  schedule.scheduleJob({ hour: 14, minute: 0, tz: "America/Los_Angeles" }, () => {
+    proactivePost("professional-teacher",
+      "执行午间行业速递：搜索用户求职方向最新动态，如果发现和用户正在投递的岗位相关的信息（公司新闻、行业变化、面试趋势），主动分享到群里。格式：📰 行业速递｜[标题]：[和用户的关联]",
+      "午间行业速递"
+    );
+  });
+
+  // 每天 15:00 PM — 首席伴学官：主动跟进
+  schedule.scheduleJob({ hour: 15, minute: 0, tz: "America/Los_Angeles" }, () => {
+    proactivePost("career-planner",
+      "主动跟进：检查用户今天有没有新进展，如果超过几个小时没说话，温暖地问一句进展如何。如果有待推进的事项（比如有岗位还没选、有简历还没确认），主动提醒。控制在2-3句。",
+      "主动跟进"
+    );
+  });
+
+  // 每天 18:00 PM — 首席伴学官：每日求职进度简报
   schedule.scheduleJob({ hour: 18, minute: 0, tz: "America/Los_Angeles" }, () => {
     proactivePost("career-planner",
       "生成今日求职进度简报：读取 applications.json 统计投递数/回复率，读取 jobs.json 看今天新增了多少岗位，给出今明两天的行动建议。控制在5行以内。",
@@ -5468,7 +5484,15 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
     );
   });
 
-  console.log("⏰ 定时任务已注册：9AM 岗位猎手搜岗+投递管家follow-up | 10AM 专业老师行业学习 | 18PM 进度简报（洛杉矶时间）");
+  // 每天 21:00 PM — 专业老师：晚间学习分享
+  schedule.scheduleJob({ hour: 21, minute: 0, tz: "America/Los_Angeles" }, () => {
+    proactivePost("professional-teacher",
+      "执行晚间学习分享：搜索用户求职方向的深度内容（技术博客、面经、行业分析），挑一条最有价值的分享到群里，帮用户积累行业认知。",
+      "晚间学习分享"
+    );
+  });
+
+  console.log("⏰ 定时任务已注册：9AM 搜岗+follow-up | 10AM 行业学习 | 14PM 午间速递 | 15PM 主动跟进 | 18PM 进度简报 | 21PM 晚间分享（洛杉矶时间）");
 }
 
 startServer();
