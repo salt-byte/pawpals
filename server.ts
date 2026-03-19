@@ -3162,6 +3162,29 @@ async function streamAgent(
       }
     }
 
+    // 兜底：根据文件状态自动推断阶段（LLM 不输出 PHASE_UPDATE 也能更新进度条）
+    if (groupId === "job") {
+      const state = loadOnboardingState();
+      const hasProfile = (() => { try { return readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").trim().length > 50; } catch { return false; } })();
+      const hasResume = (() => { try { return readFileSync(RESUME_MASTER_FILE, "utf8").trim().length > 50; } catch { return false; } })();
+      const hasSkillsGap = existsSync(path.join(CAREER_DIR, "skills_gap.md"));
+      const hasJobs = (() => { try { const j = JSON.parse(readFileSync(path.join(CAREER_DIR, "jobs.json"), "utf8")); return Array.isArray(j) && j.length > 0; } catch { return false; } })();
+      const hasApps = (() => { try { const a = JSON.parse(readFileSync(path.join(CAREER_DIR, "applications.json"), "utf8")); return Array.isArray(a) && a.length > 0; } catch { return false; } })();
+
+      let inferredPhase = state.phase;
+      if (hasApps) inferredPhase = "first_application";
+      else if (hasJobs) inferredPhase = "first_job_search";
+      else if (hasSkillsGap) inferredPhase = "resume_diagnosis";
+      else if (hasProfile) inferredPhase = "professional_positioning";
+      else if (hasResume) inferredPhase = "profile_collection";
+
+      if (inferredPhase !== state.phase) {
+        state.phase = inferredPhase as any;
+        saveOnboardingState(state, io);
+        console.log(`[phase-infer] auto-updated to ${inferredPhase}`);
+      }
+    }
+
     // 清理结构化标签，不展示给用户
     fullText = fullText
       .replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "")
