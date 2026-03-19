@@ -2905,7 +2905,7 @@ async function streamAgent(
       const agentDisplayName = (agent as any).role || agent.name;
       systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
     } else if (groupId === "job") {
-      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
+      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【档案确认协议】\n当你认为用户画像采集完毕（目标方向、城市、实习类型、公司偏好等都聊到了），在回复末尾写：PROFILE_CONFIRM\n系统会自动弹出一张可编辑的档案确认卡让用户查看和修改。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
     }
 
     const boardInstruction = getStructuredBoardInstruction(agent.id);
@@ -3069,8 +3069,8 @@ async function streamAgent(
     // 保留原始回复用于标签检测（SLOT_UPDATE / PHASE_COMPLETE / NEEDS_CLARIFICATION）
     const rawReply = fullText;
 
-    // 解析 PHASE_UPDATE 标签，更新进度条
-    parseAndUpdatePhase(fullText, io);
+    // 解析 PHASE_UPDATE / PROFILE_CONFIRM 标签
+    parseAndUpdatePhase(fullText, io, allMessages, petName);
 
     // 清理结构化标签，不展示给用户
     fullText = fullText
@@ -3304,25 +3304,70 @@ async function handleJobOnboarding(
 }
 
 // ── 从 agent 回复中解析 PHASE_UPDATE 并更新进度条 ─────────────────────
-function parseAndUpdatePhase(reply: string, io: Server) {
+function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[], petName?: string) {
+  // PHASE_UPDATE:: — 更新进度条
   const match = reply.match(/PHASE_UPDATE::\{"phase":"([^"]+)"\}/);
-  if (!match) return;
+  if (match) {
+    const newPhase = match[1];
+    const validPhases = [
+      "resume_collection", "profile_collection", "profile_confirm",
+      "professional_positioning", "resume_diagnosis", "resume_review",
+      "search_strategy", "first_job_search", "first_application", "completed"
+    ];
+    if (validPhases.includes(newPhase)) {
+      const state = loadOnboardingState();
+      if (state.phase !== newPhase) {
+        state.phase = newPhase as any;
+        if (newPhase === "completed") state.completed = true;
+        saveOnboardingState(state, io);
+        console.log(`[phase] updated to ${newPhase}`);
+      }
+    }
+  }
 
-  const newPhase = match[1];
-  const validPhases = [
-    "resume_collection", "profile_collection", "profile_confirm",
-    "professional_positioning", "resume_diagnosis", "resume_review",
-    "search_strategy", "first_job_search", "first_application", "completed"
-  ];
-  if (!validPhases.includes(newPhase)) return;
+  // PROFILE_CONFIRM:: — LLM 认为画像收集完毕，弹出确认卡
+  if (reply.includes("PROFILE_CONFIRM") && allMessages) {
+    const state = loadOnboardingState();
+    const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName || "团团")}`;
 
-  const state = loadOnboardingState();
-  if (state.phase === newPhase) return; // 没变化
+    // 从 profile.md 读取当前画像数据
+    let profileData: any = { ...state.slots };
+    try {
+      const profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8");
+      const extract = (key: string) => {
+        const m = profileText.match(new RegExp(`${key}[：:]\\s*(.+)`));
+        return m?.[1]?.trim() || "";
+      };
+      profileData = {
+        targetRole: extract("方向") || state.slots?.targetRole || "",
+        market: extract("市场") || state.slots?.market || "",
+        jobType: extract("类型") || state.slots?.jobType || "",
+        timeRange: extract("时间") || state.slots?.timeRange || "",
+        targetCity: extract("城市") || state.slots?.targetCity || "",
+        roleScope: extract("范围") || state.slots?.roleScope || "",
+        companyPreference: extract("公司偏好") || state.slots?.companyPreference || "",
+        traits: extract("个人特质") || state.slots?.traits || "",
+        skills: (extract("技能") || "").split(/[,，、]/).map((s: string) => s.trim()).filter(Boolean),
+        inferredRoles: state.slots?.inferredRoles || [],
+      };
+    } catch {}
 
-  state.phase = newPhase as any;
-  if (newPhase === "completed") state.completed = true;
-  saveOnboardingState(state, io);
-  console.log(`[phase] updated to ${newPhase}`);
+    const cardMsg = {
+      id: `profile-card-${Date.now()}`,
+      sender: petName || "团团",
+      avatar: chiefAvatar,
+      content: "帮你整理了一张档案卡，看看有没有需要改的地方～",
+      groupId: "job",
+      timestamp: new Date().toISOString(),
+      isBot: true,
+      isChiefBot: true,
+      type: "profile_card",
+      profileData,
+    };
+    allMessages.push(cardMsg);
+    io.emit("receive_message", cardMsg);
+    console.log("[phase] emitted profile_card");
+  }
 }
 
 
