@@ -197,7 +197,7 @@ for (const relativePath of [
   removeDir(path.join(targetRoot, relativePath));
 }
 
-for (const workspaceId of ["jd-analyst", "app-tracker", "networker", "interview-coach", "resume-expert", "career-planner", "job-hunter"]) {
+for (const workspaceId of ["professional-teacher", "app-tracker", "networker", "interview-coach", "resume-expert", "career-planner", "job-hunter"]) {
   removeDir(path.join(targetRoot, "workspace", "career", "workspaces", workspaceId, ".openclaw"));
 }
 

@@ -23,7 +23,7 @@ export function resolveRuntimePaths() {
   const openClawHome = resolveOpenClawHome(pawPalsHome);
   const workspaceRoot = process.env.PAWPALS_WORKSPACE || path.join(openClawHome, "workspace", "career");
   const cookieDir = process.env.PAWPALS_COOKIE_DIR || path.join(pawPalsHome, "jobclaw", "cookies");
-  const gatewayPort = process.env.OPENCLAW_PORT || "18790";
+  const gatewayPort = process.env.OPENCLAW_PORT || "18791";
   const gatewayBaseUrl = process.env.OPENCLAW_BASE_URL || `http://127.0.0.1:${gatewayPort}`;
 
   return {

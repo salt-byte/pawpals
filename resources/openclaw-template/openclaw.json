@@ -98,7 +98,7 @@
       "minimax": {
         "api": "openai-completions",
         "apiKey": "",
-        "baseUrl": "https://api.minimax.io/v1",
+        "baseUrl": "https://api.minimax.chat/v1",
         "models": [
           {
             "id": "MiniMax-M2.5",
@@ -143,7 +143,7 @@
       "vllm": {
         "api": "openai-completions",
         "apiKey": "",
-        "baseUrl": "http://1.95.142.151:3000/v1",
+        "baseUrl": "",
         "models": [
           {
             "contextWindow": 128000,
@@ -297,10 +297,10 @@
         "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/interview-coach"
       },
       {
-        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/jd-analyst/agent",
-        "id": "jd-analyst",
-        "name": "jd-analyst",
-        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/jd-analyst"
+        "agentDir": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/agents/professional-teacher/agent",
+        "id": "professional-teacher",
+        "name": "professional-teacher",
+        "workspace": "/Users/dengyudie/Downloads/\u840c\u722a\u4f34\u5b66-(pawpals)/resources/openclaw-template/workspace/career/workspaces/professional-teacher"
       }
     ]
   },

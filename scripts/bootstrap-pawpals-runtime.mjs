@@ -38,11 +38,25 @@ function copyEntry(srcRoot, destRoot, entry) {
   if (!fs.existsSync(src)) return;
 
   const dest = path.join(destRoot, entry);
-  fs.cpSync(src, dest, {
-    recursive: true,
-    force: true,
-    dereference: false,
-  });
+  try {
+    fs.cpSync(src, dest, {
+      recursive: true,
+      force: true,
+      dereference: false,
+      errorOnExist: false,
+      filter: (s) => {
+        // 跳过 symlink 循环和 node_modules
+        try {
+          const real = fs.realpathSync(s);
+          if (real.startsWith(dest)) return false; // 自引用
+        } catch {}
+        if (s.includes("node_modules")) return false;
+        return true;
+      },
+    });
+  } catch (e) {
+    console.warn(`[bootstrap] copyEntry warning: ${entry}: ${e.message}`);
+  }
 }
 
 function rewritePaths(value, source, target) {
@@ -100,26 +114,71 @@ function ensureCareerFiles() {
   }
 }
 
+function removeObsoleteRuntimeArtifacts(openClawHome) {
+  const obsoleteDirs = [
+    path.join(openClawHome, "workspace", "career", "workspaces", "jd-analyst"),
+  ];
+  const obsoleteFiles = [
+    path.join(openClawHome, "workspace", "career", "workspaces", "career-planner", "SOUL.md.bak"),
+  ];
+
+  for (const dir of obsoleteDirs) {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  for (const file of obsoleteFiles) {
+    if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+    }
+  }
+
+  const workspacesRoot = path.join(openClawHome, "workspace", "career", "workspaces");
+  if (!fs.existsSync(workspacesRoot)) return;
+
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (entry.name.endsWith(".bak")) {
+        fs.rmSync(full, { force: true });
+      }
+    }
+  };
+  walk(workspacesRoot);
+}
+
 ensureDir(runtime.pawPalsHome);
 ensureDir(runtime.openClawHome);
 ensureDir(runtime.cookieDir);
 markDeploymentStep("prepare-directories", `Prepared PawPals home at ${runtime.pawPalsHome}`);
 
-if (!fs.existsSync(path.join(runtime.openClawHome, "openclaw.json"))) {
-  if (!sourceRoot) {
+// 始终从 template 初始化/更新，保证 providers、agents 等配置完整
+// 如果运行时已有 config，merge 用户已配的 apiKey
+const runtimeConfigPath = path.join(runtime.openClawHome, "openclaw.json");
+const existingConfig = fs.existsSync(runtimeConfigPath)
+  ? (() => { try { return JSON.parse(fs.readFileSync(runtimeConfigPath, "utf8")); } catch { return null; } })()
+  : null;
+
+if (!sourceRoot) {
+  if (!existingConfig) {
     throw new Error(
       "No OpenClaw template found. Set OPENCLAW_TEMPLATE_DIR or install/configure OpenClaw once on this machine first.",
     );
   }
-
+  appendDeploymentLog(`No template found, keeping existing config at ${runtime.openClawHome}`);
+} else {
+  // 从 template 复制所有文件（agents、workspace、skills 等）
   for (const entry of copyEntries) {
     copyEntry(sourceRoot, runtime.openClawHome, entry);
   }
-  appendDeploymentLog(`Initialized isolated OpenClaw home from ${sourceRoot}`);
+  appendDeploymentLog(`Initialized/updated OpenClaw home from ${sourceRoot}`);
 
-  const configPath = path.join(runtime.openClawHome, "openclaw.json");
-  if (fs.existsSync(configPath)) {
-    const raw = fs.readFileSync(configPath, "utf8");
+  if (fs.existsSync(runtimeConfigPath)) {
+    const raw = fs.readFileSync(runtimeConfigPath, "utf8");
     const rewritten = rewritePaths(JSON.parse(raw), sourceRoot, runtime.openClawHome);
     rewritten.agents ??= {};
     rewritten.agents.defaults ??= {};
@@ -131,12 +190,32 @@ if (!fs.existsSync(path.join(runtime.openClawHome, "openclaw.json"))) {
     rewritten.gateway.http.endpoints ??= {};
     rewritten.gateway.http.endpoints.chatCompletions ??= {};
     rewritten.gateway.http.endpoints.chatCompletions.enabled = true;
+
+    // Merge：如果用户之前已经配过 apiKey，保留它们
+    if (existingConfig?.models?.providers) {
+      rewritten.models ??= {};
+      rewritten.models.providers ??= {};
+      for (const [providerName, providerCfg] of Object.entries(existingConfig.models.providers)) {
+        const existing = providerCfg;
+        const target = rewritten.models.providers[providerName];
+        if (existing && typeof existing === "object" && target && typeof target === "object") {
+          // 保留用户已配的 apiKey（template 里是空的）
+          if (existing.apiKey && !target.apiKey) {
+            target.apiKey = existing.apiKey;
+          }
+        }
+      }
+    }
+    // 保留 gateway token（每次部署会重新生成，但以防万一）
+    if (existingConfig?.gateway?.auth?.token) {
+      rewritten.gateway.auth ??= {};
+      rewritten.gateway.auth.token = existingConfig.gateway.auth.token;
+    }
+
     if (!copySecrets) scrubSecrets(rewritten);
-    fs.writeFileSync(configPath, `${JSON.stringify(rewritten, null, 2)}\n`, "utf8");
-    appendDeploymentLog("Rewrote OpenClaw config paths and enabled HTTP chat completions for the PawPals local runtime");
+    fs.writeFileSync(runtimeConfigPath, `${JSON.stringify(rewritten, null, 2)}\n`, "utf8");
+    appendDeploymentLog("Rewrote OpenClaw config (template base + merged user keys)");
   }
-} else {
-  appendDeploymentLog(`Reusing existing PawPals OpenClaw home at ${runtime.openClawHome}`);
 }
 
 // 始终确保 openclaw.json 开启了 HTTP chat completions（旧版部署可能没有这个配置）
@@ -160,11 +239,17 @@ if (fs.existsSync(configPath)) {
 if (sourceRoot) {
   const templateWorkspaces = path.join(sourceRoot, "workspace", "career", "workspaces");
   const deployedWorkspaces = path.join(runtime.workspaceRoot, "workspaces");
-  if (fs.existsSync(templateWorkspaces) && !fs.existsSync(deployedWorkspaces)) {
+  if (fs.existsSync(templateWorkspaces)) {
+    ensureDir(path.dirname(deployedWorkspaces));
+    if (fs.existsSync(deployedWorkspaces)) {
+      fs.rmSync(deployedWorkspaces, { recursive: true, force: true });
+    }
     fs.cpSync(templateWorkspaces, deployedWorkspaces, { recursive: true, force: true, dereference: false });
-    appendDeploymentLog(`Copied sub-agent workspaces from template to ${deployedWorkspaces}`);
+    appendDeploymentLog(`Synced sub-agent workspaces from template to ${deployedWorkspaces}`);
   }
 }
+
+removeObsoleteRuntimeArtifacts(runtime.openClawHome);
 
 ensureCareerFiles();
 appendDeploymentLog(`Ensured PawPals workspace at ${runtime.workspaceRoot}`);

@@ -134,9 +134,9 @@ function ToolActivityCard({ activity }: { activity: ToolActivityEvent }) {
 
 const JOB_AGENTS = [
   { name: 'all',    emoji: '📣', isAll: true },
-  { name: '职业规划师', emoji: '🎯', role: '背景分析、目标岗位、求职 Roadmap' },
+  { name: '首席伴学官', emoji: '🎯', role: '背景分析、目标岗位、求职 Roadmap' },
   { name: '岗位猎手',   emoji: '🔍', role: '搜索岗位、每日扫描多平台' },
-  { name: 'JD分析师',   emoji: '📋', role: '拆解岗位要求、分析匹配度' },
+  { name: '专业老师',   emoji: '📋', role: '拆解岗位要求、分析匹配度' },
   { name: '简历专家',   emoji: '📝', role: '优化简历、撰写 Cover Letter' },
   { name: '投递管家',   emoji: '📊', role: '记录投递进度、设置 follow-up' },
   { name: '人脉顾问',   emoji: '🤝', role: '找联系人、起草 cold email' },
@@ -367,6 +367,7 @@ type ModelCompany = {
   badge: string;
   emoji: string;
   placeholder: string;
+  defaultBaseUrl?: string;  // 可选，选中该厂商时自动填入 Base URL
   models: Array<{
     model: string;
     label: string;
@@ -441,12 +442,13 @@ const MODEL_COMPANIES: readonly ModelCompany[] = [
     provider: 'minimax',
     company: 'MiniMax',
     subtitle: 'MiniMax 官方接口',
-    description: '国内热门，适合中文和 Agent 任务。',
-    keyUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key',
+    description: '国内热门，适合中文和 Agent 任务。Key 从 minimax.chat 控制台获取。',
+    keyUrl: 'https://minimax.chat/user-center/basic-information/interface-key',
     keyLabel: '去拿 MiniMax Key',
     badge: '国内热门',
     emoji: '🌊',
     placeholder: '粘贴你的 MiniMax API Key',
+    defaultBaseUrl: 'https://api.minimax.chat/v1',
     models: [
       { model: 'MiniMax-M2.5', label: 'MiniMax M2.5', note: '当前推荐模型' },
     ],
@@ -493,14 +495,29 @@ export default function App() {
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
   const t = (key: keyof typeof TRANSLATIONS['zh']) => TRANSLATIONS[lang][key] || key;
 
+  const hasSavedPetProfile = () => {
+    try {
+      const saved = localStorage.getItem('pet');
+      if (!saved) return false;
+      const parsed = JSON.parse(saved);
+      return !!parsed?.name;
+    } catch {
+      return false;
+    }
+  };
+
   const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>(() =>
-    localStorage.getItem('pawpals_authed') === '1' ? 'main' : 'auth'
+    localStorage.getItem('pawpals_authed') === '1'
+      ? (hasSavedPetProfile() || localStorage.getItem('petProfileConfigured') === '1' ? 'main' : 'onboarding')
+      : 'auth'
   );
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
   const [showPetProfileWizard, setShowPetProfileWizard] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'dashboard' | 'pet' | 'study' | 'hole' | 'contacts' | 'manage' | 'square'>('pet');
+  const [activeTab, setActiveTab] = useState<'chat' | 'pet' | 'study' | 'contacts' | 'manage' | 'square'>('pet');
+  const [squareSubTab, setSquareSubTab] = useState<'square' | 'hole'>('square');
+  const [manageSubTab, setManageSubTab] = useState<'data' | 'files'>('data');
   const localizedGroups = GROUPS.map(g => ({
     ...g,
     name: lang === 'zh' ? g.name : (g.id === 'job' ? 'Job Seekers' : g.id === 'civil' ? 'Civil Exam' : 'Grad Exam'),
@@ -522,7 +539,7 @@ export default function App() {
   const [studyRoomUsers, setStudyRoomUsers] = useState<StudySession[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [replyTo, setReplyTo] = useState<{ id: string; sender: string; content: string } | null>(null);
-  const [attachedFile, setAttachedFile] = useState<{ name: string; content: string } | null>(null);
+  const [attachedFile, setAttachedFile] = useState<{ name: string; content: string; parsedText?: string; isUpload?: boolean } | null>(null);
   const [attachedImage, setAttachedImage] = useState<{ name: string; dataUrl: string } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -565,6 +582,10 @@ export default function App() {
   const [dashUsage, setDashUsage] = useState<any[]>([]);
   const [dashCron, setDashCron] = useState<any[]>([]);
   const [dashSkills, setDashSkills] = useState<any[]>([]);
+  const [dashBoardRows, setDashBoardRows] = useState<any[]>([]);
+  const [selectedBoardRow, setSelectedBoardRow] = useState<any | null>(null);
+  const [boardSaving, setBoardSaving] = useState(false);
+  const [boardMessage, setBoardMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
   const [dashError, setDashError] = useState<string | null>(null);
   const [cronNewName, setCronNewName] = useState('');
@@ -604,6 +625,7 @@ export default function App() {
   const [bootLogs, setBootLogs] = useState<string[]>([]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [toolActivities, setToolActivities] = useState<ToolActivityEvent[]>([]);
+  const [agentThinking, setAgentThinking] = useState<{ agentName: string; groupId: string } | null>(null);
 
   // User State
   const [userProfile, setUserProfile] = useState<UserProfile>({
@@ -640,6 +662,7 @@ export default function App() {
   const messagesRef = useRef<Message[]>([]);
   const chiefWakeRequestedRef = useRef(false);
   const onboardingAfterWakeRef = useRef(false);
+  const petWizardOpenRef = useRef(false); // 向导开着时不要从 init_messages 触发 wake
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -654,12 +677,32 @@ export default function App() {
     type: 'contact',
   });
 
+  const getSavedPetProfile = () => {
+    const savedPet = localStorage.getItem('pet');
+    if (!savedPet) return null;
+    try {
+      const parsed = JSON.parse(savedPet);
+      return parsed?.name ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const shouldWakeChief = () => {
+    if (!localStorage.getItem('petProfileConfigured')) return false;
+    const saved = getSavedPetProfile();
+    return !!saved?.name;
+  };
+
   const requestChiefWake = () => {
     const hasPixelHistory = messagesRef.current.some((message) => message.groupId === 'pixel');
-    if (hasPixelHistory || chiefWakeRequestedRef.current) return;
+    if (hasPixelHistory || chiefWakeRequestedRef.current || petWizardOpenRef.current || !shouldWakeChief()) return;
     chiefWakeRequestedRef.current = true;
+    const p = getSavedPetProfile();
     socketRef.current?.emit('wake_chief_session', {
-      petName: pet.name,
+      petName: p?.name,
+      petPersonality: p?.personality || '',
+      userNickname: p?.userNickname || '主人',
     });
   };
 
@@ -671,8 +714,20 @@ export default function App() {
         setPetProfileConfigured(true);
         localStorage.setItem('petProfileConfigured', '1');
         localStorage.setItem('pet', JSON.stringify(data));
+        setAppStatus(prev => (prev === 'auth' || prev === 'landing') ? prev : 'main');
+      } else if (localStorage.getItem('pawpals_authed') === '1') {
+        localStorage.removeItem('petProfileConfigured');
+        localStorage.removeItem('pet');
+        setPetProfileConfigured(false);
+        setAppStatus('onboarding');
       }
-    }).catch(() => {});
+    }).catch(() => {
+      if (localStorage.getItem('pawpals_authed') === '1' && !hasSavedPetProfile()) {
+        localStorage.removeItem('petProfileConfigured');
+        setPetProfileConfigured(false);
+        setAppStatus('onboarding');
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -680,16 +735,13 @@ export default function App() {
 
     socketRef.current.on('init_messages', (msgs: Message[]) => {
       messagesRef.current = msgs;
-      const hasPixelHistory = msgs.some((msg) => msg.groupId === 'pixel');
-      if (hasPixelHistory) {
+      // 每次新 session 都主动打招呼（服务端 session flag 防止重复）
+      // 但向导开着时跳过 — 向导完成后由 handleFinishPetProfile 触发 wake
+      if (!chiefWakeRequestedRef.current && !petWizardOpenRef.current && shouldWakeChief()) {
         chiefWakeRequestedRef.current = true;
-      } else if (!chiefWakeRequestedRef.current && localStorage.getItem('petProfileConfigured')) {
-        // 宠物已建档但私聊没有历史 → 自动触发 wake（每次新 session 都主动打招呼）
-        chiefWakeRequestedRef.current = true;
-        const savedPet = localStorage.getItem('pet');
-        const p = savedPet ? JSON.parse(savedPet) : null;
+        const p = getSavedPetProfile();
         socketRef.current?.emit('wake_chief_session', {
-          petName: p?.name || '团团',
+          petName: p?.name,
           petPersonality: p?.personality || '',
           userNickname: p?.userNickname || '主人',
         });
@@ -733,13 +785,32 @@ export default function App() {
         m.id === id ? { ...m, isLoading: false } : m
       ));
       const doneMessage = messagesRef.current.find((message) => message.id === id);
-      if (doneMessage?.groupId === 'pixel' && onboardingAfterWakeRef.current && !petProfileConfigured) {
+      if (doneMessage?.groupId === 'pixel' && onboardingAfterWakeRef.current) {
         onboardingAfterWakeRef.current = false;
         window.setTimeout(() => {
-          setOnboardingStep(1);
-          setShowPetProfileWizard(true);
+          setActiveTab('chat');
+          const jobGroup = localizedGroups.find(group => group.id === 'job');
+          if (!jobGroup) return;
+          setActiveChat(jobGroup);
+          setShowChatDetail(true);
+          setShowMemberPanel(false);
+          if (!jobWakeRequestedRef.current) {
+            jobWakeRequestedRef.current = true;
+            const p = getSavedPetProfile();
+            socketRef.current?.emit('wake_job_session', {
+              petName: p?.name || pet.name,
+              petPersonality: p?.personality || pet.personality,
+              userNickname: p?.userNickname || pet.userNickname || '主人',
+            });
+          }
         }, 280);
       }
+    });
+    socketRef.current.on('agent_thinking', ({ agentName, groupId }: { agentName: string; groupId: string }) => {
+      setAgentThinking({ agentName, groupId });
+    });
+    socketRef.current.on('agent_done', () => {
+      setAgentThinking(null);
     });
     socketRef.current.on('boss_login_result', ({ ok }: { ok: boolean }) => {
       setBossLoginStatus(ok ? 'ok' : 'error');
@@ -917,25 +988,30 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    const el = scrollRef.current;
+    if (!el) return;
+    const scrollToBottom = () => { el.scrollTop = el.scrollHeight; };
+    scrollToBottom();
+    const t1 = setTimeout(scrollToBottom, 80);
+    const t2 = setTimeout(scrollToBottom, 400);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
   }, [messages, activeChat]);
 
-  // Load dashboard data when switching to dashboard tab
+  // Load dashboard data when switching to manage tab (data sub-tab)
   useEffect(() => {
-    if (activeTab !== 'dashboard') return;
+    if (activeTab !== 'manage') return;
     let cancelled = false;
     const loadDash = async () => {
       setDashLoading(true);
       setDashError(null);
       try {
-        const [agentsRes, usageRes, cronRes, skillsRes, backupRes] = await Promise.allSettled([
+        const [agentsRes, usageRes, cronRes, skillsRes, backupRes, boardRes] = await Promise.allSettled([
           fetch('/api/gw/agents').then(r => r.json()),
           fetch('/api/gw/usage/recent-token-history').then(r => r.json()),
           fetch('/api/gw/cron/jobs').then(r => r.json()),
           fetch('/api/gw/clawhub/list').then(r => r.json()),
           fetch('/api/backup/status').then(r => r.json()),
+          fetch('/api/collaboration-board').then(r => r.json()),
         ]);
         if (cancelled) return;
         if (agentsRes.status === 'fulfilled') setDashAgents(agentsRes.value?.agents || []);
@@ -943,6 +1019,7 @@ export default function App() {
         if (cronRes.status === 'fulfilled') setDashCron(Array.isArray(cronRes.value) ? cronRes.value : []);
         if (skillsRes.status === 'fulfilled') setDashSkills(skillsRes.value?.results || []);
         if (backupRes.status === 'fulfilled') setBackupStatus(backupRes.value);
+        if (boardRes.status === 'fulfilled') setDashBoardRows(Array.isArray(boardRes.value?.rows) ? boardRes.value.rows : []);
       } catch {
         if (!cancelled) setDashError('无法获取数据，请确认 AI 服务已启动');
       } finally {
@@ -955,6 +1032,44 @@ export default function App() {
 
   const dashTotalTokens = dashUsage.reduce((sum: number, e: any) => sum + (e.totalTokens || 0), 0);
   const dashTotalCost = dashUsage.reduce((sum: number, e: any) => sum + (e.costUsd || 0), 0);
+  const workflowColumns = [
+    { key: 'new', label: '新入库', color: 'bg-slate-100 text-slate-600' },
+    { key: 'selected', label: '已选中', color: 'bg-orange-100 text-orange-600' },
+    { key: 'tailoring', label: '定制中', color: 'bg-amber-100 text-amber-700' },
+    { key: 'apply_ready', label: '待确认投递', color: 'bg-sky-100 text-sky-700' },
+    { key: 'applied', label: '已投递', color: 'bg-emerald-100 text-emerald-700' },
+  ] as const;
+
+  const handleSaveBoardRow = async () => {
+    if (!selectedBoardRow?.id) return;
+    setBoardSaving(true);
+    setBoardMessage(null);
+    try {
+      const response = await fetch(`/api/collaboration-board/${selectedBoardRow.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflowStage: selectedBoardRow.workflowStage,
+          applicationStatus: selectedBoardRow.applicationStatus,
+          resumeVersion: selectedBoardRow.resumeVersion,
+          followUpDate: selectedBoardRow.followUpDate,
+          skillHighlights: selectedBoardRow.skillHighlights,
+          outreachStatus: selectedBoardRow.outreachStatus,
+          outreachDraft: selectedBoardRow.outreachDraft,
+          notes: selectedBoardRow.notes,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
+      setSelectedBoardRow(data.row);
+      setDashBoardRows(prev => prev.map((row: any) => row.id === data.row.id ? data.row : row));
+      setBoardMessage({ type: 'success', text: '已保存岗位协作记录' });
+    } catch (error: any) {
+      setBoardMessage({ type: 'error', text: error?.message || '保存失败' });
+    } finally {
+      setBoardSaving(false);
+    }
+  };
 
   // Load manage panel data
   useEffect(() => {
@@ -1071,18 +1186,43 @@ export default function App() {
     };
 
     const finalContent = attachedFile
-      ? `[附件：${attachedFile.name}]\n\n${attachedFile.content}\n\n---\n\n${content}`
+      ? `[附件：${attachedFile.name}]\n\n${content}`
       : content;
 
     socketRef.current?.emit('send_message', {
       ...msg,
       content: finalContent,
+      ...(attachedFile ? { attachmentName: attachedFile.name, attachmentText: attachedFile.parsedText || attachedFile.content } : {}),
       ...(attachedImage ? { imageData: attachedImage.dataUrl, imageName: attachedImage.name } : {}),
     });
     setInputValue('');
     setReplyTo(null);
     setAttachedFile(null);
     setAttachedImage(null);
+  };
+
+  // 上传 PDF/DOCX 到服务端解析（避免浏览器端 pdfjs worker 问题）
+  const uploadDocToServer = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    setAttachedFile({ name: file.name, content: `[附件：${file.name}]`, parsedText: '', isUpload: true });
+    setAttachedImage(null);
+    try {
+      const res = await fetch('/api/upload/resume', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.ok) {
+        setAttachedFile({
+          name: file.name,
+          content: `[附件：${file.name}]`,
+          parsedText: data.text || '',
+          isUpload: true,
+        });
+      } else {
+        setAttachedFile({ name: file.name, content: `[附件：${file.name} 上传失败]`, parsedText: '', isUpload: true });
+      }
+    } catch {
+      setAttachedFile({ name: file.name, content: `[附件：${file.name} 上传失败，请检查连接]`, parsedText: '', isUpload: true });
+    }
   };
 
   const handleFileAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1097,35 +1237,12 @@ export default function App() {
         setAttachedFile(null);
       };
       reader.readAsDataURL(file);
-    } else if (file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}]\n\n${result.value}` });
-        setAttachedImage(null);
-      } catch (err) {
-        console.error('Word parse error:', err);
-        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}，解析失败，请粘贴文字内容]` });
-        setAttachedImage(null);
-      }
-    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        const pages: string[] = [];
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const content = await page.getTextContent();
-          pages.push(content.items.map((item: any) => item.str).join(' '));
-        }
-        const text = pages.join('\n\n');
-        setAttachedFile({ name: file.name, content: `[PDF: ${file.name}]\n\n${text}` });
-        setAttachedImage(null);
-      } catch (err) {
-        console.error('PDF parse error:', err);
-        setAttachedFile({ name: file.name, content: `[PDF 文件: ${file.name}，解析失败，请粘贴文字内容]` });
-        setAttachedImage(null);
-      }
+    } else if (
+      file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf') ||
+      file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      // PDF/DOCX 走服务端解析
+      await uploadDocToServer(file);
     } else {
       const reader = new FileReader();
       reader.onload = (ev) => {
@@ -1159,32 +1276,11 @@ export default function App() {
         setAttachedFile(null);
       };
       reader.readAsDataURL(file);
-    } else if (file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}]\n\n${result.value}` });
-        setAttachedImage(null);
-      } catch {
-        setAttachedFile({ name: file.name, content: `[Word文档: ${file.name}，解析失败，请粘贴文字内容]` });
-        setAttachedImage(null);
-      }
-    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        const pages: string[] = [];
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const content = await page.getTextContent();
-          pages.push(content.items.map((item: any) => item.str).join(' '));
-        }
-        setAttachedFile({ name: file.name, content: `[PDF: ${file.name}]\n\n${pages.join('\n\n')}` });
-        setAttachedImage(null);
-      } catch {
-        setAttachedFile({ name: file.name, content: `[PDF 文件: ${file.name}，解析失败，请粘贴文字内容]` });
-        setAttachedImage(null);
-      }
+    } else if (
+      file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf') ||
+      file.name.toLowerCase().endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      await uploadDocToServer(file);
     } else {
       const reader = new FileReader();
       reader.onload = (ev) => {
@@ -1204,9 +1300,7 @@ export default function App() {
     setActiveChat(chat);
     setShowChatDetail(true);
     setShowMemberPanel(false);
-    if (chat.id === 'job' && !platformsConfigured.current) {
-      setShowPlatformDialog(true);
-    }
+    // 投递渠道弹窗已移除 — 登录由岗位猎手自动触发
     if (chat.id === 'pixel') {
       requestChiefWake();
     }
@@ -1342,17 +1436,38 @@ export default function App() {
     localStorage.setItem('petProfileConfigured', '1');
     localStorage.setItem('pet', JSON.stringify(pet));
     setPetProfileConfigured(true);
+    petWizardOpenRef.current = false;
     setShowPetProfileWizard(false);
     setAppStatus('main');
+    setActiveTab('chat');
+    setActiveChat(buildChiefChat());
+    setShowChatDetail(true);
+    setShowMemberPanel(false);
     // 持久化到服务器文件系统（重装 app 后也能恢复）
     fetch('/api/pet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(pet),
     }).catch(() => {});
-    // 宠物创建完成后，主动触发团团在私聊打招呼
+    // 首次建档后，先走私聊破冰，再自动进入求职群完成团队亮相和要简历。
+    onboardingAfterWakeRef.current = true;
     socketRef.current?.emit('wake_chief_session', { petName: pet.name, petPersonality: pet.personality, userNickname: pet.userNickname || '主人' });
     chiefWakeRequestedRef.current = true;
+  };
+
+  const getDisplayContent = (msg: Message) => {
+    let next = msg.content || '';
+    if (msg.isChiefBot) {
+      const escaped = msg.sender.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      next = next.replace(new RegExp(`^${escaped}[：:]\\s*`), '');
+    }
+    return next;
+  };
+
+  const shouldShowSenderLabel = (msg: Message) => {
+    if (msg.sender === userProfile.name) return false;
+    if (msg.isChiefBot) return false;
+    return true;
   };
 
   const renderPetProfileCard = () => (
@@ -1380,7 +1495,7 @@ export default function App() {
             {pet.name || '未命名'}
           </div>
         </motion.div>
-        <p className="mt-12 text-sm text-pet-brown/40 italic">“{pet.personality}”</p>
+        <p className="mt-12 text-sm text-pet-brown/40 italic">"{pet.personality}"</p>
       </div>
 
       <div className="w-full md:w-1/2 p-8 md:p-12 space-y-8 relative">
@@ -1497,13 +1612,13 @@ export default function App() {
                   placeholder="它是一个怎样的伴学官？严厉的、温柔的、还是幽默的？"
                 />
               </div>
-              <div className=”bg-pet-orange/5 p-4 rounded-2xl border border-pet-orange/10”>
-                <div className=”flex items-center gap-2 mb-2”>
-                  <Sparkles size={14} className=”text-pet-orange” />
-                  <span className=”text-[10px] font-bold text-pet-orange uppercase tracking-wider”>档案预览</span>
+              <div className="bg-pet-orange/5 p-4 rounded-2xl border border-pet-orange/10">
+                <div className="flex items-center gap-2 mb-2">
+                  <Sparkles size={14} className="text-pet-orange" />
+                  <span className="text-[10px] font-bold text-pet-orange uppercase tracking-wider">档案预览</span>
                 </div>
-                <p className=”text-[10px] text-pet-brown/60 leading-relaxed”>
-                  该宠物将作为你的”首席伴学官”，在自习时监督你，在聊天时鼓励你。它会根据你设定的性格与你互动。
+                <p className="text-[10px] text-pet-brown/60 leading-relaxed">
+                  该宠物将作为你的「首席伴学官」，在自习时监督你，在聊天时鼓励你。它会根据你设定的性格与你互动。
                 </p>
               </div>
             </motion.div>
@@ -1511,33 +1626,33 @@ export default function App() {
 
           {onboardingStep === 4 && (
             <motion.div
-              key=”step4”
+              key="step4"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
-              className=”space-y-6”
+              className="space-y-6"
             >
               <div>
-                <label className=”text-xs font-bold text-pet-brown/60 uppercase tracking-wider block mb-2 px-1”>
+                <label className="text-xs font-bold text-pet-brown/60 uppercase tracking-wider block mb-2 px-1">
                   它叫你什么？
                 </label>
                 <input
-                  type=”text”
+                  type="text"
                   value={pet.userNickname ?? ''}
                   onChange={(e) => setPet(prev => ({ ...prev, userNickname: e.target.value }))}
-                  className=”w-full bg-pet-cream rounded-2xl p-4 border-none focus:ring-2 focus:ring-pet-orange/30 text-pet-brown font-bold”
-                  placeholder=”例如：主人、宝、你的名字...”
+                  className="w-full bg-pet-cream rounded-2xl p-4 border-none focus:ring-2 focus:ring-pet-orange/30 text-pet-brown font-bold"
+                  placeholder="例如：主人、宝、你的名字..."
                 />
-                <p className=”text-[10px] text-pet-brown/40 mt-2 px-1”>不填默认叫「主人」</p>
+                <p className="text-[10px] text-pet-brown/40 mt-2 px-1">不填默认叫「主人」</p>
               </div>
-              <div className=”flex flex-wrap gap-2”>
+              <div className="flex flex-wrap gap-2">
                 {['主人', '宝', '亲爱的', '少爷', '公主'].map(nick => (
                   <button
                     key={nick}
                     onClick={() => setPet(prev => ({ ...prev, userNickname: nick }))}
                     className={cn(
-                      “px-3 py-1.5 rounded-xl text-xs font-bold transition-all”,
-                      pet.userNickname === nick ? “bg-pet-orange text-white” : “bg-pet-cream text-pet-brown/60 hover:bg-pet-pink/20”
+                      "px-3 py-1.5 rounded-xl text-xs font-bold transition-all",
+                      pet.userNickname === nick ? "bg-pet-orange text-white" : "bg-pet-cream text-pet-brown/60 hover:bg-pet-pink/20"
                     )}
                   >
                     {nick}
@@ -1548,11 +1663,11 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <div className=”flex gap-4 pt-4”>
+        <div className="flex gap-4 pt-4">
           {onboardingStep > 1 && (
             <button
               onClick={() => setOnboardingStep(prev => prev - 1)}
-              className=”p-4 bg-pet-cream text-pet-brown/60 rounded-2xl hover:bg-pet-pink/20 transition-colors”
+              className="p-4 bg-pet-cream text-pet-brown/60 rounded-2xl hover:bg-pet-pink/20 transition-colors"
             >
               <ChevronLeft size={24} />
             </button>
@@ -1735,7 +1850,10 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => { localStorage.setItem('pawpals_authed', '1'); setAppStatus('main'); }}
+              onClick={() => {
+                localStorage.setItem('pawpals_authed', '1');
+                setAppStatus(hasSavedPetProfile() ? 'main' : 'onboarding');
+              }}
               className="w-full bg-pet-orange text-white py-4 rounded-2xl font-bold pet-shadow hover:scale-[1.02] transition-transform flex items-center justify-center gap-2"
             >
               {authMode === 'login' ? <LogIn size={20} /> : <UserPlus size={20} />}
@@ -1748,7 +1866,10 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => { localStorage.setItem('pawpals_authed', '1'); setAppStatus('main'); }}
+              onClick={() => {
+                localStorage.setItem('pawpals_authed', '1');
+                setAppStatus(hasSavedPetProfile() ? 'main' : 'onboarding');
+              }}
               className="w-full bg-white border-2 border-pet-cream text-pet-brown/60 py-4 rounded-2xl font-bold hover:bg-pet-cream transition-colors"
             >
               {t('guest')}
@@ -1831,34 +1952,22 @@ export default function App() {
             label={t('chat')}
           />
           <NavButton
-            active={activeTab === 'dashboard'}
-            onClick={() => setActiveTab('dashboard')}
-            icon={<BarChart2 size={24} />}
-            label="数据"
-          />
-          <NavButton 
-            active={activeTab === 'pet'} 
+            active={activeTab === 'pet'}
             onClick={() => setActiveTab('pet')}
             icon={<Home size={24} />}
             label={t('pet')}
           />
-          <NavButton 
-            active={activeTab === 'study'} 
+          <NavButton
+            active={activeTab === 'study'}
             onClick={() => setActiveTab('study')}
             icon={<Timer size={24} />}
             label={t('study')}
           />
           <NavButton
-            active={activeTab === 'hole'}
-            onClick={() => setActiveTab('hole')}
-            icon={<Wind size={24} />}
-            label={t('hole')}
-          />
-          <NavButton
             active={activeTab === 'square'}
             onClick={() => setActiveTab('square')}
             icon={<Globe size={24} />}
-            label={t('square')}
+            label="广场"
           />
           <NavButton
             active={activeTab === 'manage'}
@@ -1930,7 +2039,7 @@ export default function App() {
             )}
           </AnimatePresence>
 
-          <button 
+          <button
             onClick={() => setShowUserPopover(!showUserPopover)}
             className={cn(
               "w-10 h-10 rounded-full overflow-hidden border-2 transition-all hover:scale-105",
@@ -1939,6 +2048,9 @@ export default function App() {
           >
             <img src={userProfile.avatar} alt="Avatar" referrerPolicy="no-referrer" />
           </button>
+          <div className="text-[9px] text-pet-brown/25 text-center leading-tight select-none" title={`Build: ${typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : 'dev'}`}>
+            {typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__.slice(5, 16).replace(' ', '\n') : 'dev'}
+          </div>
         </div>
       </nav>
 
@@ -1996,9 +2108,17 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-pet-brown truncate">{pet.name}</div>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <span className="text-xs font-bold text-pet-brown">{pet.name}</span>
+                        <span className="text-[9px] text-pet-brown/40 shrink-0">{lang === 'zh' ? '首席伴学官' : 'Chief'}</span>
+                      </div>
                       <div className="text-[10px] text-pet-brown/60 truncate">
-                        {lang === 'zh' ? '你的专属伴学官，正在陪你变强' : 'Your exclusive companion, growing with you'}
+                        {(() => {
+                          const pixelMsgs = messages.filter(m => m.groupId === 'pixel');
+                          const last = pixelMsgs[pixelMsgs.length - 1];
+                          if (last) return last.content.replace(/\n/g, ' ').slice(0, 40);
+                          return lang === 'zh' ? '你的专属伴学官，正在陪你变强' : 'Your exclusive companion';
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -2109,7 +2229,10 @@ export default function App() {
                       </span>
                     </div>
                     
-                    {filteredMessages.map((msg) => (
+                    {filteredMessages.map((msg) => {
+                      const displayContent = getDisplayContent(msg);
+                      const attachmentMatch = displayContent.match(/^\[附件[:：]\s*([^\]\n]+)\]/);
+                      return (
                       <React.Fragment key={msg.id}>
                         {/* Tool activity cards: show activities linked to this message */}
                         {filteredActivities
@@ -2134,8 +2257,10 @@ export default function App() {
                           "flex flex-col",
                           msg.sender === userProfile.name ? "items-end" : "items-start"
                         )}>
-                          <div className="flex items-center gap-1 mb-1 px-1">
-                            <span className="text-[10px] text-pet-brown/40">{msg.sender}</span>
+                          <div className="flex items-center gap-1 mb-1 px-1 min-h-[14px]">
+                            {shouldShowSenderLabel(msg) && (
+                              <span className="text-[10px] text-pet-brown/40">{msg.sender}</span>
+                            )}
                             {msg.isBot && (
                               <span className="bg-pet-orange/20 text-pet-orange text-[8px] px-1 rounded font-bold uppercase tracking-tighter">
                                 PawPals Bot
@@ -2155,41 +2280,47 @@ export default function App() {
                                 <span className="w-2 h-2 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'300ms'}}/>
                               </span>
                             ) : (
-                              <Markdown
-                                remarkPlugins={[remarkGfm]}
-                                components={{
-                                  table: ({children}) => <div className="overflow-x-auto my-2"><table className="text-xs border-collapse w-full">{children}</table></div>,
-                                  thead: ({children}) => <thead className={msg.sender === userProfile.name ? "bg-white/20" : "bg-pet-orange/10"}>{children}</thead>,
-                                  tbody: ({children}) => <tbody>{children}</tbody>,
-                                  tr: ({children}) => <tr className="border-b border-current/10">{children}</tr>,
-                                  th: ({children}) => <th className="px-2 py-1 text-left font-semibold whitespace-nowrap">{children}</th>,
-                                  td: ({children}) => <td className="px-2 py-1 whitespace-nowrap">{children}</td>,
-                                  p: ({children}) => <p className="mb-1 last:mb-0 leading-relaxed">{children}</p>,
-                                  strong: ({children}) => <strong className="font-bold">{children}</strong>,
-                                  em: ({children}) => <em className="italic">{children}</em>,
-                                  ul: ({children}) => <ul className="list-disc pl-4 my-1 space-y-0.5">{children}</ul>,
-                                  ol: ({children}) => <ol className="list-decimal pl-4 my-1 space-y-0.5">{children}</ol>,
-                                  li: ({children}) => <li className="leading-relaxed">{children}</li>,
-                                  h1: ({children}) => <h1 className="font-bold text-base mb-1">{children}</h1>,
-                                  h2: ({children}) => <h2 className="font-bold mb-1">{children}</h2>,
-                                  h3: ({children}) => <h3 className="font-semibold mb-0.5">{children}</h3>,
-                                  code: ({children}) => <code className="bg-black/10 rounded px-1 text-xs font-mono">{children}</code>,
-                                  hr: () => <hr className="border-current opacity-20 my-2" />,
-                                  a: ({href, children}) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline opacity-80 hover:opacity-100">{children}</a>,
-                                  // @mentions 高亮
-                                  text: ({children}) => {
-                                    const str = String(children);
-                                    const parts = str.split(/(@[\u4e00-\u9fa5A-Za-z\d]+)/g);
-                                    if (parts.length === 1) return <>{str}</>;
-                                    return <>{parts.map((p, i) => p.startsWith('@')
-                                      ? <span key={i} className={cn("font-bold rounded px-0.5", msg.sender === userProfile.name ? "text-yellow-300" : "text-pet-orange/90 bg-pet-orange/10")}>{p}</span>
-                                      : p
-                                    )}</>;
-                                  },
-                                }}
-                              >
-                                {msg.content}
-                              </Markdown>
+                              attachmentMatch ? (
+                                <div className="flex items-center gap-2 rounded-xl border border-current/10 px-3 py-2">
+                                  <Paperclip size={15} className="shrink-0" />
+                                  <span className="text-sm">{attachmentMatch[1]}</span>
+                                </div>
+                              ) : (
+                                <Markdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={{
+                                    table: ({children}) => <div className="overflow-x-auto my-2"><table className="text-xs border-collapse w-full">{children}</table></div>,
+                                    thead: ({children}) => <thead className={msg.sender === userProfile.name ? "bg-white/20" : "bg-pet-orange/10"}>{children}</thead>,
+                                    tbody: ({children}) => <tbody>{children}</tbody>,
+                                    tr: ({children}) => <tr className="border-b border-current/10">{children}</tr>,
+                                    th: ({children}) => <th className="px-2 py-1 text-left font-semibold whitespace-nowrap">{children}</th>,
+                                    td: ({children}) => <td className="px-2 py-1 whitespace-nowrap">{children}</td>,
+                                    p: ({children}) => <p className="mb-1 last:mb-0 leading-relaxed">{children}</p>,
+                                    strong: ({children}) => <strong className="font-bold">{children}</strong>,
+                                    em: ({children}) => <em className="italic">{children}</em>,
+                                    ul: ({children}) => <ul className="list-disc pl-4 my-1 space-y-0.5">{children}</ul>,
+                                    ol: ({children}) => <ol className="list-decimal pl-4 my-1 space-y-0.5">{children}</ol>,
+                                    li: ({children}) => <li className="leading-relaxed">{children}</li>,
+                                    h1: ({children}) => <h1 className="font-bold text-base mb-1">{children}</h1>,
+                                    h2: ({children}) => <h2 className="font-bold mb-1">{children}</h2>,
+                                    h3: ({children}) => <h3 className="font-semibold mb-0.5">{children}</h3>,
+                                    code: ({children}) => <code className="bg-black/10 rounded px-1 text-xs font-mono">{children}</code>,
+                                    hr: () => <hr className="border-current opacity-20 my-2" />,
+                                    a: ({href, children}) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline opacity-80 hover:opacity-100">{children}</a>,
+                                    text: ({children}) => {
+                                      const str = String(children);
+                                      const parts = str.split(/(@[\u4e00-\u9fa5A-Za-z\d]+)/g);
+                                      if (parts.length === 1) return <>{str}</>;
+                                      return <>{parts.map((p, i) => p.startsWith('@')
+                                        ? <span key={i} className={cn("font-bold rounded px-0.5", msg.sender === userProfile.name ? "text-yellow-300" : "text-pet-orange/90 bg-pet-orange/10")}>{p}</span>
+                                        : p
+                                      )}</>;
+                                    },
+                                  }}
+                                >
+                                  {displayContent}
+                                </Markdown>
+                              )
                             )}
                             <div className={cn(
                               "absolute -bottom-1 -right-1 opacity-20",
@@ -2214,35 +2345,22 @@ export default function App() {
                         </div>
                       </div>
                       </React.Fragment>
-                    ))}
+                    )})}
+                    {/* Agent thinking indicator — centered pill style */}
+                    {agentThinking && agentThinking.groupId === activeChat?.id && (
+                      <div className="text-center">
+                        <span className="bg-white/50 px-3 py-1 rounded-full text-[10px] text-pet-brown/40 tracking-widest inline-flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'0ms'}}/>
+                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'150ms'}}/>
+                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'300ms'}}/>
+                          {agentThinking.agentName} 正在思考
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <footer className="p-4 md:p-6 bg-white/50 pb-20 md:pb-6">
-                    {/* Boss直聘 登录按钮 — only in job group */}
-                    {activeChat?.id === 'job' && (
-                      <div className="mb-2 flex items-center gap-2 flex-wrap">
-                        <button
-                          onClick={async () => {
-                            setBossLoginStatus('loading');
-                            try {
-                              await fetch('/api/boss-login', { method: 'POST' });
-                            } catch { setBossLoginStatus('error'); setTimeout(() => setBossLoginStatus('idle'), 4000); }
-                          }}
-                          disabled={bossLoginStatus === 'loading' || bossLoginStatus === 'ok'}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all
-                            ${bossLoginStatus === 'ok' ? 'bg-green-100 text-green-700' :
-                              bossLoginStatus === 'error' ? 'bg-red-100 text-red-600' :
-                              'bg-pet-cream text-pet-brown hover:bg-pet-brown/10'}`}
-                        >
-                          {bossLoginStatus === 'ok' ? '✅ 已登录 Boss直聘' :
-                           bossLoginStatus === 'error' ? '❌ 失败，重试' : '🔑 登录 Boss直聘'}
-                        </button>
-
-                        {bossLoginStatus === 'loading' && (
-                          <span className="text-xs text-pet-brown/50 animate-pulse">浏览器已打开，请完成登录，检测到登录成功后会自动关闭...</span>
-                        )}
-                      </div>
-                    )}
+                    {/* Boss直聘 Cookie 同步按钮已移除 — 登录由岗位猎手触发 Electron 窗口 */}
                     {/* @ Mention Picker — only in job group */}
                     {activeChat?.type === 'group' && mentionPicker.visible && (() => {
                       const agents = GROUP_AGENTS[activeChat.id] || [];
@@ -2493,7 +2611,7 @@ export default function App() {
                     <span className="text-xs text-pet-brown/60">首席伴学官</span>
                   </div>
                   <p className="text-sm text-pet-brown/60 italic max-w-xs mx-auto mb-6">
-                    “{pet.personality}”
+                    "{pet.personality}"
                   </p>
                   
                   <div className="space-y-4">
@@ -2660,607 +2778,484 @@ export default function App() {
               </div>
             </div>
           </section>
-        ) : activeTab === 'dashboard' ? (
-          /* Dashboard Section */
+        ) : activeTab === 'square' ? (
+          /* 广场 + 树洞 合并页 */
           <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
             <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
-              <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">AI 控制台</h1>
-              <p className="text-sm text-pet-brown/60">查看你的 AI 团队状态、用量统计和各项配置</p>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">广场</h1>
+                  <p className="text-sm text-pet-brown/60">找到你的学习搭子，分享你的心情 🐾</p>
+                </div>
+                {squareSubTab === 'square' && (
+                  <button
+                    onClick={() => setShowPostModal(true)}
+                    className="flex items-center gap-2 bg-pet-orange text-white px-4 py-2.5 rounded-2xl font-bold text-sm pet-shadow hover:scale-105 transition-transform"
+                  >
+                    <Plus size={18} />
+                    发帖
+                  </button>
+                )}
+              </div>
+              {/* Sub-tab switcher */}
+              <div className="flex gap-1 bg-pet-cream rounded-2xl p-1 w-fit">
+                <button
+                  onClick={() => setSquareSubTab('square')}
+                  className={cn(
+                    'px-5 py-2 rounded-xl text-sm font-bold transition-all',
+                    squareSubTab === 'square' ? 'bg-white text-pet-orange pet-shadow' : 'text-pet-brown/50 hover:text-pet-brown'
+                  )}
+                >
+                  广场
+                </button>
+                <button
+                  onClick={() => setSquareSubTab('hole')}
+                  className={cn(
+                    'px-5 py-2 rounded-xl text-sm font-bold transition-all',
+                    squareSubTab === 'hole' ? 'bg-white text-pet-orange pet-shadow' : 'text-pet-brown/50 hover:text-pet-brown'
+                  )}
+                >
+                  树洞
+                </button>
+              </div>
             </header>
 
-            {/* Dashboard Body */}
-            <div className="p-6 md:p-8 space-y-6">
-              {dashLoading && (
-                <div className="flex items-center justify-center gap-3 py-12 text-pet-brown/50">
-                  <div className="w-5 h-5 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
-                  <span className="text-sm">加载中…</span>
-                </div>
-              )}
-              {dashError && (
-                <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-600">
-                  <AlertCircle size={18} />
-                  {dashError}
-                </div>
-              )}
-
-              {/* Stats Row */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                  { label: 'AI 成员', value: dashAgents.length, icon: <Bot size={18} />, color: 'bg-pet-orange/10 text-pet-orange' },
-                  { label: '定时提醒', value: dashCron.length, icon: <Clock size={18} />, color: 'bg-purple-100 text-purple-600' },
-                  { label: '已用 Token', value: dashTotalTokens > 0 ? (dashTotalTokens >= 1000 ? `${(dashTotalTokens/1000).toFixed(1)}k` : dashTotalTokens.toString()) : '—', icon: <Zap size={18} />, color: 'bg-amber-100 text-amber-600' },
-                  { label: '累计消费', value: dashTotalCost > 0 ? `$${dashTotalCost.toFixed(3)}` : '—', icon: <BarChart2 size={18} />, color: 'bg-emerald-100 text-emerald-600' },
-                ].map(stat => (
-                  <div key={stat.label} className="healing-card p-5 flex flex-col gap-3">
-                    <div className={cn('w-9 h-9 rounded-xl flex items-center justify-center', stat.color)}>{stat.icon}</div>
-                    <div>
-                      <div className="text-2xl font-display font-bold text-pet-brown">{stat.value}</div>
-                      <div className="text-xs text-pet-brown/50 mt-0.5">{stat.label}</div>
-                    </div>
+            {squareSubTab === 'square' ? (
+              <div className="p-6 md:p-8 max-w-2xl mx-auto w-full space-y-4">
+                {posts.length === 0 ? (
+                  <div className="text-center py-20 text-pet-brown/40">
+                    <Globe size={48} className="mx-auto mb-4 opacity-30" />
+                    <p className="text-lg font-display">还没有帖子</p>
+                    <p className="text-sm mt-1">来发第一帖吧！</p>
                   </div>
-                ))}
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* AI 团队 */}
-                <div className="healing-card p-6 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Bot size={18} className="text-pet-orange" />
-                    <h2 className="font-bold text-pet-brown">AI 成员列表</h2>
-                  </div>
-                  {dashAgents.length === 0 && !dashLoading ? (
-                    <p className="text-sm text-pet-brown/40">暂无 Agent 数据（AI 服务可能未启动）</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {dashAgents.map((agent: any) => (
-                        <div key={agent.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
-                          <div className="w-8 h-8 bg-pet-orange/20 rounded-lg flex items-center justify-center text-pet-orange font-bold text-sm">
-                            {agent.name?.slice(0, 1) || 'A'}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-bold text-pet-brown truncate">{agent.name || agent.id}</div>
-                            <div className="text-[11px] text-pet-brown/40 truncate">{agent.modelDisplay || agent.id}</div>
-                          </div>
-                          {agent.isDefault && (
-                            <span className="text-[10px] bg-pet-orange text-white px-2 py-0.5 rounded-full font-bold shrink-0">默认</span>
-                          )}
+                ) : (
+                  posts.map((post: any) => (
+                    <div key={post.id} className="bg-white rounded-3xl p-5 pet-shadow space-y-3">
+                      <div className="flex items-center gap-3">
+                        <img src={post.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${post.author}`} className="w-10 h-10 rounded-full" />
+                        <div>
+                          <p className="font-bold text-pet-brown text-sm">{post.author}</p>
+                          <p className="text-xs text-pet-brown/40">{post.createdAt ? new Date(post.createdAt).toLocaleString('zh-CN') : ''}</p>
                         </div>
-                      ))}
+                        {post.tag && (
+                          <span className="ml-auto bg-pet-orange/10 text-pet-orange text-xs font-bold px-3 py-1 rounded-full">{post.tag}</span>
+                        )}
+                      </div>
+                      <p className="text-pet-brown text-sm leading-relaxed">{post.content}</p>
+                      <div className="flex items-center gap-4 pt-1">
+                        <button className="flex items-center gap-1.5 text-xs text-pet-brown/40 hover:text-pet-orange transition-colors">
+                          <Heart size={14} /> {post.likes ?? 0}
+                        </button>
+                      </div>
                     </div>
-                  )}
+                  ))
+                )}
+              </div>
+            ) : (
+              <div className="p-6 md:p-12 max-w-2xl mx-auto w-full space-y-8">
+                <div className="text-center space-y-2">
+                  <h2 className="text-2xl font-display font-bold text-pet-brown">{t('treeHoleTitle')}</h2>
+                  <p className="text-pet-brown/60">{t('treeHoleSubtitle')}</p>
                 </div>
-
-                {/* 定时提醒 */}
                 <div className="healing-card p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Clock size={18} className="text-purple-500" />
-                      <h2 className="font-bold text-pet-brown">定时提醒</h2>
-                    </div>
+                  <textarea
+                    value={holeContent}
+                    onChange={(e) => setHoleContent(e.target.value)}
+                    placeholder={t('holePlaceholder')}
+                    className="w-full h-32 bg-pet-cream/50 rounded-2xl p-4 border-none focus:ring-2 focus:ring-pet-orange/30 text-sm resize-none"
+                  />
+                  <div className="flex justify-end">
                     <button
-                      onClick={() => setShowAddCron(v => !v)}
-                      className="text-xs font-bold text-pet-orange flex items-center gap-1 hover:underline"
+                      onClick={() => {
+                        if (!holeContent.trim()) return;
+                        socketRef.current?.emit('post_tree_hole', holeContent);
+                        setHoleContent('');
+                      }}
+                      disabled={!holeContent.trim()}
+                      className="bg-pet-brown text-white px-8 py-3 rounded-2xl font-bold pet-shadow hover:scale-105 transition-transform disabled:opacity-50 disabled:scale-100"
                     >
-                      <Plus size={14} /> 新增
+                      {t('postHole')}
                     </button>
                   </div>
-                  {showAddCron && (
-                    <div className="bg-pet-cream/60 rounded-xl p-4 space-y-3">
-                      <input value={cronNewName} onChange={e => setCronNewName(e.target.value)} placeholder="提醒名称" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
-                      <input value={cronNewMsg} onChange={e => setCronNewMsg(e.target.value)} placeholder="提醒内容（发给 AI）" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
-                      <input value={cronNewSchedule} onChange={e => setCronNewSchedule(e.target.value)} placeholder="Cron 表达式，如 0 9 * * *" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
-                      <button onClick={handleCronAdd} disabled={cronAdding} className="w-full bg-pet-orange text-white rounded-xl py-2 text-sm font-bold disabled:opacity-50">
-                        {cronAdding ? '保存中…' : '保存提醒'}
-                      </button>
-                    </div>
-                  )}
-                  {dashCron.length === 0 && !dashLoading ? (
-                    <p className="text-sm text-pet-brown/40">暂无定时提醒</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {dashCron.map((job: any) => (
-                        <div key={job.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-bold text-pet-brown truncate">{job.name}</div>
-                            <div className="text-[11px] text-pet-brown/40 truncate">{typeof job.schedule === 'string' ? job.schedule : JSON.stringify(job.schedule)}</div>
-                          </div>
-                          <button onClick={() => handleCronToggle(job.id, !job.enabled)} className="text-pet-brown/40 hover:text-pet-orange transition-colors">
-                            {job.enabled ? <ToggleRight size={22} className="text-pet-orange" /> : <ToggleLeft size={22} />}
-                          </button>
-                          <button onClick={() => handleCronDelete(job.id)} className="text-pet-brown/30 hover:text-red-400 transition-colors">
-                            <Trash2 size={16} />
-                          </button>
+                </div>
+                <div className="space-y-6">
+                  {treeHolePosts.map((post) => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      key={post.id}
+                      className="bg-white/40 rounded-[32px] p-8 space-y-6"
+                    >
+                      <div className="space-y-2">
+                        <p className="text-pet-brown/80 italic">"{post.content}"</p>
+                        <div className="text-[10px] text-pet-brown/30">{format(new Date(post.timestamp), 'yyyy-MM-dd HH:mm')}</div>
+                      </div>
+                      {post.replies.length > 0 && (
+                        <div className="space-y-4 pt-4 border-t border-pet-pink/10">
+                          {post.replies.map((reply, i) => (
+                            <motion.div
+                              initial={{ scale: 0.9, opacity: 0 }}
+                              animate={{ scale: 1, opacity: 1 }}
+                              key={i}
+                              className="flex gap-3 bg-pet-orange/5 p-4 rounded-2xl"
+                            >
+                              <img src={reply.avatar} className="w-8 h-8 rounded-lg" referrerPolicy="no-referrer" />
+                              <div>
+                                <div className="text-[10px] font-bold text-pet-orange mb-1">{reply.author}</div>
+                                <p className="text-xs text-pet-brown/70">{reply.content}</p>
+                              </div>
+                            </motion.div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      )}
+                    </motion.div>
+                  ))}
                 </div>
               </div>
+            )}
+          </section>
+        ) : activeTab === 'manage' ? (
+          /* 管理（数据 + 文件） */
+          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
+            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
+              <div className="mb-4">
+                <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">管理</h1>
+                <p className="text-sm text-pet-brown/60">AI 团队状态、用量统计、文件管理</p>
+              </div>
+              {/* Sub-tab switcher */}
+              <div className="flex gap-1 bg-pet-cream rounded-2xl p-1 w-fit">
+                <button
+                  onClick={() => setManageSubTab('data')}
+                  className={cn(
+                    'px-5 py-2 rounded-xl text-sm font-bold transition-all',
+                    manageSubTab === 'data' ? 'bg-white text-pet-orange pet-shadow' : 'text-pet-brown/50 hover:text-pet-brown'
+                  )}
+                >
+                  数据
+                </button>
+                <button
+                  onClick={() => setManageSubTab('files')}
+                  className={cn(
+                    'px-5 py-2 rounded-xl text-sm font-bold transition-all',
+                    manageSubTab === 'files' ? 'bg-white text-pet-orange pet-shadow' : 'text-pet-brown/50 hover:text-pet-brown'
+                  )}
+                >
+                  文件
+                </button>
+              </div>
+            </header>
 
-              {/* 用量记录 */}
-              {dashUsage.length > 0 && (
-                <div className="healing-card p-6 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Zap size={18} className="text-amber-500" />
-                    <h2 className="font-bold text-pet-brown">近期用量记录</h2>
+            {manageSubTab === 'data' ? (
+              <div className="p-6 md:p-8 space-y-6">
+                {dashLoading && (
+                  <div className="flex items-center justify-center gap-3 py-12 text-pet-brown/50">
+                    <div className="w-5 h-5 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                    <span className="text-sm">加载中…</span>
                   </div>
-                  <div className="overflow-x-auto rounded-xl border border-pet-pink/20">
-                    <table className="w-full text-xs">
-                      <thead className="bg-pet-cream/60">
-                        <tr>
-                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">时间</th>
-                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">Agent</th>
-                          <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">模型</th>
-                          <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">Token</th>
-                          <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">费用</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {dashUsage.slice(0, 10).map((entry: any, i: number) => (
-                          <tr key={i} className="border-t border-pet-pink/10 hover:bg-pet-cream/30 transition-colors">
-                            <td className="px-4 py-2 text-pet-brown/60 whitespace-nowrap">{entry.timestamp ? format(new Date(entry.timestamp), 'MM-dd HH:mm') : '—'}</td>
-                            <td className="px-4 py-2 text-pet-brown font-medium">{entry.agentId || '—'}</td>
-                            <td className="px-4 py-2 text-pet-brown/60 truncate max-w-[120px]">{entry.model || '—'}</td>
-                            <td className="px-4 py-2 text-right text-pet-brown font-mono">{entry.totalTokens?.toLocaleString() || '—'}</td>
-                            <td className="px-4 py-2 text-right text-emerald-600 font-mono">{entry.costUsd != null ? `$${entry.costUsd.toFixed(4)}` : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                )}
+                {dashError && (
+                  <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-600">
+                    <AlertCircle size={18} />
+                    {dashError}
                   </div>
+                )}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {[
+                    { label: 'AI 成员', value: dashAgents.length, icon: <Bot size={18} />, color: 'bg-pet-orange/10 text-pet-orange' },
+                    { label: '定时提醒', value: dashCron.length, icon: <Clock size={18} />, color: 'bg-purple-100 text-purple-600' },
+                    { label: '已用 Token', value: dashTotalTokens > 0 ? (dashTotalTokens >= 1000 ? `${(dashTotalTokens/1000).toFixed(1)}k` : dashTotalTokens.toString()) : '—', icon: <Zap size={18} />, color: 'bg-amber-100 text-amber-600' },
+                    { label: '累计消费', value: dashTotalCost > 0 ? `$${dashTotalCost.toFixed(3)}` : '—', icon: <BarChart2 size={18} />, color: 'bg-emerald-100 text-emerald-600' },
+                  ].map(stat => (
+                    <div key={stat.label} className="healing-card p-5 flex flex-col gap-3">
+                      <div className={cn('w-9 h-9 rounded-xl flex items-center justify-center', stat.color)}>{stat.icon}</div>
+                      <div>
+                        <div className="text-2xl font-display font-bold text-pet-brown">{stat.value}</div>
+                        <div className="text-xs text-pet-brown/50 mt-0.5">{stat.label}</div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              )}
-
-              {/* 数据备份 */}
-              <div className="healing-card p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Download size={18} className="text-pet-orange" />
-                    <h2 className="font-bold text-pet-brown">数据备份</h2>
+                <div className="healing-card p-6 space-y-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Briefcase size={18} className="text-pet-orange" />
+                      <h2 className="font-bold text-pet-brown">求职流水线</h2>
+                    </div>
+                    <div className="text-xs text-pet-brown/40">
+                      {dashBoardRows.length > 0 ? `${dashBoardRows.length} 个岗位正在跟踪` : '还没有岗位进入协作表'}
+                    </div>
                   </div>
-                  <span className="text-xs text-pet-brown/50">每小时自动备份到本地</span>
-                </div>
-                {/* 备份状态 + 立即备份 */}
-                <div className="flex items-center justify-between bg-pet-orange/5 rounded-xl p-3">
-                  <div>
-                    <p className="text-sm text-pet-brown font-medium">
-                      {backupStatus?.lastBackupAt
-                        ? `上次备份：${new Date(backupStatus.lastBackupAt).toLocaleString('zh-CN')}`
-                        : '尚未备份'}
-                    </p>
-                    <p className="text-xs text-pet-brown/50 mt-0.5">
-                      共 {backupStatus?.snapshots?.length || 0} 份快照 · 保存在「文稿/PawPals备份」
-                    </p>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      setBackingUp(true);
-                      try {
-                        const r = await fetch('/api/backup/now', { method: 'POST' });
-                        const d = await r.json();
-                        if (d.ok) {
-                          const r2 = await fetch('/api/backup/status');
-                          setBackupStatus(await r2.json());
-                        }
-                      } finally { setBackingUp(false); }
-                    }}
-                    disabled={backingUp}
-                    className="text-xs bg-pet-orange text-white px-3 py-1.5 rounded-lg hover:bg-pet-orange/90 disabled:opacity-50 shrink-0"
-                  >
-                    {backingUp ? '备份中...' : '立即备份'}
-                  </button>
-                </div>
-                {/* 版本历史列表 */}
-                {backupStatus?.snapshots?.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-xs font-semibold text-pet-brown/60 uppercase tracking-wide">版本历史</p>
-                    <div className="max-h-52 overflow-y-auto rounded-xl border border-pet-pink/20 divide-y divide-pet-pink/10">
-                      {backupStatus.snapshots.map((snap: any, idx: number) => {
-                        const label = snap.name.replace('T', ' ').replace(/-(\d{2})-(\d{2})$/, ' $1:$2');
+                  {dashBoardRows.length === 0 && !dashLoading ? (
+                    <div className="rounded-2xl bg-pet-cream/60 px-4 py-5 text-sm text-pet-brown/45">
+                      还没有岗位进入协作表。完成 onboarding 并开始搜岗后，这里会显示每个岗位卡在什么阶段。
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
+                      {workflowColumns.map((column) => {
+                        const rows = dashBoardRows.filter((row: any) => row.workflowStage === column.key);
                         return (
-                          <div key={snap.name} className="flex items-center gap-3 px-3 py-2 hover:bg-pet-orange/5 transition-colors">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-xs font-medium text-pet-brown truncate">
-                                {idx === 0 ? '🟢 ' : ''}{label}
-                              </p>
-                              {snap.sizeKb > 0 && (
-                                <p className="text-[10px] text-pet-brown/40">{snap.sizeKb} KB</p>
-                              )}
+                          <div key={column.key} className="rounded-[28px] bg-pet-cream/40 border border-pet-pink/15 p-4 space-y-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={cn('rounded-full px-3 py-1 text-[11px] font-bold', column.color)}>{column.label}</span>
+                              <span className="text-[11px] font-mono text-pet-brown/35">{rows.length}</span>
                             </div>
-                            <button
-                              onClick={async () => {
-                                if (!confirm(`确认恢复到「${label}」？当前状态会先自动备份。`)) return;
-                                setRestoringSnapshot(snap.name);
-                                try {
-                                  const r = await fetch(`/api/backup/restore/${encodeURIComponent(snap.name)}`, { method: 'POST' });
-                                  const d = await r.json();
-                                  alert(d.message || (d.error ? `失败：${d.error}` : '恢复完成'));
-                                  if (d.ok) {
-                                    const r2 = await fetch('/api/backup/status');
-                                    setBackupStatus(await r2.json());
-                                  }
-                                } finally { setRestoringSnapshot(null); }
-                              }}
-                              disabled={restoringSnapshot === snap.name}
-                              className="text-[10px] border border-pet-orange/40 text-pet-orange px-2 py-0.5 rounded-lg hover:bg-pet-orange/10 disabled:opacity-40 shrink-0"
-                            >
-                              {restoringSnapshot === snap.name ? '恢复中...' : '恢复'}
-                            </button>
+                            <div className="space-y-3 min-h-[120px]">
+                              {rows.length === 0 ? (
+                                <div className="rounded-2xl border border-dashed border-pet-pink/20 px-3 py-4 text-xs text-pet-brown/25 text-center">
+                                  暂无
+                                </div>
+                              ) : rows.map((row: any) => (
+                                <button
+                                  key={row.id}
+                                  onClick={() => setSelectedBoardRow(row)}
+                                  className="w-full text-left rounded-2xl bg-white p-4 border border-pet-pink/10 space-y-2 hover:border-pet-orange/30 hover:bg-pet-orange/5 transition-colors"
+                                >
+                                  <div className="text-sm font-bold text-pet-brown leading-5">{row.company || '未知公司'}</div>
+                                  <div className="text-xs text-pet-brown/55 leading-5">{row.role || '未知岗位'}</div>
+                                  <div className="flex flex-wrap gap-2 pt-1">
+                                    <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
+                                      {row.resumeVersion || '未出简历版'}
+                                    </span>
+                                    <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
+                                      {row.applicationStatus || 'pending'}
+                                    </span>
+                                  </div>
+                                  {row.skillHighlights && (
+                                    <div className="text-[11px] leading-5 text-pet-brown/55 line-clamp-3">
+                                      重点：{row.skillHighlights}
+                                    </div>
+                                  )}
+                                  <div className="flex items-center justify-between text-[10px] text-pet-brown/35 pt-1">
+                                    <span>联系人 {row.contacts?.length || 0}</span>
+                                    <span>{row.followUpDate || row.outreachStatus || '未排期'}</span>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
                           </div>
                         );
                       })}
                     </div>
-                  </div>
-                )}
-                <a
-                  href="/api/backup/export"
-                  download
-                  className="flex items-center justify-center gap-2 w-full py-2.5 border-2 border-dashed border-pet-orange/30 rounded-xl text-pet-brown/60 hover:border-pet-orange hover:text-pet-orange transition-colors text-sm"
-                >
-                  <Download size={15} />
-                  导出全部数据（ZIP）
-                </a>
-                {/* Step 8：Secrets 脱敏 */}
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-amber-500 text-sm">🔐</span>
-                    <p className="text-xs font-semibold text-amber-700">API Key 安全脱敏</p>
-                  </div>
-                  <p className="text-[11px] text-amber-600">扫描配置文件中的明文 API Key，自动替换为环境变量引用，提升安全性。</p>
-                  {sanitizeResult && (
-                    <p className="text-[11px] text-green-700 bg-green-50 rounded px-2 py-1">{sanitizeResult}</p>
                   )}
-                  <button
-                    onClick={async () => {
-                      setSanitizing(true);
-                      setSanitizeResult(null);
-                      try {
-                        const r = await fetch('/api/secrets/sanitize', { method: 'POST' });
-                        const d = await r.json();
-                        setSanitizeResult(d.message || (d.error ? `失败：${d.error}` : '完成'));
-                      } finally { setSanitizing(false); }
-                    }}
-                    disabled={sanitizing}
-                    className="text-xs bg-amber-500 text-white px-3 py-1.5 rounded-lg hover:bg-amber-600 disabled:opacity-50"
-                  >
-                    {sanitizing ? '扫描中...' : '一键脱敏'}
-                  </button>
                 </div>
-              </div>
-
-              {/* API 连接测试 */}
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 space-y-2">
-                  <div className="flex items-center justify-between">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="healing-card p-6 space-y-4">
                     <div className="flex items-center gap-2">
-                      <span className="text-blue-500 text-sm">🔌</span>
-                      <p className="text-xs font-semibold text-blue-700">API 连接测试</p>
+                      <Bot size={18} className="text-pet-orange" />
+                      <h2 className="font-bold text-pet-brown">AI 成员列表</h2>
                     </div>
-                    <button
-                      onClick={async () => {
-                        setConnTesting(true);
-                        setConnResults(null);
-                        try {
-                          const r = await fetch('/api/test-connection', { method: 'POST' });
-                          const d = await r.json();
-                          setConnResults(d.results || []);
-                        } catch { setConnResults([]); }
-                        finally { setConnTesting(false); }
-                      }}
-                      disabled={connTesting}
-                      className="text-xs bg-blue-500 text-white px-3 py-1.5 rounded-lg hover:bg-blue-600 disabled:opacity-50"
-                    >
-                      {connTesting ? '测试中…' : '一键测试'}
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-blue-600">检测每个已配置 provider 的 API Key 是否可用</p>
-                  {connResults && (
-                    <div className="space-y-1 mt-1">
-                      {connResults.length === 0 && <p className="text-[11px] text-blue-500">没有已配置的 provider</p>}
-                      {connResults.map(r => (
-                        <div key={r.provider} className="flex items-center gap-2 text-[11px]">
-                          <span>{r.status === 'ok' ? '✅' : r.status === 'fail' ? '❌' : '⏭️'}</span>
-                          <span className="font-mono font-bold text-pet-brown w-24 shrink-0">{r.provider}</span>
-                          {r.status === 'ok' && <span className="text-green-700">{r.model} · {r.elapsed}ms</span>}
-                          {r.status === 'fail' && <span className="text-red-600 truncate">{r.reason}</span>}
-                          {r.status === 'skip' && <span className="text-gray-500">{r.reason}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-              {/* 技能商店 */}
-              <div className="healing-card p-6 space-y-4">
-                <div className="flex items-center gap-2">
-                  <Package size={18} className="text-blue-500" />
-                  <h2 className="font-bold text-pet-brown">技能商店</h2>
-                </div>
-                <div className="flex gap-2">
-                  <input
-                    value={skillSearch}
-                    onChange={e => setSkillSearch(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleSkillSearch()}
-                    placeholder="搜索技能，按回车查询…"
-                    className="flex-1 bg-pet-cream/60 rounded-xl border border-pet-pink/30 px-4 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none"
-                  />
-                  <button onClick={handleSkillSearch} disabled={skillSearching} className="bg-pet-orange text-white rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50 hover:scale-105 transition-transform">
-                    {skillSearching ? '…' : '搜索'}
-                  </button>
-                </div>
-                {skillSearchResults.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="text-xs text-pet-brown/40 font-bold uppercase tracking-wide">搜索结果</div>
-                    {skillSearchResults.map((s: any) => (
-                      <div key={s.slug} className="flex items-center gap-3 p-3 bg-blue-50 rounded-xl">
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-bold text-pet-brown">{s.name || s.slug}</div>
-                          <div className="text-[11px] text-pet-brown/50 truncate">{s.description}</div>
-                        </div>
-                        <button onClick={() => handleSkillInstall(s.slug)} className="text-xs bg-pet-orange text-white px-3 py-1.5 rounded-xl font-bold hover:scale-105 transition-transform shrink-0">
-                          安装
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {dashSkills.length === 0 && !dashLoading ? (
-                  <p className="text-sm text-pet-brown/40">暂无已安装技能</p>
-                ) : (
-                  <div>
-                    <div className="text-xs text-pet-brown/40 font-bold uppercase tracking-wide mb-2">已安装</div>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                      {dashSkills.map((s: any) => (
-                        <div key={s.slug || s.id} className="flex items-center gap-2 p-3 bg-pet-cream/60 rounded-xl">
-                          <Package size={14} className="text-blue-400 shrink-0" />
-                          <span className="text-xs font-medium text-pet-brown truncate">{s.name || s.slug}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-        ) : activeTab === 'hole' ? (
-          /* Tree Hole Section */
-          <section className="flex-1 flex flex-col p-6 md:p-12 overflow-y-auto pb-24 md:pb-12">
-            <div className="max-w-2xl mx-auto w-full space-y-8">
-              <div className="text-center space-y-2">
-                <h1 className="text-4xl font-display font-bold text-pet-brown">{t('treeHoleTitle')}</h1>
-                <p className="text-pet-brown/60">{t('treeHoleSubtitle')}</p>
-              </div>
-
-              <div className="healing-card p-6 space-y-4">
-                <textarea 
-                  value={holeContent}
-                  onChange={(e) => setHoleContent(e.target.value)}
-                  placeholder={t('holePlaceholder')}
-                  className="w-full h-32 bg-pet-cream/50 rounded-2xl p-4 border-none focus:ring-2 focus:ring-pet-orange/30 text-sm resize-none"
-                />
-                <div className="flex justify-end">
-                  <button 
-                    onClick={() => {
-                      if (!holeContent.trim()) return;
-                      socketRef.current?.emit('post_tree_hole', holeContent);
-                      setHoleContent('');
-                    }}
-                    disabled={!holeContent.trim()}
-                    className="bg-pet-brown text-white px-8 py-3 rounded-2xl font-bold pet-shadow hover:scale-105 transition-transform disabled:opacity-50 disabled:scale-100"
-                  >
-                    {t('postHole')}
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-6">
-                {treeHolePosts.map((post) => (
-                  <motion.div 
-                    layout
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    key={post.id} 
-                    className="bg-white/40 rounded-[32px] p-8 space-y-6"
-                  >
-                    <div className="space-y-2">
-                      <p className="text-pet-brown/80 italic">“{post.content}”</p>
-                      <div className="text-[10px] text-pet-brown/30">{format(new Date(post.timestamp), 'yyyy-MM-dd HH:mm')}</div>
-                    </div>
-
-                    {post.replies.length > 0 && (
-                      <div className="space-y-4 pt-4 border-t border-pet-pink/10">
-                        {post.replies.map((reply, i) => (
-                          <motion.div 
-                            initial={{ scale: 0.9, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            key={i} 
-                            className="flex gap-3 bg-pet-orange/5 p-4 rounded-2xl"
-                          >
-                            <img src={reply.avatar} className="w-8 h-8 rounded-lg" referrerPolicy="no-referrer" />
-                            <div>
-                              <div className="text-[10px] font-bold text-pet-orange mb-1">{reply.author}</div>
-                              <p className="text-xs text-pet-brown/70">{reply.content}</p>
+                    {dashAgents.length === 0 && !dashLoading ? (
+                      <p className="text-sm text-pet-brown/40">暂无 Agent 数据（AI 服务可能未启动）</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {dashAgents.map((agent: any) => (
+                          <div key={agent.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
+                            <div className="w-8 h-8 bg-pet-orange/20 rounded-lg flex items-center justify-center text-pet-orange font-bold text-sm">
+                              {agent.name?.slice(0, 1) || 'A'}
                             </div>
-                          </motion.div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-bold text-pet-brown truncate">{agent.name || agent.id}</div>
+                              <div className="text-[11px] text-pet-brown/40 truncate">{agent.modelDisplay || agent.id}</div>
+                            </div>
+                            {agent.isDefault && (
+                              <span className="text-[10px] bg-pet-orange text-white px-2 py-0.5 rounded-full font-bold shrink-0">默认</span>
+                            )}
+                          </div>
                         ))}
                       </div>
                     )}
-                  </motion.div>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : activeTab === 'square' ? (
-          /* 搭子广场 */
-          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
-            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40 flex items-center justify-between">
-              <div>
-                <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">{t('square')}</h1>
-                <p className="text-sm text-pet-brown/60">找到你的学习搭子，一起成长 🐾</p>
-              </div>
-              <button
-                onClick={() => setShowPostModal(true)}
-                className="flex items-center gap-2 bg-pet-orange text-white px-4 py-2.5 rounded-2xl font-bold text-sm pet-shadow hover:scale-105 transition-transform"
-              >
-                <Plus size={18} />
-                发帖
-              </button>
-            </header>
-            <div className="p-6 md:p-8 max-w-2xl mx-auto w-full space-y-4">
-              {posts.length === 0 ? (
-                <div className="text-center py-20 text-pet-brown/40">
-                  <Globe size={48} className="mx-auto mb-4 opacity-30" />
-                  <p className="text-lg font-display">还没有帖子</p>
-                  <p className="text-sm mt-1">来发第一帖吧！</p>
-                </div>
-              ) : (
-                posts.map((post: any) => (
-                  <div key={post.id} className="bg-white rounded-3xl p-5 pet-shadow space-y-3">
-                    <div className="flex items-center gap-3">
-                      <img src={post.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${post.author}`} className="w-10 h-10 rounded-full" />
-                      <div>
-                        <p className="font-bold text-pet-brown text-sm">{post.author}</p>
-                        <p className="text-xs text-pet-brown/40">{post.createdAt ? new Date(post.createdAt).toLocaleString('zh-CN') : ''}</p>
+                  </div>
+                  <div className="healing-card p-6 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Clock size={18} className="text-purple-500" />
+                        <h2 className="font-bold text-pet-brown">定时提醒</h2>
                       </div>
-                      {post.tag && (
-                        <span className="ml-auto bg-pet-orange/10 text-pet-orange text-xs font-bold px-3 py-1 rounded-full">{post.tag}</span>
-                      )}
-                    </div>
-                    <p className="text-pet-brown text-sm leading-relaxed">{post.content}</p>
-                    <div className="flex items-center gap-4 pt-1">
-                      <button className="flex items-center gap-1.5 text-xs text-pet-brown/40 hover:text-pet-orange transition-colors">
-                        <Heart size={14} /> {post.likes ?? 0}
+                      <button
+                        onClick={() => setShowAddCron(v => !v)}
+                        className="text-xs font-bold text-pet-orange flex items-center gap-1 hover:underline"
+                      >
+                        <Plus size={14} /> 新增
                       </button>
                     </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        ) : activeTab === 'manage' ? (
-          /* Manage Panel */
-          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
-            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
-              <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">管理</h1>
-              <p className="text-sm text-pet-brown/60">管理 AI 可访问的文件路径，上传新文件到工作区</p>
-            </header>
-
-            <div className="p-6 md:p-8 space-y-8 max-w-3xl">
-              {/* Allowed Paths */}
-              <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
-                <div className="flex items-center gap-3 mb-2">
-                  <div className="w-9 h-9 rounded-2xl bg-pet-orange/10 flex items-center justify-center">
-                    <FolderPlus size={18} className="text-pet-orange" />
-                  </div>
-                  <div>
-                    <h2 className="font-bold text-pet-brown">允许访问的路径</h2>
-                    <p className="text-xs text-pet-brown/50">AI 只能读取这些目录下的文件</p>
-                  </div>
-                </div>
-
-                <div className="flex gap-2">
-                  <input
-                    value={manageNewPath}
-                    onChange={e => setManageNewPath(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleAddManagePath()}
-                    placeholder="输入完整路径，如 /Users/xxx/Documents"
-                    className="flex-1 bg-pet-cream rounded-2xl px-4 py-3 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none font-mono"
-                  />
-                  <button
-                    onClick={handleAddManagePath}
-                    className="bg-pet-orange text-white px-5 py-3 rounded-2xl font-bold text-sm hover:opacity-90 transition-opacity"
-                  >
-                    添加
-                  </button>
-                </div>
-
-                {managePathsLoading ? (
-                  <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
-                    <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
-                    加载中…
-                  </div>
-                ) : managePaths.length === 0 ? (
-                  <p className="text-pet-brown/30 text-sm py-4 text-center">暂无已添加的路径</p>
-                ) : (
-                  <div className="space-y-2">
-                    {managePaths.map((p, i) => (
-                      <div key={i} className="flex items-center gap-3 bg-pet-cream rounded-2xl px-4 py-3">
-                        <FolderOpen size={16} className="text-pet-orange shrink-0" />
-                        <span className="flex-1 text-sm font-mono text-pet-brown truncate">{p}</span>
-                        <button
-                          onClick={() => handleRemoveManagePath(p)}
-                          className="text-pet-brown/30 hover:text-red-400 transition-colors"
-                        >
-                          <Trash2 size={15} />
+                    {showAddCron && (
+                      <div className="bg-pet-cream/60 rounded-xl p-4 space-y-3">
+                        <input value={cronNewName} onChange={e => setCronNewName(e.target.value)} placeholder="提醒名称" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                        <input value={cronNewMsg} onChange={e => setCronNewMsg(e.target.value)} placeholder="提醒内容（发给 AI）" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                        <input value={cronNewSchedule} onChange={e => setCronNewSchedule(e.target.value)} placeholder="Cron 表达式，如 0 9 * * *" className="w-full bg-white rounded-xl border border-pet-pink/30 px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-pet-orange/30 focus:outline-none" />
+                        <button onClick={handleCronAdd} disabled={cronAdding} className="w-full bg-pet-orange text-white rounded-xl py-2 text-sm font-bold disabled:opacity-50">
+                          {cronAdding ? '保存中…' : '保存提醒'}
                         </button>
                       </div>
-                    ))}
+                    )}
+                    {dashCron.length === 0 && !dashLoading ? (
+                      <p className="text-sm text-pet-brown/40">暂无定时提醒</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {dashCron.map((job: any) => (
+                          <div key={job.id} className="flex items-center gap-3 p-3 bg-pet-cream/60 rounded-xl">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-bold text-pet-brown truncate">{job.name}</div>
+                              <div className="text-[11px] text-pet-brown/40 truncate">{typeof job.schedule === 'string' ? job.schedule : JSON.stringify(job.schedule)}</div>
+                            </div>
+                            <button onClick={() => handleCronToggle(job.id, !job.enabled)} className="text-pet-brown/40 hover:text-pet-orange transition-colors">
+                              {job.enabled ? <ToggleRight size={22} className="text-pet-orange" /> : <ToggleLeft size={22} />}
+                            </button>
+                            <button onClick={() => handleCronDelete(job.id)} className="text-pet-brown/30 hover:text-red-400 transition-colors">
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {dashUsage.length > 0 && (
+                  <div className="healing-card p-6 space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Zap size={18} className="text-amber-500" />
+                      <h2 className="font-bold text-pet-brown">近期用量记录</h2>
+                    </div>
+                    <div className="overflow-x-auto rounded-xl border border-pet-pink/20">
+                      <table className="w-full text-xs">
+                        <thead className="bg-pet-cream/60">
+                          <tr>
+                            <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">时间</th>
+                            <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">Agent</th>
+                            <th className="px-4 py-2 text-left text-pet-brown/50 font-bold uppercase tracking-wide">模型</th>
+                            <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">Token</th>
+                            <th className="px-4 py-2 text-right text-pet-brown/50 font-bold uppercase tracking-wide">费用</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-pet-pink/10">
+                          {dashUsage.slice(0, 10).map((entry: any, i: number) => (
+                            <tr key={i} className="hover:bg-pet-cream/30 transition-colors">
+                              <td className="px-4 py-2 text-pet-brown/60">{entry.timestamp ? new Date(entry.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                              <td className="px-4 py-2 text-pet-brown font-medium">{entry.agentId}</td>
+                              <td className="px-4 py-2 text-pet-brown/60 font-mono text-[11px]">{entry.model || '—'}</td>
+                              <td className="px-4 py-2 text-right text-pet-brown font-mono">{entry.totalTokens?.toLocaleString() || '—'}</td>
+                              <td className="px-4 py-2 text-right text-pet-brown/70">{entry.costUsd != null ? `$${Number(entry.costUsd).toFixed(4)}` : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 )}
               </div>
-
-              {/* Upload Files */}
-              <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
-                <div className="flex items-center gap-3 mb-2">
-                  <div className="w-9 h-9 rounded-2xl bg-purple-100 flex items-center justify-center">
-                    <Upload size={18} className="text-purple-600" />
+            ) : (
+              <div className="p-6 md:p-8 space-y-8 max-w-3xl">
+                {/* Allowed Paths */}
+                <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-9 h-9 rounded-2xl bg-pet-orange/10 flex items-center justify-center">
+                      <FolderPlus size={18} className="text-pet-orange" />
+                    </div>
+                    <div>
+                      <h2 className="font-bold text-pet-brown">允许访问的路径</h2>
+                      <p className="text-xs text-pet-brown/50">AI 只能读取这些目录下的文件</p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="font-bold text-pet-brown">上传文件</h2>
-                    <p className="text-xs text-pet-brown/50">文件将保存到 AI 工作区，可被直接引用</p>
+                  <div className="flex gap-2">
+                    <input
+                      value={manageNewPath}
+                      onChange={e => setManageNewPath(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleAddManagePath()}
+                      placeholder="输入完整路径，如 /Users/xxx/Documents"
+                      className="flex-1 bg-pet-cream rounded-2xl px-4 py-3 text-sm focus:ring-2 focus:ring-pet-orange/30 focus:outline-none font-mono"
+                    />
+                    <button
+                      onClick={handleAddManagePath}
+                      className="bg-pet-orange text-white px-5 py-3 rounded-2xl font-bold text-sm hover:opacity-90 transition-opacity"
+                    >
+                      添加
+                    </button>
                   </div>
-                </div>
-
-                <input
-                  ref={manageUploadRef}
-                  type="file"
-                  className="hidden"
-                  onChange={handleManageUpload}
-                  accept=".pdf,.txt,.md,.docx,.doc,.csv,.json"
-                />
-                <button
-                  onClick={() => manageUploadRef.current?.click()}
-                  className="w-full border-2 border-dashed border-pet-pink/40 rounded-2xl py-8 flex flex-col items-center gap-3 text-pet-brown/50 hover:border-pet-orange/40 hover:text-pet-orange transition-colors"
-                >
-                  <Upload size={28} />
-                  <span className="text-sm font-medium">点击选择文件上传</span>
-                  <span className="text-xs">支持 PDF、Word、TXT、Markdown、CSV、JSON</span>
-                </button>
-
-                {manageUploadStatus && (
-                  <div className={cn(
-                    "text-sm px-4 py-3 rounded-2xl",
-                    manageUploadStatus.startsWith('✓') ? "bg-emerald-50 text-emerald-700" :
-                    manageUploadStatus.startsWith('✗') ? "bg-red-50 text-red-600" :
-                    "bg-pet-cream text-pet-brown/60"
-                  )}>
-                    {manageUploadStatus}
-                  </div>
-                )}
-
-                {/* File List */}
-                {manageFilesLoading ? (
-                  <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
-                    <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
-                    加载中…
-                  </div>
-                ) : manageFiles.length > 0 && (
-                  <div className="space-y-2 pt-2">
-                    <p className="text-xs font-bold text-pet-brown/40 uppercase tracking-wider">工作区文件</p>
-                    <div className="divide-y divide-pet-pink/10 rounded-2xl border border-pet-pink/20 overflow-hidden">
-                      {manageFiles.map((f, i) => (
-                        <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-pet-cream/40 transition-colors">
-                          <FileText size={16} className="text-pet-brown/40 shrink-0" />
-                          <span className="flex-1 text-sm text-pet-brown truncate">{f.name}</span>
-                          <span className="text-xs text-pet-brown/30 shrink-0">
-                            {f.size > 1024 * 1024 ? `${(f.size / 1024 / 1024).toFixed(1)}MB` : `${Math.round(f.size / 1024)}KB`}
-                          </span>
+                  {managePathsLoading ? (
+                    <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
+                      <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                      加载中…
+                    </div>
+                  ) : managePaths.length === 0 ? (
+                    <p className="text-pet-brown/30 text-sm py-4 text-center">暂无已添加的路径</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {managePaths.map((p, i) => (
+                        <div key={i} className="flex items-center gap-3 bg-pet-cream rounded-2xl px-4 py-3">
+                          <FolderOpen size={16} className="text-pet-orange shrink-0" />
+                          <span className="flex-1 text-sm font-mono text-pet-brown truncate">{p}</span>
+                          <button
+                            onClick={() => handleRemoveManagePath(p)}
+                            className="text-pet-brown/30 hover:text-red-400 transition-colors"
+                          >
+                            <Trash2 size={15} />
+                          </button>
                         </div>
                       ))}
                     </div>
+                  )}
+                </div>
+                {/* Upload Files */}
+                <div className="bg-white rounded-3xl p-6 pet-shadow space-y-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-9 h-9 rounded-2xl bg-purple-100 flex items-center justify-center">
+                      <Upload size={18} className="text-purple-600" />
+                    </div>
+                    <div>
+                      <h2 className="font-bold text-pet-brown">上传文件</h2>
+                      <p className="text-xs text-pet-brown/50">文件将保存到 AI 工作区，可被直接引用</p>
+                    </div>
                   </div>
-                )}
+                  <input
+                    ref={manageUploadRef}
+                    type="file"
+                    className="hidden"
+                    onChange={handleManageUpload}
+                    accept=".pdf,.txt,.md,.docx,.doc,.csv,.json"
+                  />
+                  <button
+                    onClick={() => manageUploadRef.current?.click()}
+                    className="w-full border-2 border-dashed border-pet-pink/40 rounded-2xl py-8 flex flex-col items-center gap-3 text-pet-brown/50 hover:border-pet-orange/40 hover:text-pet-orange transition-colors"
+                  >
+                    <Upload size={28} />
+                    <span className="text-sm font-medium">点击选择文件上传</span>
+                    <span className="text-xs">支持 PDF、Word、TXT、Markdown、CSV、JSON</span>
+                  </button>
+                  {manageUploadStatus && (
+                    <div className={cn(
+                      'text-sm px-4 py-3 rounded-2xl',
+                      manageUploadStatus.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' :
+                      manageUploadStatus.startsWith('✗') ? 'bg-red-50 text-red-600' :
+                      'bg-pet-cream text-pet-brown/60'
+                    )}>
+                      {manageUploadStatus}
+                    </div>
+                  )}
+                  {manageFilesLoading ? (
+                    <div className="flex items-center gap-2 py-4 text-pet-brown/40 text-sm">
+                      <div className="w-4 h-4 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                      加载中…
+                    </div>
+                  ) : manageFiles.length > 0 && (
+                    <div className="space-y-2 pt-2">
+                      <p className="text-xs font-bold text-pet-brown/40 uppercase tracking-wider">工作区文件</p>
+                      <div className="divide-y divide-pet-pink/10 rounded-2xl border border-pet-pink/20 overflow-hidden">
+                        {manageFiles.map((f, i) => (
+                          <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-pet-cream/40 transition-colors">
+                            <FileText size={16} className="text-pet-brown/40 shrink-0" />
+                            <span className="flex-1 text-sm text-pet-brown truncate">{f.name}</span>
+                            <span className="text-xs text-pet-brown/30 shrink-0">
+                              {f.size > 1024 * 1024 ? `${(f.size / 1024 / 1024).toFixed(1)}MB` : `${Math.round(f.size / 1024)}KB`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </section>
         ) : null}
       </main>
@@ -3274,28 +3269,28 @@ export default function App() {
           label={t('chat')}
         />
         <NavButton
-          active={activeTab === 'dashboard'}
-          onClick={() => { setActiveTab('dashboard'); setShowChatDetail(false); }}
-          icon={<BarChart2 size={20} />}
-          label="数据"
-        />
-        <NavButton 
-          active={activeTab === 'pet'} 
+          active={activeTab === 'pet'}
           onClick={() => { setActiveTab('pet'); setShowChatDetail(false); }}
           icon={<Home size={20} />}
           label={t('pet')}
         />
-        <NavButton 
-          active={activeTab === 'study'} 
+        <NavButton
+          active={activeTab === 'study'}
           onClick={() => { setActiveTab('study'); setShowChatDetail(false); }}
           icon={<Timer size={20} />}
           label={t('study')}
         />
-        <NavButton 
-          active={activeTab === 'hole'} 
-          onClick={() => { setActiveTab('hole'); setShowChatDetail(false); }}
-          icon={<Wind size={20} />}
-          label={t('hole')}
+        <NavButton
+          active={activeTab === 'square'}
+          onClick={() => { setActiveTab('square'); setShowChatDetail(false); }}
+          icon={<Globe size={20} />}
+          label="广场"
+        />
+        <NavButton
+          active={activeTab === 'manage'}
+          onClick={() => { setActiveTab('manage'); setShowChatDetail(false); }}
+          icon={<FolderOpen size={20} />}
+          label="管理"
         />
       </nav>
 
@@ -3622,16 +3617,27 @@ export default function App() {
                         <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40">
                           把 API Key 粘贴到这里
                         </label>
-                        <textarea
-                          rows={4}
-                          value={setupApiKey}
-                          onChange={(e) => {
-                            setSetupApiKey(e.target.value);
-                            setSetupMessage(null);
-                          }}
-                          placeholder={selectedCompany.placeholder}
-                          className="w-full rounded-[28px] bg-pet-cream p-5 text-sm text-pet-brown border-none resize-none focus:ring-2 focus:ring-pet-orange/30"
-                        />
+                        <div className="relative">
+                          <input
+                            type="password"
+                            value={setupApiKey}
+                            onChange={(e) => {
+                              setSetupApiKey(e.target.value);
+                              setSetupMessage(null);
+                            }}
+                            placeholder={selectedCompany.placeholder}
+                            className="w-full rounded-[28px] bg-pet-cream px-5 py-4 pr-12 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30 font-mono tracking-widest"
+                          />
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              const inp = e.currentTarget.previousElementSibling as HTMLInputElement;
+                              inp.type = inp.type === 'password' ? 'text' : 'password';
+                              e.currentTarget.textContent = inp.type === 'password' ? '👁' : '🙈';
+                            }}
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-pet-brown/30 hover:text-pet-brown/60 transition-colors text-base"
+                          >👁</button>
+                        </div>
                         <div className="flex items-start justify-between gap-4">
                           <p className="text-xs leading-6 text-pet-brown/45">
                             {hasSavedKeyForSelectedProvider
@@ -3751,6 +3757,7 @@ export default function App() {
                             // 先弹向导让用户填名字+性格，填完再 wake（确保 wake 用的是真实名字）
                             setTimeout(() => {
                               setOnboardingStep(1);
+                              petWizardOpenRef.current = true;
                               setShowPetProfileWizard(true);
                             }, 300);
                           } else {
@@ -3830,6 +3837,7 @@ export default function App() {
                       onClick={() => {
                         setSwitchProvider(c.provider);
                         setSwitchModel(c.models[0]?.model || '');
+                        setSwitchBaseUrl(c.defaultBaseUrl || '');
                         setSwitchMessage(null);
                       }}
                       className={cn(
@@ -3839,7 +3847,7 @@ export default function App() {
                           : 'bg-pet-cream text-pet-brown/65 hover:bg-pet-orange/10',
                       )}
                     >
-                      {c.name}
+                      {c.company}
                     </button>
                   ))}
                 </div>
@@ -3886,7 +3894,7 @@ export default function App() {
               })()}
 
               {/* API Key */}
-              <div className="mb-5">
+              <div className="mb-4">
                 <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">API Key（留空则保留原来的）</label>
                 <input
                   type="password"
@@ -3897,6 +3905,19 @@ export default function App() {
                 />
               </div>
 
+              {/* Base URL（所有厂商都可自定义） */}
+              {!MODEL_COMPANIES.find(c => c.provider === switchProvider)?.custom && (
+                <div className="mb-5">
+                  <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">Base URL（留空用默认）</label>
+                  <input
+                    value={switchBaseUrl}
+                    onChange={e => setSwitchBaseUrl(e.target.value)}
+                    placeholder={MODEL_COMPANIES.find(c => c.provider === switchProvider)?.defaultBaseUrl || '留空则使用官方默认地址'}
+                    className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
+                  />
+                </div>
+              )}
+
               {switchMessage && (
                 <div className={cn(
                   'mb-5 rounded-2xl px-4 py-3 text-sm',
@@ -3905,6 +3926,18 @@ export default function App() {
                   {switchMessage.text}
                 </div>
               )}
+
+              <div className="mb-3">
+                <button type="button" onClick={() => {
+                  if (confirm('确定清空所有聊天记录吗？此操作不可撤销。')) {
+                    socketRef.current?.emit('clear_messages');
+                    setShowModelSwitch(false);
+                  }
+                }}
+                  className="w-full rounded-2xl border border-red-200 bg-red-50 px-5 py-2.5 text-sm font-bold text-red-400 hover:bg-red-100 transition-colors">
+                  清空聊天记录
+                </button>
+              </div>
 
               <div className="flex gap-3">
                 <button type="button" onClick={() => setShowModelSwitch(false)}
@@ -3918,7 +3951,7 @@ export default function App() {
                     const company = MODEL_COMPANIES.find(c => c.provider === switchProvider);
                     const finalProvider = company?.custom ? switchCustomProvider.trim() : switchProvider;
                     const finalModel = company?.custom ? switchCustomModel.trim() : switchModel;
-                    const finalBaseUrl = company?.custom ? switchBaseUrl.trim() : '';
+                    const finalBaseUrl = switchBaseUrl.trim() || company?.defaultBaseUrl || '';
                     if (!finalProvider || !finalModel) {
                       setSwitchMessage({ type: 'error', text: '请先选择模型' });
                       return;
@@ -4415,6 +4448,184 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {selectedBoardRow && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSelectedBoardRow(null)}
+              className="absolute inset-0 bg-pet-brown/25 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 24 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 24 }}
+              className="relative w-full max-w-2xl bg-white rounded-[32px] p-6 md:p-8 pet-shadow max-h-[85vh] overflow-y-auto"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">岗位详情</div>
+                  <h2 className="mt-2 text-2xl font-display font-bold text-pet-brown">{selectedBoardRow.company || '未知公司'}</h2>
+                  <p className="mt-1 text-sm text-pet-brown/55">{selectedBoardRow.role || '未知岗位'}</p>
+                </div>
+                <button
+                  onClick={() => setSelectedBoardRow(null)}
+                  className="rounded-2xl bg-pet-cream p-2 text-pet-brown/40 hover:text-pet-brown"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="mt-6 grid gap-3 md:grid-cols-4">
+                <div className="rounded-2xl bg-pet-cream/55 px-4 py-3">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-pet-brown/35">阶段</div>
+                  <select
+                    value={selectedBoardRow.workflowStage || 'new'}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, workflowStage: e.target.value })); setBoardMessage(null); }}
+                    className="mt-2 w-full bg-white rounded-xl px-3 py-2 text-sm text-pet-brown border border-pet-pink/20 focus:ring-2 focus:ring-pet-orange/30"
+                  >
+                    {['new', 'selected', 'tailoring', 'apply_ready', 'applied'].map(stage => (
+                      <option key={stage} value={stage}>{stage}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="rounded-2xl bg-pet-cream/55 px-4 py-3">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-pet-brown/35">状态</div>
+                  <select
+                    value={selectedBoardRow.applicationStatus || 'pending'}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, applicationStatus: e.target.value })); setBoardMessage(null); }}
+                    className="mt-2 w-full bg-white rounded-xl px-3 py-2 text-sm text-pet-brown border border-pet-pink/20 focus:ring-2 focus:ring-pet-orange/30"
+                  >
+                    {['pending', 'submitted', 'interview', 'rejected', 'offer'].map(status => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="rounded-2xl bg-pet-cream/55 px-4 py-3">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-pet-brown/35">简历版本</div>
+                  <input
+                    value={selectedBoardRow.resumeVersion || ''}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, resumeVersion: e.target.value })); setBoardMessage(null); }}
+                    className="mt-2 w-full bg-white rounded-xl px-3 py-2 text-sm text-pet-brown border border-pet-pink/20 focus:ring-2 focus:ring-pet-orange/30"
+                    placeholder="如 v2.1-anthropic"
+                  />
+                </div>
+                <div className="rounded-2xl bg-pet-cream/55 px-4 py-3">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-pet-brown/35">跟进日期</div>
+                  <input
+                    value={selectedBoardRow.followUpDate || ''}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, followUpDate: e.target.value })); setBoardMessage(null); }}
+                    className="mt-2 w-full bg-white rounded-xl px-3 py-2 text-sm text-pet-brown border border-pet-pink/20 focus:ring-2 focus:ring-pet-orange/30"
+                    placeholder="YYYY-MM-DD"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-4">
+                <div className="rounded-2xl border border-pet-pink/15 p-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">岗位信息</div>
+                  <div className="mt-3 space-y-2 text-sm text-pet-brown/65">
+                    <div>地点：{selectedBoardRow.location || '—'}</div>
+                    <div>薪资：{selectedBoardRow.salary || '—'}</div>
+                    <div>来源：{selectedBoardRow.source || '—'}</div>
+                    <div>截止：{selectedBoardRow.deadline || '—'}</div>
+                    <div className="break-all">链接：{selectedBoardRow.jdUrl || '—'}</div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-pet-pink/15 p-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">技能重点</div>
+                  <textarea
+                    value={selectedBoardRow.skillHighlights || ''}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, skillHighlights: e.target.value })); setBoardMessage(null); }}
+                    className="mt-3 w-full min-h-[96px] bg-pet-cream/55 rounded-2xl px-4 py-3 text-sm leading-7 text-pet-brown/65 border border-pet-pink/15 focus:ring-2 focus:ring-pet-orange/30 resize-none"
+                    placeholder="写这个岗位最该强调的技能点"
+                  />
+                </div>
+
+                <div className="rounded-2xl border border-pet-pink/15 p-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">外联与联系人</div>
+                  <div className="mt-3">
+                    <label className="text-[10px] font-bold uppercase tracking-[0.18em] text-pet-brown/35">外联状态</label>
+                    <select
+                      value={selectedBoardRow.outreachStatus || ''}
+                      onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, outreachStatus: e.target.value })); setBoardMessage(null); }}
+                      className="mt-2 w-full bg-pet-cream/55 rounded-xl px-3 py-2 text-sm text-pet-brown border border-pet-pink/20 focus:ring-2 focus:ring-pet-orange/30"
+                    >
+                      {['', 'draft', 'user_approved', 'sent', 'replied'].map(status => (
+                        <option key={status} value={status}>{status || '未开始'}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {selectedBoardRow.contacts?.length > 0 ? (
+                    <div className="mt-3 space-y-2">
+                      {selectedBoardRow.contacts.map((contact: any, idx: number) => (
+                        <div key={idx} className="rounded-xl bg-pet-cream/55 px-3 py-2 text-sm text-pet-brown/65">
+                          {contact.name || '未命名联系人'} · {contact.title || '未知职位'} · {contact.channel || '未知渠道'}
+                          {contact.value ? ` · ${contact.value}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-pet-brown/45">还没有联系人记录</div>
+                  )}
+                  <textarea
+                    value={selectedBoardRow.outreachDraft || ''}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, outreachDraft: e.target.value })); setBoardMessage(null); }}
+                    className="mt-3 w-full min-h-[96px] bg-pet-cream/55 rounded-2xl px-4 py-3 text-sm leading-7 text-pet-brown/65 border border-pet-pink/15 focus:ring-2 focus:ring-pet-orange/30 resize-none"
+                    placeholder="这里可以手动补外联草稿"
+                  />
+                </div>
+
+                <div className="rounded-2xl border border-pet-pink/15 p-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">面试记录</div>
+                  {selectedBoardRow.interviewRecord ? (
+                    <div className="mt-3 space-y-2 text-sm text-pet-brown/65">
+                      <div>评分：{selectedBoardRow.interviewRecord.score ?? '—'}</div>
+                      <div>优势：{selectedBoardRow.interviewRecord.strengths?.join('、') || '—'}</div>
+                      <div>待提升：{selectedBoardRow.interviewRecord.weaknesses?.join('、') || '—'}</div>
+                      <div className="whitespace-pre-wrap">{selectedBoardRow.interviewRecord.notes || '—'}</div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-pet-brown/45">还没有面试记录</div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-pet-pink/15 p-4">
+                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/35">协作备注</div>
+                  <textarea
+                    value={selectedBoardRow.notes || ''}
+                    onChange={(e) => { setSelectedBoardRow((prev: any) => ({ ...prev, notes: e.target.value })); setBoardMessage(null); }}
+                    className="mt-3 w-full min-h-[120px] bg-pet-cream/55 rounded-2xl px-4 py-3 text-sm leading-7 text-pet-brown/65 border border-pet-pink/15 focus:ring-2 focus:ring-pet-orange/30 resize-none"
+                    placeholder="写一些人工备注或修正说明"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center justify-between gap-3">
+                {boardMessage ? (
+                  <div className={cn(
+                    'text-sm px-4 py-3 rounded-2xl',
+                    boardMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600',
+                  )}>
+                    {boardMessage.text}
+                  </div>
+                ) : <div />}
+                <button
+                  onClick={handleSaveBoardRow}
+                  disabled={boardSaving}
+                  className="rounded-2xl bg-pet-orange px-5 py-3 text-sm font-bold text-white pet-shadow hover:scale-[1.02] transition-transform disabled:opacity-50 disabled:scale-100"
+                >
+                  {boardSaving ? '保存中…' : '保存修正'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Study Complete Modal / Poster */}
       <AnimatePresence>
         {showStudyCompleteModal && (
@@ -4541,11 +4752,23 @@ function ChatListItem({ item, active, onClick }: { item: ChatGroup, active: bool
           : item.icon}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex justify-between items-center mb-0.5">
-          <h3 className="font-bold text-pet-brown text-sm truncate">{item.name}</h3>
-          <span className="text-[9px] text-pet-brown/30">12:45</span>
-        </div>
-        <p className="text-xs text-pet-brown/40 truncate">{item.description}</p>
+        {item.type === 'group' ? (
+          <div className="flex items-center gap-1.5">
+            <h3 className="font-bold text-pet-brown text-sm shrink-0">{item.name}</h3>
+            {item.description && (
+              <span className="text-[9px] text-pet-brown/40 truncate">{item.description}</span>
+            )}
+            <span className="text-[9px] text-pet-brown/30 shrink-0 ml-auto">12:45</span>
+          </div>
+        ) : (
+          <div className="flex justify-between items-center mb-0.5">
+            <h3 className="font-bold text-pet-brown text-sm truncate">{item.name}</h3>
+            <span className="text-[9px] text-pet-brown/30">12:45</span>
+          </div>
+        )}
+        {item.type !== 'group' && (
+          <p className="text-xs text-pet-brown/40 truncate">{item.description}</p>
+        )}
       </div>
     </motion.button>
   );

@@ -59,6 +59,7 @@ export interface ChatGroup {
   id: string;
   name: string;
   icon: string;
+  avatar?: string;
   description: string;
   lastMessage?: string;
   type: 'group' | 'contact';

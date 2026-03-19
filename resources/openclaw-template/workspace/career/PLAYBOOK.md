@@ -9,7 +9,7 @@
 | Agent | agentId | 核心定位 | 主要输出 |
 |-------|---------|---------|---------|
 | 🐾 团团（首席伴学官） | `career-planner` | 情绪价值 + 流程推进 + 团队调度 | `profile.md` / `chat_log.md` |
-| 🔬 技能分析师 | `jd-analyst` | 行业专家（动态适配用户方向）+ 每日学习 | `skills_gap.md` / 投递表备注 |
+| 🔬 专业老师 | `professional-teacher` | 行业专家（动态适配用户方向）+ 每日学习 | `skills_gap.md` / 投递表备注 |
 | 📝 简历专家 | `resume-expert` | 简历评估、修改、tailor | `resume_master.md` / 投递表简历版本 |
 | 🔍 岗位猎手 | `job-hunter` | 每日搜岗 + 岗位表格化 | `jobs.json` / 投递表 |
 | 📊 投递管家 | `app-tracker` | 投递执行 + 状态追踪 + 邮件监控 | `applications.json` / 投递表状态 |
@@ -81,13 +81,13 @@
 
 **2c. 深度定位**
 团团收集完信息后：
-- `sessions_spawn jd-analyst`，附上完整用户信息
-- 技能分析师根据用户方向更新自己的人设（见 jd-analyst SOUL.md）
+- `sessions_spawn professional-teacher`，附上完整用户信息
+- 专业老师根据用户方向更新自己的人设（见 professional-teacher SOUL.md）
 - 技能分析师搜索当前行业 top 岗位要求，结合用户画像，输出精准定位报告
 - 团团 + 技能分析师 共同完善 `profile.md`，形成完整用户档案
 
 **2d. 求职日历**
-基于以下两个输入，由团团（sessions_spawn jd-analyst 协作）生成求职计划：
+基于以下两个输入，由团团（sessions_spawn professional-teacher 协作）生成求职计划：
 - 用户想要的入职时间
 - 用户当前状态（简历完成度、项目经历等）
 
@@ -100,7 +100,7 @@
 
 ### Step 3：简历优化（简历专家 + 技能分析师协作）
 ```
-团团 → sessions_spawn resume-expert + jd-analyst
+团团 → sessions_spawn resume-expert + professional-teacher
 两者协作：
   技能分析师：基于行业知识，告诉简历专家这个方向最看重什么
   简历专家：根据反馈修改简历，打分（满分10分），给出具体改进建议

@@ -82,6 +82,11 @@ feishu_bitable_update_record: { "app_token": "JjPDbDqflaMZfxsh7cTctYHZnve", "tab
 
 ## 🚀 Boss直聘自动投递流程（最重要）
 
+### 渠道分流规则（必须遵守）
+- **Boss直聘 / zhipin.com**：这是“打招呼 / 发起沟通”流程，不要说成“还需要单独上传简历投递”。如果 `apply_job` 成功，就明确告诉用户：`已在 Boss直聘 发起沟通/打招呼`。
+- **非 Boss 链接**：这是普通简历投递流程，可以说“已投递简历”或“需要走官网/ATS 投递”。
+- 回复用户时必须根据链接渠道调整措辞，不能把两种流程混在一起。
+
 ### 收到岗位猎手传来的岗位列表时：
 1. 整理列表，问用户：**"以上 X 个岗位，你想投哪几个？告诉我编号（如 1、3、5）"**
 2. 等用户回复编号后，逐个确认：**"准备投递：[公司] — [职位]，确认吗？"**
@@ -211,9 +216,9 @@ feishu_bitable_update_record: { "app_token": "JjPDbDqflaMZfxsh7cTctYHZnve", "tab
 - "投递分析" / "analytics"
 
 ## 团队目录
-- 🎯 **@职业规划师** — 背景分析、目标岗位、求职 Roadmap
+- 🎯 **@首席伴学官** — 背景分析、目标岗位、求职 Roadmap
 - 🔍 **@岗位猎手** — 搜索/收集岗位
-- 📋 **@技能成长师** — 拆解 JD、技能 Gap
+- 📋 **@专业老师** — 拆解 JD、技能 Gap
 - 📝 **@简历专家** — 解析简历、生成 tailored resume/CL/cold email
 - 📊 **@投递管家** — 记录投递、follow-up 提醒
 - 🤝 **@人脉顾问** — 找联系人、写 cold outreach

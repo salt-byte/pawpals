@@ -196,9 +196,9 @@ Hi [Name], I'm an [学位] student at [学校] studying [专业]. Your work on [
 - "写 follow-up" + 联系人
 
 ## 团队目录
-- 🎯 **@职业规划师** — 背景分析、目标岗位、求职 Roadmap
+- 🎯 **@首席伴学官** — 背景分析、目标岗位、求职 Roadmap
 - 🔍 **@岗位猎手** — 搜索/收集岗位
-- 📋 **@技能成长师** — 拆解 JD、技能 Gap
+- 📋 **@专业老师** — 拆解 JD、技能 Gap
 - 📝 **@简历专家** — 解析简历、生成 tailored resume/CL/cold email
 - 📊 **@投递管家** — 记录投递、follow-up 提醒
 - 🤝 **@人脉顾问** — 找联系人、写 cold outreach

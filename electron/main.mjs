@@ -4,6 +4,18 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { getDeploymentFiles } from "../scripts/deployment-state.mjs";
 import { startIsolatedRuntime } from "../scripts/runtime-launcher.mjs";
+import * as bossPlatform from "./platforms/boss.mjs";
+import * as webFormPlatform from "./platforms/web-form.mjs";
+
+// ── 平台注册表 ─────────────────────────────────────────────────────────────
+// 每个平台实现 login / search / apply 三个方法
+// 新平台只需新建 platforms/<name>.mjs 并在这里注册
+const PLATFORMS = {
+  boss: bossPlatform,
+  "web-form": webFormPlatform,
+  // linkedin: linkedinPlatform,   // 未来扩展
+  // lagou:    lagouPlatform,
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -16,6 +28,134 @@ const unpackedRoot = app.isPackaged
 let mainWindow = null;
 let runtime = null;
 let runtimeStartPromise = null;
+let applyPollInterval = null;
+let applyingNow = false;
+
+// ── 通用平台调度（login / search / apply 统一入口）────────────────────────
+// 根据 task.platform 字段分发到对应平台适配器
+// 新平台：在 PLATFORMS 注册表里加一行即可，这里不需要改
+
+async function dispatchLogin(platformId, cookieFile, serverPort) {
+  const platform = PLATFORMS[platformId];
+  if (!platform) {
+    console.warn(`[PawPals] 未知平台: ${platformId}`);
+    return;
+  }
+  console.log(`[PawPals] 登录 ${platform.name}…`);
+  await platform.login(cookieFile, serverPort);
+}
+
+async function dispatchSearch(task, serverPort) {
+  const platformId = task.platform || "boss";
+  const platform = PLATFORMS[platformId];
+  if (!platform) {
+    console.warn(`[PawPals] 未知平台: ${platformId}`);
+    return;
+  }
+  console.log(`[PawPals] ${platform.name} 搜索 "${task.query}"`);
+  await platform.search(task, serverPort);
+}
+
+async function dispatchApply(task, serverPort) {
+  const platformId = task.platform || "boss";
+  const platform = PLATFORMS[platformId];
+  if (!platform?.supportsApply) {
+    console.warn(`[PawPals] 平台 ${platformId} 不支持自动投递`);
+    return;
+  }
+  console.log(`[PawPals] ${platform.name} 投递 ${task.jobUrl}`);
+  await platform.apply(task, serverPort);
+}
+
+let loginNow = false;
+let searchNow = false;
+
+function startApplyPolling(serverUrl) {
+  if (applyPollInterval) return;
+  const port = new URL(serverUrl).port;
+  console.log(`[PawPals] browser polling started on :${port}`);
+  applyPollInterval = setInterval(async () => {
+    // 投递任务（task.platform 指定平台，默认 boss）
+    if (!applyingNow) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/internal/browser-task`,
+          { signal: AbortSignal.timeout(2000) });
+        const { task } = await r.json();
+        if (task) {
+          applyingNow = true;
+          await dispatchApply(task, port).finally(() => { applyingNow = false; });
+        }
+      } catch {}
+    }
+    // 登录任务（pending.platform 指定平台，默认 boss）
+    if (!loginNow) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/internal/boss-login-task`,
+          { signal: AbortSignal.timeout(2000) });
+        const { pending, cookieFile, platform } = await r.json();
+        if (pending) {
+          loginNow = true;
+          await dispatchLogin(platform || "boss", cookieFile, port).finally(() => { loginNow = false; });
+        }
+      } catch (error) {
+        console.warn("[PawPals] login polling failed:", error?.message || error);
+      }
+    }
+    // 搜索任务（task.platform 指定平台，默认 boss）
+    if (!searchNow) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/internal/browser-search-task`,
+          { signal: AbortSignal.timeout(2000) });
+        const { task } = await r.json();
+        if (task) {
+          searchNow = true;
+          await dispatchSearch(task, port).finally(() => { searchNow = false; });
+        }
+      } catch (error) {
+        console.warn("[PawPals] search polling failed:", error?.message || error);
+      }
+    }
+    // JD 内容抓取任务（复用 Boss直聘 登录 session）
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/internal/browser-jd-task`,
+        { signal: AbortSignal.timeout(2000) });
+      const { task } = await r.json();
+      if (task) {
+        let jdText = "";
+        try {
+          const win = new BrowserWindow({
+            show: false, width: 1280, height: 800,
+            webPreferences: { partition: "persist:boss", contextIsolation: true },
+          });
+          win.webContents.setUserAgent(`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome || "136.0.0.0"} Safari/537.36`);
+          await win.loadURL(task.url);
+          await new Promise(r => setTimeout(r, 3000));
+          jdText = await win.webContents.executeJavaScript(`
+            (() => {
+              // Boss直聘 JD 页面结构
+              const jdEl = document.querySelector('.job-sec-text, .job-detail-section, .job-sec .text, .job-detail .text');
+              const titleEl = document.querySelector('.job-banner .name h1, .job-title, .info-primary .name h1');
+              const infoEl = document.querySelector('.job-banner .info-primary, .job-detail-header');
+              let text = "";
+              if (titleEl) text += "岗位：" + titleEl.textContent.trim() + "\\n";
+              if (infoEl) text += infoEl.textContent.trim().replace(/\\s+/g, " ") + "\\n\\n";
+              if (jdEl) text += "JD 正文：\\n" + jdEl.innerText.trim();
+              return text || document.body.innerText.slice(0, 3000);
+            })()
+          `);
+          try { win.close(); } catch {}
+        } catch (e) {
+          console.warn("[PawPals] JD fetch failed:", e.message);
+        }
+        await fetch(`http://127.0.0.1:${port}/api/internal/browser-jd-done`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: task.id, result: jdText }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {});
+      }
+    } catch {}
+  }, 1000); // 每 1 秒轮询一次
+}
 
 function readDeploymentStatus() {
   const { stateFile, logFile, openClawHome, pawPalsHome, gatewayBaseUrl } = getDeploymentFiles();
@@ -90,6 +230,8 @@ async function startDesktopRuntime() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadURL(runtime.appUrl);
     }
+    // 启动自动投递轮询（用 Electron BrowserWindow 在后台执行）
+    if (runtime.appUrl) startApplyPolling(runtime.appUrl);
     // Mark first run complete so future launches skip the launcher
     const { firstRunFile, pawPalsHome } = getDeploymentFiles();
     try {
@@ -148,5 +290,6 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  if (applyPollInterval) clearInterval(applyPollInterval);
   runtime?.stop();
 });

@@ -9,6 +9,7 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      '__BUILD_TIME__': JSON.stringify(new Date().toISOString().slice(0, 16).replace('T', ' ')),
     },
     resolve: {
       alias: {

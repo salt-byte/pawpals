@@ -5,11 +5,23 @@ import dotenv from "dotenv";
 import os from "os";
 import path from "path";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
-import { spawn, exec } from "child_process";
+import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
 import crypto from "crypto";
 import archiver from "archiver";
 import multer from "multer";
+import {
+  type OnboardingSlotPatch,
+  type OnboardingState,
+  type OnboardingStep,
+  applyOnboardingSlotPatch,
+  clearOnboardingStepValue,
+  createDefaultOnboardingState,
+  getNextOnboardingStep,
+  previousOnboardingStep,
+  renderProfileMarkdown,
+  normalizeSkills,
+} from "./server/onboarding.ts";
 
 dotenv.config();
 
@@ -39,17 +51,22 @@ const OPENCLAW_HOME = (process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HO
 const CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(OPENCLAW_HOME, "workspace", "career");
 const COOKIE_DIR = process.env.PAWPALS_COOKIE_DIR || path.join(APP_DATA_DIR, "jobclaw", "cookies");
 const COOKIE_FILE = path.join(COOKIE_DIR, "boss.json");
-const BOSS_PROFILE_DIR = path.join(os.homedir(), ".jobclaw", "browser_profile", "boss");
-const JOBCLAW_SRC = "/Users/dengyudie/Downloads/jobclaw";
 const APPLICATIONS_FILE = path.join(CAREER_DIR, "applications.json");
 const JOBS_FILE = path.join(CAREER_DIR, "jobs.json");
+const CONTACTS_FILE = path.join(CAREER_DIR, "contacts.json");
 const PET_FILE = path.join(APP_DATA_DIR, "pet.json");
+const ONBOARDING_STATE_FILE = path.join(CAREER_DIR, "onboarding_state.json");
+const COLLAB_BOARD_FILE = path.join(CAREER_DIR, "collaboration_board.json");
+const LAST_SEARCH_RESULTS_FILE = path.join(CAREER_DIR, "last_search_results.json");
+const MAIL_WATCH_STATE_FILE = path.join(APP_DATA_DIR, "mail-watcher-state.json");
 const OPENCLAW_CONFIG_FILE = path.join(OPENCLAW_HOME, "openclaw.json");
 const SETUP_STATE_FILE = path.join(APP_DATA_DIR, "setup-state.json");
 const DEPLOYMENT_STATE_FILE = path.join(APP_DATA_DIR, "deployment-state.json");
 const DEPLOYMENT_LOG_FILE = path.join(APP_DATA_DIR, "deployment.log");
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || "openclaw";
-const PYTHON_BIN = process.env.PAWPALS_PYTHON || process.env.PYTHON || "python3";
+const PYTHON_BIN = process.env.PAWPALS_PYTHON || process.env.PYTHON ||
+  (existsSync("/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" :
+   existsSync("/usr/local/bin/python3")    ? "/usr/local/bin/python3" : "python3");
 
 ensureDir(APP_DATA_DIR);
 ensureDir(CAREER_DIR);
@@ -58,6 +75,45 @@ ensureDir(COOKIE_DIR);
 const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
 const BACKUP_DIR = path.join(os.homedir(), "Documents", "PawPals备份");
 const BACKUP_META_FILE = path.join(APP_DATA_DIR, "backup-meta.json");
+
+// ── 全局队列（search_jobs / apply_job 工具 + Electron BrowserWindow 共享）──
+const pendingSearchQueue = new Map<string, {
+  query: string;
+  city: string;
+  cookieFile?: string;
+  resolve: (r: string) => void;
+}>();
+const pendingJdFetchQueue = new Map<string, { url: string; resolve: (r: string) => void }>();
+const pendingApplyQueue = new Map<string, any>();
+const applyResultStore = new Map<string, any>();
+let pendingResumableSearchTask: null | {
+  query: string;
+  location: string;
+  cityText: string;
+  channels: string[];
+} = null;
+let bossLoginPending = false;
+let bossLoginPlatform = "boss";
+
+// Step 3：AI 结构化投递指令暂存（app-tracker 回复里嵌入，用户确认后执行）
+// key = 会话 groupId，value = 最近一条待确认的投递指令
+const pendingApplyCommands = new Map<string, {
+  url: string; company: string; title: string; timestamp: number;
+}>();
+const pendingWorkflowSelections = new Map<string, {
+  rowIds: string[];
+  timestamp: number;
+}>();
+// 清理超过 10 分钟未确认的暂存指令
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [k, v] of pendingApplyCommands) {
+    if (v.timestamp < cutoff) pendingApplyCommands.delete(k);
+  }
+  for (const [k, v] of pendingWorkflowSelections) {
+    if (v.timestamp < cutoff) pendingWorkflowSelections.delete(k);
+  }
+}, 60_000);
 
 // ── 本地备份系统 ────────────────────────────────────────────────────
 // 元数据：记录最近几次备份信息
@@ -584,7 +640,11 @@ function saveSetupSelection(provider: string, model: string, options?: { baseUrl
       throw new Error(`Unknown provider: ${provider}`);
     }
     const activeProviderConfig = config.models.providers[provider];
-    config.env.vars.OPENAI_BASE_URL = activeProviderConfig.baseUrl || config.env.vars.OPENAI_BASE_URL || "";
+    // 优先用调用方传入的 baseUrl（来自 UI 输入），其次用 provider 默认值
+    const resolvedBaseUrl = options?.baseUrl || activeProviderConfig.baseUrl || config.env.vars.OPENAI_BASE_URL || "";
+    config.env.vars.OPENAI_BASE_URL = resolvedBaseUrl;
+    // 同步更新 provider 配置，避免下次切换时被旧值覆盖
+    if (options?.baseUrl) activeProviderConfig.baseUrl = options.baseUrl;
     config.env.vars.OPENAI_MODEL = model;
   }
 
@@ -665,10 +725,1047 @@ const getGatewayToken = (): string => {
   return token;
 };
 const clearGatewayTokenCache = () => { _cachedGatewayToken = null; };
-const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "BSAIdlkBgiO1X6FIw6jPmML4UFQRA9i";
+const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "";
 const MAX_CHAIN_DEPTH = 2;
 const CHAT_LOG      = path.join(CAREER_DIR, "chat_log.md");
 const MESSAGES_FILE = path.join(CAREER_DIR, "pawpals_messages.json");
+const RESUME_MASTER_FILE = path.join(CAREER_DIR, "resume_master.md");
+const PROFILE_FILE = path.join(CAREER_DIR, "profile.md");
+const SKILLS_GAP_FILE = path.join(CAREER_DIR, "skills_gap.md");
+
+type CollaborationRow = {
+  id: string;
+  company: string;
+  role: string;
+  source: string;
+  jdUrl: string;
+  salary: string;
+  location: string;
+  deadline: string;
+  jdSummary: string;
+  skillHighlights: string;
+  resumeVersion: string;
+  applicationStatus: "pending" | "contact_started" | "submitted" | "interview" | "rejected" | "offer";
+  appliedAt: string;
+  followUpDate: string;
+  contacts: Array<{ name: string; title: string; channel: string; value?: string }>;
+  outreachDraft: string;
+  outreachStatus: "draft" | "user_approved" | "sent" | "replied" | "";
+  interviewRecord: {
+    score?: number;
+    strengths?: string[];
+    weaknesses?: string[];
+    notes?: string;
+  } | null;
+  workflowStage: "new" | "selected" | "tailoring" | "tailored" | "apply_ready" | "applied";
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SearchResultRow = {
+  index: number;
+  company: string;
+  role: string;
+  salary: string;
+  location: string;
+  jdUrl: string;
+  source: string;
+};
+
+// OnboardingState.phase governs the global build-up funnel through the first real application.
+// CollaborationRow.workflowStage governs each selected job throughout tailoring/application execution.
+// The handoff is explicit: once phase becomes "completed", per-job workflowStage becomes the primary long-running state machine.
+const AGENT_PHASE_TIMEOUT_MS = Math.max(15_000, Number(process.env.PAWPALS_AGENT_TIMEOUT_MS || 45_000));
+const AGENT_PHASE_RETRIES = Math.max(0, Number(process.env.PAWPALS_AGENT_RETRIES || 0));
+
+function buildBoardRowId(input: { company?: string; role?: string; jdUrl?: string }) {
+  const raw = (input.jdUrl || `${input.company || "unknown"}::${input.role || "unknown"}`).trim().toLowerCase();
+  return crypto.createHash("sha1").update(raw).digest("hex").slice(0, 16);
+}
+
+const CITY_CODE_MAP: Record<string, string> = {
+  北京: "101010100",
+  上海: "101020100",
+  广州: "101280100",
+  深圳: "101280600",
+  杭州: "101210100",
+  成都: "101270100",
+};
+
+const BIG_COMPANY_HINTS = [
+  "字节", "腾讯", "阿里", "百度", "美团", "京东", "小红书", "快手", "滴滴", "拼多多",
+  "Shopee", "bilibili", "哔哩", "米哈游", "携程", "网易", "蚂蚁", "华为", "OPPO", "vivo",
+];
+
+function extractOrderedCityPreferences(text: string) {
+  const hits = Object.keys(CITY_CODE_MAP)
+    .map((city) => ({ city, index: text.indexOf(city) }))
+    .filter((item) => item.index >= 0)
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.city);
+  return Array.from(new Set(hits));
+}
+
+function buildSearchPreferencesFromOnboarding(state: OnboardingState) {
+  const strategy = state.searchStrategy?.channels?.length ? state.searchStrategy : getDefaultSearchStrategy(state);
+  const inferredRoles = state.slots.inferredRoles?.filter(Boolean) || [];
+  const explicitRole = (state.slots.targetRole || "").trim();
+  const inferredPrimaryRole = (inferredRoles[0] || "").trim();
+  const primaryRole = explicitRole || inferredPrimaryRole || "产品经理";
+  const query = `${primaryRole}${/实习/.test(state.slots.jobType || "") && !/实习/.test(primaryRole) ? " 实习" : ""}`.trim();
+  const orderedCities = extractOrderedCityPreferences(state.slots.targetCity || "");
+  const primaryCity = orderedCities[0] || "北京";
+  return {
+    query,
+    explicitRole,
+    inferredPrimaryRole,
+    channels: strategy.channels,
+    priorities: strategy.priorities,
+    primaryCity,
+    primaryCityCode: CITY_CODE_MAP[primaryCity] || "101010100",
+    orderedCities,
+    cityText: state.slots.targetCity || primaryCity,
+    companyPreference: state.slots.companyPreference || "",
+    roleScope: state.slots.roleScope || "",
+  };
+}
+
+async function generateSearchQueryAndCity(input: {
+  profileText?: string;
+  userMessage?: string;
+  fallbackRole?: string;
+  inferredRoles?: string[];
+  jobType?: string;
+  targetCity?: string;
+  companyPreference?: string;
+}) {
+  const cityMap: Record<string, string> = {
+    北京: "101010100",
+    上海: "101020100",
+    广州: "101280100",
+    深圳: "101280600",
+    杭州: "101210100",
+    成都: "101270100",
+  };
+  const orderedCities = extractOrderedCityPreferences(input.targetCity || "");
+  const fallbackCity = orderedCities[0] || "北京";
+  const fallbackQueryBase =
+    (input.fallbackRole || "").trim() ||
+    (input.inferredRoles?.find(Boolean) || "").trim() ||
+    "产品经理";
+  const fallbackQuery = `${fallbackQueryBase}${/实习/.test(input.jobType || "") && !/实习/.test(fallbackQueryBase) ? " 实习" : ""}`.trim();
+
+  let query = fallbackQuery;
+  let city = fallbackCity;
+
+  try {
+    const queryRes = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${getGatewayToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "auto",
+        messages: [{
+          role: "system",
+          content: `你是招聘平台搜索关键词生成器。根据用户档案和当前意图，生成最精准的搜索词。
+返回 JSON：{"query":"搜索关键词（4-18字，必须贴近用户真实目标岗位，不要泛化成客服/运营/销售）","city":"城市名（北京/上海/广州/深圳/杭州/成都，默认北京）"}
+规则：
+1. 优先使用用户明确目标方向，不要擅自改成不相关岗位
+2. 如果用户目标是 ToG、公共关系、出海、国际业务，就必须把这些关键词体现在 query 里
+3. 如果是实习岗位，query 里保留“实习”
+4. 只返回 JSON，不要解释。`
+        }, {
+          role: "user",
+          content: `用户档案：\n${(input.profileText || "（无档案）").slice(0, 1800)}\n\n当前意图：${input.userMessage || "开始搜索岗位"}\n\n显式目标方向：${input.fallbackRole || "无"}\n推断相关方向：${(input.inferredRoles || []).join(" / ") || "无"}\n求职类型：${input.jobType || "未说明"}\n目标城市：${input.targetCity || "未说明"}\n公司偏好：${input.companyPreference || "未说明"}`
+        }],
+        max_tokens: 120,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const qData = await queryRes.json() as any;
+    const qText = qData.choices?.[0]?.message?.content || "";
+    const qMatch = qText.match(/\{[\s\S]*\}/);
+    if (qMatch) {
+      const parsed = JSON.parse(qMatch[0]);
+      const llmQuery = String(parsed.query || "").trim();
+      const llmCity = String(parsed.city || "").trim();
+      if (llmQuery) query = llmQuery;
+      if (llmCity && cityMap[llmCity]) city = llmCity;
+    }
+  } catch (e) {
+    console.warn("[search_query] LLM query generation failed:", (e as any)?.message);
+  }
+
+  return {
+    query: query || fallbackQuery,
+    city,
+    cityCode: cityMap[city] || cityMap[fallbackCity] || "101010100",
+  };
+}
+
+function isBossJobUrl(url: string) {
+  return /zhipin\.com/i.test(url || "");
+}
+
+function extractAutofillProfile() {
+  const readIfExists = (file: string) => {
+    try {
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    } catch {
+      return "";
+    }
+  };
+  const profile = readIfExists(PROFILE_FILE);
+  const resume = readIfExists(RESUME_MASTER_FILE);
+  const source = `${profile}\n\n${resume}`;
+  const readFirst = (...patterns: RegExp[]) => {
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (match?.[1]?.trim()) return match[1].trim();
+    }
+    return "";
+  };
+  return {
+    name: readFirst(/姓名[：:]\s*(.+)/, /^#\s*(.+)$/m),
+    email: readFirst(/邮箱[：:]\s*([^\s]+)/, /email[：: ]\s*([^\s]+)/i, /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i),
+    phone: readFirst(/手机(?:号)?[：:]\s*([+\d\s-]{8,})/i, /电话[：:]\s*([+\d\s-]{8,})/i, /(\+?\d[\d\s-]{8,}\d)/),
+    linkedin: readFirst(/linkedin[：: ]\s*(https?:\/\/[^\s]+)/i),
+    portfolio: readFirst(/作品集[：: ]\s*(https?:\/\/[^\s]+)/i, /portfolio[：: ]\s*(https?:\/\/[^\s]+)/i),
+  };
+}
+
+function pickAutofillValue(field: any, profile: ReturnType<typeof extractAutofillProfile>, title = "", company = "") {
+  const haystack = [field.label, field.name, field.placeholder, field.id, field.type].join(" ").toLowerCase();
+  if (/full name|your name|姓名|名字|name/.test(haystack)) return profile.name;
+  if (/email|邮箱/.test(haystack)) return profile.email;
+  if (/phone|mobile|tel|手机号|电话/.test(haystack)) return profile.phone;
+  if (/linkedin/.test(haystack)) return profile.linkedin;
+  if (/portfolio|website|personal site|作品集|个人网站/.test(haystack)) return profile.portfolio;
+  if (/cover letter|additional information|why|motivation|message|自我介绍|补充说明|说明/.test(haystack)) {
+    return `您好，我对 ${company || "贵司"} 的「${title || "该岗位"}」很感兴趣，相关经历与岗位方向匹配，期待进一步沟通。`;
+  }
+  return "";
+}
+
+function rerankSearchRows(rows: SearchResultRow[], prefs: { orderedCities: string[]; companyPreference: string }) {
+  const cityOrder = prefs.orderedCities;
+  const prefersBigCompany = /大厂/.test(prefs.companyPreference || "");
+  const scoreOf = (row: SearchResultRow) => {
+    let score = 0;
+    const cityRank = cityOrder.findIndex((city) => row.location?.includes(city));
+    if (cityRank >= 0) score += 100 - cityRank * 15;
+    if (prefersBigCompany && BIG_COMPANY_HINTS.some((hint) => row.company?.includes(hint))) score += 80;
+    if (/AI|产品|策略|PM/i.test(row.role || "")) score += 20;
+    return score;
+  };
+  return [...rows]
+    .sort((a, b) => scoreOf(b) - scoreOf(a))
+    .map((row, index) => ({ ...row, index: index + 1 }));
+}
+
+function renderSearchMarkdownTable(rows: SearchResultRow[]) {
+  return [
+    "| # | 职位 | 公司 | 薪资 | 地点 | 投递链接 |",
+    "|---|------|------|------|------|---------|",
+    ...rows.map((row) => `| ${row.index} | ${row.role || ""} | ${row.company || ""} | ${row.salary || ""} | ${row.location || ""} | ${row.jdUrl ? `[投递](${row.jdUrl})` : "-"} |`),
+  ].join("\n");
+}
+
+function parseTavilyJobRows(raw: string) {
+  try {
+    const parsed = JSON.parse(raw) as { results?: Array<{ title?: string; url?: string; snippet?: string }> };
+    const rows = (parsed.results || []).map((item, index) => {
+      const title = String(item.title || "").trim();
+      const url = String(item.url || "").trim();
+      const host = (() => {
+        try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
+      })();
+      const source = /linkedin\.com/.test(host) ? "linkedin" : /zhipin\.com/.test(host) ? "boss" : "web";
+      const company = title.split(/[-|｜]/)[0]?.trim() || host || "官网渠道";
+      return {
+        index: index + 1,
+        company,
+        role: title || "岗位信息",
+        salary: "",
+        location: "",
+        jdUrl: url,
+        source,
+      } satisfies SearchResultRow;
+    }).filter((row) => row.jdUrl);
+    return rows;
+  } catch {
+    return [] as SearchResultRow[];
+  }
+}
+
+function getApplicationChannel(row: { jdUrl?: string; source?: string }) {
+  if (/zhipin\.com/.test(row.jdUrl || "") || row.source === "boss") return "boss_chat";
+  return "direct_resume";
+}
+
+function normalizeSearchChannels(channels: string[]) {
+  const mapped = channels.map((item) => {
+    const text = String(item || "").toLowerCase();
+    if (/boss/.test(text)) return "boss";
+    if (/mixed|混合|都搜|一起搜/.test(text)) return "mixed";
+    if (/web|官网|linkedin|领英|全网/.test(text)) return "web";
+    return "";
+  }).filter(Boolean);
+  const deduped = Array.from(new Set(mapped));
+  if (deduped.includes("mixed")) return ["boss", "web"];
+  return deduped;
+}
+
+function normalizeSearchPriorities(priorities: string[]) {
+  return Array.from(new Set(priorities.map((item) => {
+    const text = String(item || "").toLowerCase();
+    if (/地点|城市|location/.test(text)) return "location";
+    if (/公司|大厂|brand|company/.test(text)) return "company";
+    if (/投递|渠道|apply|channel/.test(text)) return "channel";
+    if (/匹配|岗位|role|fit/.test(text)) return "fit";
+    return "";
+  }).filter(Boolean)));
+}
+
+function getDefaultSearchStrategy(state: OnboardingState) {
+  const channels = /海外|国外|美国|欧洲|新加坡|remote/i.test(state.slots.market || "")
+    ? ["web"]
+    : ["boss", "web"];
+  const priorities = ["location"];
+  if (/大厂/.test(state.slots.companyPreference || "")) priorities.push("company");
+  priorities.push("fit");
+  return { channels, priorities };
+}
+
+function applySearchStrategyUpdate(
+  state: OnboardingState,
+  update: Partial<OnboardingState["searchStrategy"]>
+) {
+  const next = { ...state.searchStrategy };
+  if (Array.isArray(update.channels) && update.channels.length > 0) {
+    next.channels = normalizeSearchChannels(update.channels);
+  }
+  if (Array.isArray(update.priorities) && update.priorities.length > 0) {
+    next.priorities = normalizeSearchPriorities(update.priorities);
+  }
+  if (typeof update.confirmed === "boolean") next.confirmed = update.confirmed;
+  state.searchStrategy = next;
+}
+
+function extractSearchStrategyHeuristic(userMsg: string, state: OnboardingState) {
+  const text = userMsg.trim();
+  const update: Partial<OnboardingState["searchStrategy"]> = {};
+  const channels: string[] = [];
+  const priorities: string[] = [];
+  const looksLikeQuestion = /[?？吗呢么]|\bwhy\b|\bhow\b/i.test(text);
+  const looksLikePushback = /(不行|不可以|不能|别|不要|等一下|先别|先不)/.test(text);
+
+  if (/boss/i.test(text)) channels.push("boss");
+  if (/全网|官网|linkedin|领英|web/i.test(text)) channels.push("web");
+  if (/混合|都搜|一起搜/.test(text)) channels.push("mixed");
+  if (/地点|城市|北京|上海|remote/.test(text)) priorities.push("location");
+  if (/大厂|公司|平台|品牌/.test(text)) priorities.push("company");
+  if (/投递|渠道|打招呼|官网投|简历投/.test(text)) priorities.push("channel");
+  if (/匹配|相关|贴合|方向/.test(text)) priorities.push("fit");
+  if (channels.length > 0) update.channels = channels;
+  if (priorities.length > 0) update.priorities = priorities;
+  if (!looksLikeQuestion && !looksLikePushback && /(按这个来|就这样|你决定|都可以|没问题|开始搜|搜吧|可以开始|可以搜|就按这个搜)/.test(text)) {
+    const defaults = getDefaultSearchStrategy(state);
+    update.channels = update.channels || defaults.channels;
+    update.priorities = update.priorities || defaults.priorities;
+    update.confirmed = true;
+  }
+  return update;
+}
+
+function loadCollaborationBoard(): CollaborationRow[] {
+  try {
+    if (existsSync(COLLAB_BOARD_FILE)) {
+      return JSON.parse(readFileSync(COLLAB_BOARD_FILE, "utf-8"));
+    }
+  } catch {}
+  return [];
+}
+
+function saveCollaborationBoard(rows: CollaborationRow[]) {
+  try { writeFileSync(COLLAB_BOARD_FILE, JSON.stringify(rows, null, 2)); } catch {}
+}
+
+function upsertCollaborationRow(partial: Partial<CollaborationRow> & { company?: string; role?: string; jdUrl?: string }) {
+  const rows = loadCollaborationBoard();
+  const id = partial.id || buildBoardRowId(partial);
+  const now = new Date().toISOString();
+  const existingIndex = rows.findIndex((row) => row.id === id);
+  const base: CollaborationRow = existingIndex >= 0 ? rows[existingIndex] : {
+    id,
+    company: partial.company || "",
+    role: partial.role || "",
+    source: partial.source || "",
+    jdUrl: partial.jdUrl || "",
+    salary: partial.salary || "",
+    location: partial.location || "",
+    deadline: partial.deadline || "",
+    jdSummary: partial.jdSummary || "",
+    skillHighlights: partial.skillHighlights || "",
+    resumeVersion: partial.resumeVersion || "",
+    applicationStatus: partial.applicationStatus || "pending",
+    appliedAt: partial.appliedAt || "",
+    followUpDate: partial.followUpDate || "",
+    contacts: partial.contacts || [],
+    outreachDraft: partial.outreachDraft || "",
+    outreachStatus: partial.outreachStatus || "",
+    interviewRecord: partial.interviewRecord || null,
+    workflowStage: partial.workflowStage || "new",
+    notes: partial.notes || "",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const merged: CollaborationRow = {
+    ...base,
+    ...partial,
+    contacts: partial.contacts || base.contacts,
+    interviewRecord: partial.interviewRecord ?? base.interviewRecord,
+    updatedAt: now,
+  };
+  if (existingIndex >= 0) rows[existingIndex] = merged;
+  else rows.push(merged);
+  saveCollaborationBoard(rows);
+  return merged;
+}
+
+function saveLastSearchResults(rows: SearchResultRow[]) {
+  try { writeFileSync(LAST_SEARCH_RESULTS_FILE, JSON.stringify(rows, null, 2)); } catch {}
+}
+
+function loadLastSearchResults(): SearchResultRow[] {
+  try {
+    if (existsSync(LAST_SEARCH_RESULTS_FILE)) return JSON.parse(readFileSync(LAST_SEARCH_RESULTS_FILE, "utf-8"));
+  } catch {}
+  return [];
+}
+
+function parseSearchMarkdownTable(markdown: string): SearchResultRow[] {
+  const rows = markdown.split("\n").filter((line) => /^\|\s*\d+\s*\|/.test(line));
+  return rows.map((line) => {
+    const cells = line.split("|").map((part) => part.trim()).filter(Boolean);
+    const linkMatch = line.match(/\[投递\]\((https?:\/\/[^)]+)\)/);
+    return {
+      index: Number(cells[0] || 0),
+      role: cells[1] || "",
+      company: cells[2] || "",
+      salary: cells[3] || "",
+      location: cells[4] || "",
+      jdUrl: linkMatch?.[1] || "",
+      source: "boss",
+    };
+  }).filter((row) => row.index > 0 && row.company && row.role);
+}
+
+function parseSelectionIndices(text: string) {
+  const compact = text.replace(/[，、]/g, " ").replace(/\s+/g, " ").trim();
+  const matches = compact.match(/\d+/g) || [];
+  return Array.from(new Set(matches.map((n) => Number(n)).filter((n) => n > 0 && n <= 20)));
+}
+
+function looksLikeJobSelection(text: string) {
+  return /(都投|想投|投这|选|就投|要这|这几个)/.test(text) || parseSelectionIndices(text).length > 0;
+}
+
+function detectPipelineSignal(text: string): "interview" | "offer" | "rejected" | null {
+  if (/(面试邀请|约面|收到面试|进入面试|面试通知|interview)/i.test(text)) return "interview";
+  if (/(offer|拿到 offer|录用|录取|给了 offer)/i.test(text)) return "offer";
+  if (/(拒信|被拒|没过|rejected|reject)/i.test(text)) return "rejected";
+  return null;
+}
+
+function findBoardRowsFromText(text: string) {
+  const board = loadCollaborationBoard();
+  const directMatches = board.filter((row) =>
+    (row.company && text.includes(row.company)) ||
+    (row.role && text.includes(row.role))
+  );
+  if (directMatches.length > 0) return directMatches;
+  return board
+    .filter((row) => ["submitted", "interview"].includes(row.applicationStatus))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    .slice(0, 1);
+}
+
+function updateApplicationStatusFiles(row: CollaborationRow, status: "interview" | "offer" | "rejected") {
+  try {
+    const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[] : [];
+    const idx = apps.findIndex((app) =>
+      (row.jdUrl && app.url === row.jdUrl) ||
+      ((app.company || "") === row.company && (app.role || "") === row.role)
+    );
+    if (idx >= 0) {
+      apps[idx].status = status;
+      apps[idx].timeline = Array.isArray(apps[idx].timeline) ? apps[idx].timeline : [];
+      apps[idx].timeline.push({ date: new Date().toISOString().slice(0, 10), action: status });
+      writeFileSync(APPLICATIONS_FILE, JSON.stringify(apps, null, 2));
+    }
+  } catch {}
+}
+
+function syncJobsToCollaborationBoard() {
+  try {
+    const jobs = existsSync(JOBS_FILE) ? JSON.parse(readFileSync(JOBS_FILE, "utf-8")) as any[] : [];
+    for (const job of jobs) {
+      upsertCollaborationRow({
+        company: job.company || "",
+        role: job.title || job.role || "",
+        jdUrl: job.url || job.jd_url || "",
+        salary: job.salary || "",
+        location: job.city || job.location || "",
+        source: job.source || "",
+        applicationStatus: job.applied ? "submitted" : "pending",
+      });
+    }
+  } catch {}
+}
+
+function syncApplicationsToCollaborationBoard() {
+  try {
+    const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[] : [];
+    for (const app of apps) {
+      upsertCollaborationRow({
+        company: app.company || "",
+        role: app.role || app.title || "",
+        jdUrl: app.url || "",
+        source: app.source || "",
+        applicationStatus:
+          app.status === "contact_started" ? "contact_started" :
+          app.status === "applied" ? "submitted" :
+          app.status === "interview" ? "interview" :
+          app.status === "rejected" ? "rejected" :
+          app.status === "offer" ? "offer" : "pending",
+        appliedAt: app.appliedDate || "",
+        followUpDate: app.followUpDate || "",
+        notes: app.notes || "",
+      });
+    }
+  } catch {}
+}
+
+function syncContactsToCollaborationBoard() {
+  try {
+    const contacts = existsSync(CONTACTS_FILE) ? JSON.parse(readFileSync(CONTACTS_FILE, "utf-8")) as any[] : [];
+    for (const contact of contacts) {
+      const relatedUrl = contact.jobUrl || contact.url || "";
+      upsertCollaborationRow({
+        company: contact.company || "",
+        role: contact.role || "",
+        jdUrl: relatedUrl,
+        contacts: [{
+          name: contact.name || "",
+          title: contact.title || "",
+          channel: contact.channel || contact.platform || "",
+          value: contact.email || contact.profileUrl || "",
+        }],
+        outreachDraft: contact.draft || "",
+        outreachStatus: contact.status || "",
+      });
+    }
+  } catch {}
+}
+
+function loadOnboardingState(): OnboardingState {
+  try {
+    if (existsSync(ONBOARDING_STATE_FILE)) {
+      const raw = JSON.parse(readFileSync(ONBOARDING_STATE_FILE, "utf-8"));
+      return {
+        ...createDefaultOnboardingState(),
+        ...raw,
+        slots: { ...createDefaultOnboardingState().slots, ...(raw?.slots || {}) },
+        searchStrategy: { ...createDefaultOnboardingState().searchStrategy, ...(raw?.searchStrategy || {}) },
+      };
+    }
+  } catch {}
+  if (existsSync(PROFILE_FILE)) {
+    return {
+      ...createDefaultOnboardingState(),
+      phase: "completed",
+      currentStep: null,
+      completed: true,
+      resumeUploaded: existsSync(RESUME_MASTER_FILE),
+    };
+  }
+  return createDefaultOnboardingState();
+}
+
+function saveOnboardingState(state: OnboardingState) {
+  try { writeFileSync(ONBOARDING_STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+}
+
+function handleOnboardingNavigationCommand(
+  state: OnboardingState,
+  userMsg: string,
+  petName: string
+): { handled: boolean; prompt?: string } {
+  const text = userMsg.trim();
+  if (!text) return { handled: false };
+
+  if (/(重新建档|重新开始|全部重来|从头开始|reset)/i.test(text)) {
+    const fresh = createDefaultOnboardingState();
+    saveOnboardingState(fresh);
+    return {
+      handled: true,
+      prompt: `${petName}：好的，我们从头重新建档。先把你的简历重新发我一下，我按新的信息来整理。`,
+    };
+  }
+
+  if (/(改目标岗位|修改目标岗位|重设目标岗位|目标岗位改成)/.test(text)) {
+    state.completed = false;
+    state.phase = "profile_collection";
+    state.transitionInFlight = false;
+    state.lastError = "";
+    state.currentStep = "target_role";
+    clearOnboardingStepValue(state, "target_role");
+    saveOnboardingState(state);
+    return {
+      handled: true,
+      prompt: `${petName}：可以，我们先把目标岗位重新确认一下。你现在最想找什么方向的工作？比如 AI 产品经理、开发工程师、数据分析师。`,
+    };
+  }
+
+  if (/(返回上一步|上一步|退一步|go back|goback)/i.test(text)) {
+    state.completed = false;
+    state.transitionInFlight = false;
+    state.lastError = "";
+
+    if (state.phase === "profile_collection") {
+      const prev = previousOnboardingStep(state.currentStep);
+      if (prev) {
+        clearOnboardingStepValue(state, prev);
+        state.currentStep = prev;
+        saveOnboardingState(state);
+        return { handled: true, prompt: `${petName}：好的，我们回到上一步，你再跟我说说这个部分。` };
+      }
+      state.phase = "resume_collection";
+      state.currentStep = "target_role";
+      state.resumeUploaded = false;
+      saveOnboardingState(state);
+      return {
+        handled: true,
+        prompt: `${petName}：我们先退回到简历这一步。把最新简历重新发我一下，我按新的版本继续。`,
+      };
+    }
+
+    if (state.phase === "professional_positioning" || state.phase === "resume_diagnosis" || state.phase === "resume_review" || state.phase === "search_strategy" || state.phase === "first_job_search" || state.phase === "first_application" || state.phase === "completed") {
+      state.phase = "profile_collection";
+      state.currentStep = "skills";
+      saveOnboardingState(state);
+      return {
+        handled: true,
+        prompt: `${petName}：可以，我们先回到档案确认的最后一步。你也可以直接告诉我想改哪一项信息，我会重新整理。`,
+      };
+    }
+  }
+
+  return { handled: false };
+}
+
+function persistProfileFromOnboarding(state: OnboardingState) {
+  try {
+    writeFileSync(PROFILE_FILE, renderProfileMarkdown(state), "utf-8");
+  } catch {}
+}
+
+function saveInitialResumeMaster(rawContent: string, fileName: string) {
+  const cleaned = rawContent
+    .replace(/^\[附件[:：][^\n]+\]\s*/m, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!cleaned) return;
+  try {
+    writeFileSync(RESUME_MASTER_FILE, `# 原始简历\n\n来源文件: ${fileName}\n\n## 提取文本\n\n${cleaned}\n`, "utf-8");
+  } catch {}
+}
+
+function hasResumeAttachment(content: string) {
+  return /\[附件[:：]\s*.+\]/.test(content);
+}
+
+function extractResumeFileName(content: string) {
+  return content.match(/\[附件[:：]\s*([^\]]+)\]/)?.[1]?.trim() || "用户简历";
+}
+
+function getMessageResumePayload(msg: any) {
+  const content = String(msg?.content || "");
+  const attachmentText = String(msg?.attachmentText || "").trim();
+  return {
+    fileName: String(msg?.attachmentName || extractResumeFileName(content) || "用户简历"),
+    rawText: attachmentText || content,
+  };
+}
+
+function applyHeuristicOnboardingUpdate(state: OnboardingState, text: string): OnboardingSlotPatch {
+  const trimmed = text.replace(/^> 回复[\s\S]*?\n\n/, "").trim();
+  const patch: OnboardingSlotPatch = {};
+  switch (state.currentStep) {
+    case "target_role":
+      patch.targetRole = trimmed;
+      break;
+    case "market":
+      if (/两边|都看|都投/.test(trimmed)) patch.market = "国内和海外都看";
+      else if (/海外|国外|美国|欧洲|新加坡|英.?国|remote abroad/i.test(trimmed)) patch.market = trimmed;
+      else if (/国内|大陆|北京|上海|深圳|杭州|广州/.test(trimmed)) patch.market = trimmed;
+      else patch.market = trimmed;
+      break;
+    case "job_type_time": {
+      const typeMatch = trimmed.match(/暑期实习|日常实习|全职|实习|校招|社招/);
+      const rangeMatch = trimmed.match(/\d{1,2}\s*月\s*(?:到|[-~至])\s*\d{1,2}\s*月|\d{1,2}\/\d{1,2}\s*(?:到|[-~至])\s*\d{1,2}\/\d{1,2}/);
+      patch.jobType = typeMatch?.[0] || trimmed;
+      patch.timeRange = rangeMatch?.[0] || trimmed;
+      if (/转正|return/.test(trimmed)) {
+        patch.returnOfferPreference = /不要|不用|无所谓/.test(trimmed) ? "不强求转正" : "希望有转正机会";
+      }
+      break;
+    }
+    case "target_city":
+      patch.targetCity = trimmed;
+      break;
+    case "role_scope":
+      patch.roleScope = /只看|仅看|就看/.test(trimmed) ? "只看这个岗位 title" : trimmed;
+      break;
+    case "company_preference":
+      if (/都行|都可以|不限/.test(trimmed)) patch.companyPreference = "大厂和创业都可以";
+      else patch.companyPreference = trimmed;
+      break;
+    case "traits":
+      patch.traits = trimmed;
+      break;
+    case "skills":
+      patch.skills = normalizeSkills(trimmed);
+      break;
+  }
+  return patch;
+}
+
+async function extractOnboardingSlotPatch(state: OnboardingState, text: string): Promise<OnboardingSlotPatch> {
+  const heuristic = applyHeuristicOnboardingUpdate(state, text);
+  const trimmed = text.replace(/^> 回复[\s\S]*?\n\n/, "").trim();
+  if (!trimmed || !state.currentStep) return heuristic;
+  try {
+    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${getGatewayToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "auto",
+        messages: [
+          {
+            role: "system",
+            content: `你是求职建档信息抽取器。当前步骤是 ${state.currentStep}。
+从用户自然语言里提取本步骤相关字段，返回 JSON。
+只允许返回这些键：targetRole, market, jobType, timeRange, returnOfferPreference, targetCity, roleScope, companyPreference, traits, skills。
+skills 必须是字符串数组。无法确定就返回空对象 {}。不要输出解释。`
+          },
+          {
+            role: "user",
+            content: `已知档案：${JSON.stringify(state.slots, null, 2)}\n\n用户回答：${trimmed}`
+          }
+        ],
+        max_tokens: 220,
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await res.json() as any;
+    const content = data.choices?.[0]?.message?.content || "";
+    const match = String(content).match(/\{[\s\S]*\}/);
+    if (!match) return heuristic;
+    const parsed = JSON.parse(match[0]) as OnboardingSlotPatch;
+    return {
+      ...heuristic,
+      ...parsed,
+      ...(Array.isArray(parsed.skills) ? { skills: normalizeSkills(parsed.skills.join("、")) } : {}),
+    };
+  } catch {
+    return heuristic;
+  }
+}
+
+// ── Onboarding 上下文注入（让 agent 理解当前处于哪个阶段）─────────────────
+function buildOnboardingContext(state: OnboardingState, petName: string): string {
+  const filledSlots: string[] = [];
+  const missingSlots: string[] = [];
+  const slotLabels: Record<string, string> = {
+    targetRole: "目标岗位方向",
+    market: "国内/海外偏好",
+    jobType: "实习类型",
+    timeRange: "时间范围",
+    targetCity: "目标城市",
+    roleScope: "岗位范围（只看本岗位 or 相关方向也看）",
+    companyPreference: "公司偏好（大厂/创业/都行）",
+    traits: "个人特质/风格",
+    skills: "核心技能/工具",
+  };
+
+  for (const [key, label] of Object.entries(slotLabels)) {
+    const val = key === "skills" ? state.slots.skills : (state.slots as any)[key];
+    if (key === "skills" ? val?.length > 0 : !!val) {
+      filledSlots.push(`- ${label}：${Array.isArray(val) ? val.join("、") : val}`);
+    } else {
+      missingSlots.push(`- ${label}`);
+    }
+  }
+
+  if (state.phase === "resume_collection") {
+    return `【Onboarding 上下文】\n当前阶段：简历收集\n用户还没上传简历，请温暖地引导用户发送简历（PDF 或 Word）。`;
+  }
+
+  if (state.phase === "profile_collection") {
+    return `【Onboarding 上下文 — 用户画像采集中】
+你正在帮用户建立求职档案。通过自然对话收集以下信息，每次只问1-2个问题。
+
+已收集：
+${filledSlots.length > 0 ? filledSlots.join("\n") : "（还没开始）"}
+
+待收集：
+${missingSlots.length > 0 ? missingSlots.join("\n") : "（全部收集完毕）"}
+
+自然对话规则：
+- 用户在回答就提取信息推进，在纠正就覆盖更新，在追问就解释，在吐槽就先回应感受再引导
+- 用户可能一句话包含多个信息，一并提取
+- 像朋友聊天一样自然，不要一次列出所有问题
+
+结构化回写协议（必须遵守）：
+1. 收集到新信息时，在回复末尾另起一行写：SLOT_UPDATE::{"key":"value"}
+   key 用英文：targetRole/market/jobType/timeRange/targetCity/roleScope/companyPreference/traits/skills
+   skills 是字符串数组，如 ["Python","SQL","Figma"]
+2. 如果用户在纠正之前的信息，同样用 SLOT_UPDATE:: 覆盖
+3. 当所有待收集信息都齐了，额外附加一行：PHASE_COMPLETE
+4. 如果用户没提供新信息（追问/质疑/闲聊），不要写 SLOT_UPDATE::，只写 NEEDS_CLARIFICATION
+5. 这些标签不会展示给用户，只用于系统状态更新`;
+  }
+
+  if (state.phase === "professional_positioning") {
+    return `【Onboarding 上下文】\n当前阶段：专业定位分析\n用户画像已收集完成，现在需要做深度定位分析。请基于 profile.md 输出定位建议并写入 skills_gap.md。`;
+  }
+
+  if (state.phase === "resume_diagnosis") {
+    return `【Onboarding 上下文】\n当前阶段：简历首次诊断\n定位分析已完成。请结合 profile.md 和 skills_gap.md 对简历做首次诊断。`;
+  }
+
+  return "";
+}
+
+async function runAgentChainWithTimeout(
+  agent: typeof JOB_AGENTS[0],
+  messages: { role: string; content: string; name?: string }[],
+  depth: number,
+  io: Server,
+  groupId: string,
+  allMessages: any[],
+  petName: string,
+  petPersonality: string
+) {
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= AGENT_PHASE_RETRIES; attempt += 1) {
+    try {
+      await Promise.race([
+        runAgentChain(agent, messages, depth, io, groupId, allMessages, petName, petPersonality),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`${agent.id} timed out after ${AGENT_PHASE_TIMEOUT_MS}ms`)), AGENT_PHASE_TIMEOUT_MS);
+        }),
+      ]);
+      return { ok: true as const };
+    } catch (error: any) {
+      lastError = error;
+      console.warn(`[agent-phase] ${agent.id} attempt ${attempt + 1} failed:`, error?.message || error);
+      if (attempt >= AGENT_PHASE_RETRIES) break;
+    }
+  }
+  return { ok: false as const, error: lastError };
+}
+
+function scheduleOnboardingAdvance(
+  io: Server,
+  allMessages: any[],
+  petName: string,
+  petPersonality: string,
+  delayMs = 200
+) {
+  setTimeout(() => {
+    void handleJobOnboarding(io, allMessages, "", petName, petPersonality).catch((error) => {
+      console.warn("[onboarding] auto advance failed:", error);
+    });
+  }, delayMs);
+}
+
+function emitBotMessage(
+  io: Server,
+  messages: any[],
+  payload: { sender: string; avatar: string; content: string; groupId: string; isChiefBot?: boolean }
+) {
+  const botMsg = {
+    id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    sender: payload.sender,
+    avatar: payload.avatar,
+    content: payload.content,
+    groupId: payload.groupId,
+    timestamp: new Date().toISOString(),
+    isBot: true,
+    isChiefBot: !!payload.isChiefBot,
+  };
+  messages.push(botMsg);
+  saveMessages(messages);
+  io.emit("receive_message", botMsg);
+}
+
+function applyBoardUpdate(update: any) {
+  if (!update || (!update.company && !update.role && !update.jdUrl && !update.id)) return;
+  const contacts = Array.isArray(update.contacts)
+    ? update.contacts
+        .filter((c: any) => c && (c.name || c.title || c.channel || c.value))
+        .map((c: any) => ({
+          name: c.name || "",
+          title: c.title || "",
+          channel: c.channel || "",
+          value: c.value || "",
+        }))
+    : undefined;
+  upsertCollaborationRow({
+    id: update.id,
+    company: update.company,
+    role: update.role,
+    jdUrl: update.jdUrl,
+    source: update.source,
+    salary: update.salary,
+    location: update.location,
+    deadline: update.deadline,
+    jdSummary: update.jdSummary,
+    skillHighlights: update.skillHighlights,
+    resumeVersion: update.resumeVersion,
+    applicationStatus: update.applicationStatus,
+    appliedAt: update.appliedAt,
+    followUpDate: update.followUpDate,
+    contacts,
+    outreachDraft: update.outreachDraft,
+    outreachStatus: update.outreachStatus,
+    interviewRecord: update.interviewRecord,
+    notes: update.notes,
+  });
+}
+
+function formatWorkflowStageLabel(stage: CollaborationRow["workflowStage"]) {
+  switch (stage) {
+    case "new": return "新入库";
+    case "selected": return "已选中";
+    case "tailoring": return "定制中";
+    case "tailored": return "已定制";
+    case "apply_ready": return "待投递";
+    case "applied": return "已推进";
+    default: return stage || "未记录";
+  }
+}
+
+function formatApplicationStatusLabel(status: CollaborationRow["applicationStatus"]) {
+  switch (status) {
+    case "pending": return "待处理";
+    case "contact_started": return "已发起沟通";
+    case "submitted": return "已提交";
+    case "interview": return "面试中";
+    case "rejected": return "已拒绝";
+    case "offer": return "已拿 offer";
+    default: return status || "未记录";
+  }
+}
+
+function renderCollaborationBoardChatTable(rows: CollaborationRow[], title = "协作进度表") {
+  if (!rows.length) return "";
+  const lines = [
+    `📋 ${title}`,
+    "",
+    "| 公司 | 岗位 | 阶段 | 状态 | 简历版本 |",
+    "| --- | --- | --- | --- | --- |",
+  ];
+  for (const row of rows) {
+    lines.push(
+      `| ${row.company || "-"} | ${row.role || "-"} | ${formatWorkflowStageLabel(row.workflowStage)} | ${formatApplicationStatusLabel(row.applicationStatus)} | ${row.resumeVersion || "-"} |`
+    );
+  }
+  return lines.join("\n");
+}
+
+function getStructuredBoardInstruction(agentId: string) {
+  if (agentId === "professional-teacher") {
+    return "【协作表格指令】当你明确分析某个具体岗位/JD时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"jdUrl\":\"链接可留空\",\"skillHighlights\":\"一句话写清要强调的技能点\",\"notes\":\"可选\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
+  }
+  if (agentId === "resume-expert") {
+    return "【协作表格指令】当你完成某个具体岗位的简历诊断或定制时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"resumeVersion\":\"如 v2.1-anthropic\",\"notes\":\"评分或改动摘要\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
+  }
+  if (agentId === "networker") {
+    return "【协作表格指令】当你找到联系人或生成冷邮件时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"contacts\":[{\"name\":\"联系人\",\"title\":\"职位\",\"channel\":\"LinkedIn或邮箱\",\"value\":\"链接或邮箱\"}],\"outreachDraft\":\"邮件正文可简写\",\"outreachStatus\":\"draft\"}。必须是一行紧凑 JSON。";
+  }
+  if (agentId === "interview-coach") {
+    return "【协作表格指令】当你完成某岗位面试点评时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"interviewRecord\":{\"score\":7.5,\"strengths\":[\"点1\"],\"weaknesses\":[\"点2\"],\"notes\":\"简评\"}}。必须是一行紧凑 JSON。";
+  }
+  return "";
+}
+
+// ── OpenClaw 多 Agent 工作区文件加载 ─────────────────────────────────────
+// 每个 Agent 的 SOUL.md 存储在 career/workspaces/<agentId>/SOUL.md
+// 这是 OpenClaw 多 Agent 架构的核心：Agent 身份和行为从工作区文件读取，而非硬编码
+function loadAgentSoul(agentId: string): string {
+  const soulPath = path.join(CAREER_DIR, "workspaces", agentId, "SOUL.md");
+  try {
+    if (existsSync(soulPath)) return readFileSync(soulPath, "utf-8").trim();
+  } catch {}
+  return "";
+}
+
+function loadAgentUserContext(agentId: string): string {
+  const userPath = path.join(CAREER_DIR, "workspaces", agentId, "USER.md");
+  try {
+    if (existsSync(userPath)) return readFileSync(userPath, "utf-8").trim();
+  } catch {}
+  return "";
+}
+
+// 从 profile.md 动态读取用户信息（姓名、邮箱、目标岗位、求职类型、技能等）
+function loadProfileInfo(): {
+  name: string; email: string; summary: string;
+  targetRoles: string[]; jobType: string; skills: string[];
+} {
+  const empty = { name: "", email: "", summary: "", targetRoles: [], jobType: "", skills: [] };
+  try {
+    const profilePath = path.join(CAREER_DIR, "profile.md");
+    if (!existsSync(profilePath)) return empty;
+    const md = readFileSync(profilePath, "utf-8");
+
+    const nameMatch = md.match(/姓名[：:]\s*(.+)/);
+    const emailMatch = md.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+    const dirMatch  = md.match(/方向[：:]\s*(.+)/);
+    const typeMatch = md.match(/类型[：:]\s*(.+)/);
+
+    // 目标岗位：把 "AI PM / 产品经理 / Technical PM" 拆成数组
+    const targetRoles = (dirMatch?.[1] || "").split(/[\/,，、]+/).map(s => s.trim()).filter(Boolean);
+    const jobType     = (typeMatch?.[1] || "").includes("实习") ? "实习" : (typeMatch?.[1] || "").trim();
+
+    // 技能：从"技能自评"或技能列表里提取关键词
+    const skillSection = md.match(/##\s*技能[^\n]*\n([\s\S]*?)(?=\n##|$)/)?.[1] || "";
+    const skills = skillSection.match(/[\u4e00-\u9fa5A-Za-z\d]{2,12}/g)
+      ?.filter(s => !/强项|弱项|优势|劣势|背景|经验|能力/.test(s))
+      .slice(0, 8) || [];
+
+    return {
+      name:        nameMatch?.[1]?.trim() || "",
+      email:       emailMatch?.[0]?.trim() || "",
+      summary:     md.slice(0, 1500),
+      targetRoles,
+      jobType,
+      skills,
+    };
+  } catch {
+    return empty;
+  }
+}
 
 function loadMessages(): any[] {
   try {
@@ -694,21 +1791,361 @@ function appendChatLog(agent: { name: string }, userMsg: string, replySnippet: s
   } catch {}
 }
 
+type MailWatcherState = {
+  processedThreadIds: string[];
+  lastCheckedAt: number;
+  lastSuccessAt: number;
+  lastEventAt: number;
+  lastEventSummary: string;
+  lastError: string;
+};
+
+const MAIL_WATCH_QUERY = [
+  "in:inbox",
+  "(is:unread OR newer_than:2d)",
+  "(",
+  "subject:interview OR subject:\"next steps\" OR subject:offer OR subject:rejected OR",
+  "subject:unfortunately OR subject:assessment OR subject:\"online assessment\" OR",
+  "\"not moving forward\" OR \"phone screen\" OR recruiter OR application",
+  ")",
+].join(" ");
+const MAIL_WATCH_INTERVAL_MS = Math.max(60_000, Number(process.env.PAWPALS_MAIL_WATCH_INTERVAL_MS || 5 * 60_000));
+let mailWatcherBusy = false;
+
+function loadMailWatcherState(): MailWatcherState {
+  try {
+    if (existsSync(MAIL_WATCH_STATE_FILE)) {
+      const raw = JSON.parse(readFileSync(MAIL_WATCH_STATE_FILE, "utf-8"));
+      return {
+        processedThreadIds: Array.isArray(raw?.processedThreadIds) ? raw.processedThreadIds.slice(-500) : [],
+        lastCheckedAt: Number(raw?.lastCheckedAt || 0),
+        lastSuccessAt: Number(raw?.lastSuccessAt || 0),
+        lastEventAt: Number(raw?.lastEventAt || 0),
+        lastEventSummary: String(raw?.lastEventSummary || ""),
+        lastError: String(raw?.lastError || ""),
+      };
+    }
+  } catch {}
+  return {
+    processedThreadIds: [],
+    lastCheckedAt: 0,
+    lastSuccessAt: 0,
+    lastEventAt: 0,
+    lastEventSummary: "",
+    lastError: "",
+  };
+}
+
+function saveMailWatcherState(state: MailWatcherState) {
+  try {
+    writeFileSync(MAIL_WATCH_STATE_FILE, JSON.stringify({
+      ...state,
+      processedThreadIds: state.processedThreadIds.slice(-500),
+    }, null, 2), "utf-8");
+  } catch {}
+}
+
+function loadPetRuntimeProfile() {
+  try {
+    if (existsSync(PET_FILE)) {
+      const raw = JSON.parse(readFileSync(PET_FILE, "utf-8"));
+      return {
+        name: String(raw?.name || raw?.petName || "团团"),
+        personality: String(raw?.personality || raw?.petPersonality || "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。"),
+      };
+    }
+  } catch {}
+  return {
+    name: "团团",
+    personality: "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。",
+  };
+}
+
+function execFileJson(cmd: string, args: string[], timeout = 45_000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr?.trim() || error.message));
+        return;
+      }
+      try {
+        resolve(JSON.parse(String(stdout || "").trim() || "null"));
+      } catch (parseError: any) {
+        reject(new Error(parseError?.message || "Invalid JSON from gog"));
+      }
+    });
+  });
+}
+
+function decodeBase64Url(data: string) {
+  try {
+    const normalized = data.replace(/-/g, "+").replace(/_/g, "/");
+    return Buffer.from(normalized, "base64").toString("utf-8");
+  } catch {
+    return "";
+  }
+}
+
+function extractHeaderValue(headers: any, name: string) {
+  if (!Array.isArray(headers)) return "";
+  const match = headers.find((header: any) => String(header?.name || "").toLowerCase() === name.toLowerCase());
+  return String(match?.value || "");
+}
+
+function collectMailBodyText(node: any): string[] {
+  if (!node) return [];
+  const direct = [
+    typeof node.text === "string" ? node.text : "",
+    typeof node.bodyPlain === "string" ? node.bodyPlain : "",
+    typeof node.bodyText === "string" ? node.bodyText : "",
+    typeof node.snippet === "string" ? node.snippet : "",
+    typeof node.body?.text === "string" ? node.body.text : "",
+    typeof node.body?.data === "string" ? decodeBase64Url(node.body.data) : "",
+    typeof node.data === "string" ? decodeBase64Url(node.data) : "",
+  ].filter(Boolean);
+  const childParts = Array.isArray(node.parts)
+    ? node.parts.flatMap((part: any) => collectMailBodyText(part))
+    : [];
+  const payloadParts = Array.isArray(node.payload?.parts)
+    ? node.payload.parts.flatMap((part: any) => collectMailBodyText(part))
+    : [];
+  return [...direct, ...childParts, ...payloadParts];
+}
+
+function normalizeSearchThreads(result: any): any[] {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.threads)) return result.threads;
+  if (Array.isArray(result?.messages)) return result.messages;
+  if (Array.isArray(result?.items)) return result.items;
+  if (Array.isArray(result?.results)) return result.results;
+  return [];
+}
+
+function parseMailThread(thread: any) {
+  const messages = Array.isArray(thread?.messages) ? thread.messages : [];
+  const firstMessage = messages[0] || {};
+  const headers = firstMessage?.payload?.headers || firstMessage?.headers || [];
+  const subject = extractHeaderValue(headers, "Subject") || String(thread?.subject || "");
+  const from = extractHeaderValue(headers, "From") || String(thread?.from || "");
+  const body = Array.from(new Set([
+    ...collectMailBodyText(thread),
+    ...messages.flatMap((message: any) => collectMailBodyText(message)),
+  ])).join("\n").replace(/\s+\n/g, "\n").trim();
+  return {
+    id: String(thread?.id || thread?.threadId || thread?.thread_id || ""),
+    subject,
+    from,
+    snippet: String(thread?.snippet || firstMessage?.snippet || body.slice(0, 280) || ""),
+    body,
+  };
+}
+
+function normalizeCompanyToken(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
+}
+
+function findRowsForMailSignal(subject: string, from: string, body: string) {
+  const board = loadCollaborationBoard();
+  const haystack = `${subject}\n${from}\n${body}`.toLowerCase();
+  const normalizedHaystack = normalizeCompanyToken(haystack);
+  const senderDomain = from.match(/@([a-z0-9.-]+)/i)?.[1]?.toLowerCase() || "";
+
+  const directMatches = board.filter((row) => {
+    const company = row.company.trim().toLowerCase();
+    const role = row.role.trim().toLowerCase();
+    const normalizedCompany = normalizeCompanyToken(row.company);
+    return (!!company && haystack.includes(company))
+      || (!!role && haystack.includes(role))
+      || (!!normalizedCompany && normalizedHaystack.includes(normalizedCompany))
+      || (!!senderDomain && senderDomain.includes(normalizedCompany));
+  });
+  if (directMatches.length) return directMatches;
+
+  return board
+    .filter((row) => ["submitted", "interview"].includes(row.applicationStatus))
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+    .slice(0, 1);
+}
+
+async function runMailboxWatcher(io: Server, allMessages: any[]) {
+  if (mailWatcherBusy) return { ok: true as const, skipped: "busy", events: 0 };
+  mailWatcherBusy = true;
+  const state = loadMailWatcherState();
+  state.lastCheckedAt = Date.now();
+  saveMailWatcherState(state);
+
+  try {
+    const profile = loadProfileInfo();
+    if (!profile.email) {
+      state.lastError = "profile.md 中没有邮箱，跳过邮件监控";
+      saveMailWatcherState(state);
+      return { ok: false as const, skipped: "missing_email", events: 0 };
+    }
+
+    const searchPayload = await execFileJson("gog", [
+      "gmail",
+      "search",
+      MAIL_WATCH_QUERY,
+      "--account", profile.email,
+      "--json",
+      "--results-only",
+      "--max", "20",
+    ], 45_000);
+    const threads = normalizeSearchThreads(searchPayload);
+    const processed = new Set(state.processedThreadIds);
+    let events = 0;
+    const pet = loadPetRuntimeProfile();
+    const tracker = JOB_AGENTS.find((agent) => agent.id === "app-tracker");
+
+    for (const thread of threads) {
+      const threadId = String(thread?.id || thread?.threadId || thread?.thread_id || "");
+      if (!threadId || processed.has(threadId)) continue;
+      processed.add(threadId);
+
+      let parsed = parseMailThread(thread);
+      try {
+        const fullThread = await execFileJson("gog", [
+          "gmail",
+          "thread",
+          "get",
+          threadId,
+          "--account", profile.email,
+          "--json",
+          "--results-only",
+          "--full",
+        ], 45_000);
+        parsed = parseMailThread(fullThread);
+      } catch (error) {
+        console.warn("[mail-watcher] failed to read thread:", threadId, error);
+      }
+
+      const signal = detectPipelineSignal(`${parsed.subject}\n${parsed.from}\n${parsed.snippet}\n${parsed.body}`);
+      if (!signal) continue;
+
+      const matchedRows = findRowsForMailSignal(parsed.subject, parsed.from, parsed.body);
+      const latestRow = matchedRows[0];
+      const companyRole = latestRow
+        ? `${latestRow.company} - ${latestRow.role}`
+        : "某个已投岗位";
+      if (tracker) {
+        emitBotMessage(io, allMessages, {
+          sender: tracker.name,
+          avatar: tracker.avatar,
+          content: `${tracker.name}：我在邮箱里捕捉到新的进展啦。\n- 岗位：${companyRole}\n- 标题：${parsed.subject || "（无标题）"}\n- 判断：${signal === "interview" ? "面试邀请" : signal === "offer" ? "offer" : "拒信"}`,
+          groupId: "job",
+        });
+      }
+
+      const syntheticMessage = latestRow
+        ? `邮箱监控发现 ${latestRow.company} ${latestRow.role} 收到${signal === "interview" ? "面试邀请" : signal === "offer" ? "offer" : "拒信"}。邮件标题：${parsed.subject}。发件人：${parsed.from}。摘要：${parsed.snippet || parsed.body.slice(0, 240)}`
+        : `邮箱监控发现收到${signal === "interview" ? "面试邀请" : signal === "offer" ? "offer" : "拒信"}。邮件标题：${parsed.subject}。发件人：${parsed.from}。摘要：${parsed.snippet || parsed.body.slice(0, 240)}`;
+      await handlePipelineSignalWorkflow(io, allMessages, syntheticMessage, pet.name, pet.personality);
+      state.lastEventAt = Date.now();
+      state.lastEventSummary = `${companyRole} -> ${signal}`;
+      events += 1;
+    }
+
+    state.processedThreadIds = Array.from(processed).slice(-500);
+    state.lastSuccessAt = Date.now();
+    state.lastError = "";
+    saveMailWatcherState(state);
+    return { ok: true as const, events };
+  } catch (error: any) {
+    state.lastError = error?.message || "mail watcher failed";
+    saveMailWatcherState(state);
+    return { ok: false as const, events: 0, skipped: state.lastError };
+  } finally {
+    mailWatcherBusy = false;
+  }
+}
+
+function startMailWatcher(io: Server, allMessages: any[]) {
+  if (String(process.env.PAWPALS_MAIL_WATCHER_DISABLED || "").toLowerCase() === "true") {
+    console.log("[mail-watcher] disabled by env");
+    return;
+  }
+  setTimeout(() => {
+    void runMailboxWatcher(io, allMessages).catch((error) => console.warn("[mail-watcher] initial run failed:", error));
+  }, 45_000);
+  setInterval(() => {
+    void runMailboxWatcher(io, allMessages).catch((error) => console.warn("[mail-watcher] interval run failed:", error));
+  }, MAIL_WATCH_INTERVAL_MS);
+  console.log(`[mail-watcher] started, polling every ${Math.round(MAIL_WATCH_INTERVAL_MS / 1000)}s`);
+}
+
 
 // ── 各 agent 可用工具分配 ─────────────────────────────────────────────
 // 每个 agent 只能调用自己职责范围内的工具，防止越权操作
 const AGENT_TOOLS: Record<string, string[]> = {
-  "job-hunter":      ["search_jobs", "read_jobs"],
-  "app-tracker":     ["apply_job", "record_application", "read_applications", "get_followups"],
-  "career-planner":  ["read_applications", "read_jobs"],
-  "jd-analyst":      [],   // 纯文本分析，无需工具
-  "resume-expert":   [],
-  "networker":       [],
-  "interview-coach": [],
+  "career-planner":  ["trigger_boss_login"],  // 十二只做登录弹窗，其他工具由专家执行
+  "job-hunter":      ["trigger_boss_login", "search_jobs", "read_jobs", "read_collaboration_board"],
+  "app-tracker":     ["trigger_boss_login", "apply_job", "record_application", "read_applications", "get_followups", "read_collaboration_board"],
+  "networker":       ["read_collaboration_board"],
+  "professional-teacher": ["read_collaboration_board"],
+  "resume-expert":   ["read_collaboration_board"],
+  "interview-coach": ["read_collaboration_board"],
 };
 
 // 投递前必须先确认的工具（调用前要求用户明确同意）
 const CONFIRM_REQUIRED_TOOLS = new Set(["apply_job"]);
+
+// ── 每个 Agent 的自动上下文注入配置（不靠关键词，按职责自动注入）────────
+// files: 启动时自动读取并注入的文件（相对于 CAREER_DIR）
+// tools: 启动时自动执行并注入结果的工具
+const AGENT_CONTEXT_CONFIG: Record<string, {
+  files?: Array<{ path: string; label: string; lines?: number }>;
+  tools?: Array<"read_applications" | "get_followups" | "read_jobs" | "read_collaboration_board">;
+}> = {
+  "career-planner": {
+    files: [
+      { path: "profile.md",    label: "用户档案" },
+      { path: "chat_log.md",   label: "最近协作记录", lines: 60 },
+      { path: "../PLAYBOOK.md", label: "团队协作手册" },
+    ],
+  },
+  "job-hunter": {
+    files: [
+      { path: "profile.md", label: "用户档案" },
+      { path: "jobs.json",  label: "岗位库" },
+    ],
+    tools: ["read_jobs"],
+  },
+  "app-tracker": {
+    files: [
+      { path: "profile.md", label: "用户档案" },
+    ],
+    tools: ["read_applications", "get_followups"],
+  },
+  "professional-teacher": {
+    files: [
+      { path: "profile.md",    label: "用户档案" },
+      { path: "skills_gap.md", label: "技能分析" },
+    ],
+    tools: ["read_collaboration_board"],
+  },
+  "resume-expert": {
+    files: [
+      { path: "profile.md",       label: "用户档案" },
+      { path: "resume_master.md", label: "原始简历" },
+      { path: "skills_gap.md",    label: "技能分析" },
+    ],
+    tools: ["read_collaboration_board"],
+  },
+  "networker": {
+    files: [
+      { path: "profile.md",   label: "用户档案" },
+      { path: "contacts.json", label: "联系人库" },
+    ],
+    tools: ["read_collaboration_board"],
+  },
+  "interview-coach": {
+    files: [
+      { path: "resume_master.md", label: "原始简历" },
+      { path: "skills_gap.md",    label: "技能分析" },
+    ],
+    tools: ["read_collaboration_board"],
+  },
+};
 
 // ── 工具定义（Gemini Function Calling）────────────────────────────────
 const TOOLS = [
@@ -716,15 +2153,28 @@ const TOOLS = [
     type: "function",
     function: {
       name: "search_jobs",
-      description: "搜索最新 AI PM / AI Strategy 实习岗位，返回岗位列表（公司、职位、链接）",
+      description: "根据用户求职意向搜索匹配的岗位，返回岗位列表（公司、职位、薪资、链接）",
       parameters: {
         type: "object",
         properties: {
-          query:    { type: "string", description: "搜索关键词，如 'AI PM intern 2026'" },
-          location: { type: "string", description: "城市，如 'San Francisco' 或 '北京'" },
+          query:    { type: "string", description: "搜索关键词，从 profile.md 的目标岗位和求职类型动态生成" },
+          location: { type: "string", description: "城市，如 'San Francisco' 或 '北京'，从 profile.md 的求职意向读取" },
+          channels: {
+            type: "array",
+            items: { type: "string" },
+            description: "搜索渠道，如 ['boss']、['web'] 或 ['boss','web']",
+          },
         },
         required: ["query"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_collaboration_board",
+      description: "读取协作投递表格，查看岗位的简历版本、投递状态、联系人、面试记录等汇总信息",
+      parameters: { type: "object", properties: {} },
     },
   },
   {
@@ -786,7 +2236,33 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "trigger_boss_login",
+      description: "弹出 Boss直聘登录窗口（Electron BrowserWindow），让用户扫码或账号密码登录。搜索岗位前必须先调用此工具确保已登录。",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
+
+// ── JD 内容抓取（通过 Electron BrowserWindow，复用已登录的 cookie）─────
+async function fetchJdContent(url: string): Promise<string> {
+  if (!url) return "";
+  return new Promise<string>((resolve) => {
+    const id = `jd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const timer = setTimeout(() => {
+      if (pendingJdFetchQueue.has(id)) {
+        pendingJdFetchQueue.delete(id);
+        resolve("");
+      }
+    }, 20000);
+    pendingJdFetchQueue.set(id, {
+      url,
+      resolve: (r) => { clearTimeout(timer); resolve(r); },
+    });
+  });
+}
 
 // ── 工具执行器 ────────────────────────────────────────────────────────
 async function executeTool(name: string, args: any): Promise<string> {
@@ -794,76 +2270,96 @@ async function executeTool(name: string, args: any): Promise<string> {
     if (name === "search_jobs") {
       const query = args.query || "";
       const city  = args.location || "101010100"; // 默认北京
+      const channels = normalizeSearchChannels(Array.isArray(args.channels) ? args.channels : ["boss"]);
+      const cityText = args.cityText || "";
 
-      if (existsSync(BOSS_PROFILE_DIR)) {
-        // ── 有登录 profile → 用 jobclaw BossScraper ──
-        const script = `
-import asyncio, json, sys
-from pathlib import Path
-sys.path.insert(0, ${JSON.stringify(JOBCLAW_SRC)})
-from jobclaw.scraper.boss import BossScraper
-from jobclaw.config import Settings
+      let bossRows: SearchResultRow[] = [];
+      let webRows: SearchResultRow[] = [];
+      let bossNeedsLogin = false;
 
-query = ${JSON.stringify(query)}
+      if (channels.includes("boss")) {
+        const bossResult = await new Promise<string>((resolve) => {
+          const id = `search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          const timer = setTimeout(() => {
+            if (pendingSearchQueue.has(id)) {
+              pendingSearchQueue.delete(id);
+              resolve("BOSS_FAILED");
+            }
+          }, 35000); // 35 秒超时
+          pendingSearchQueue.set(id, {
+            query, city, cookieFile: COOKIE_FILE,
+            resolve: (r) => { clearTimeout(timer); resolve(r); },
+          });
+        });
+        console.log("[search_jobs] result length=" + bossResult.length + ", preview=" + JSON.stringify(bossResult.slice(0, 80)));
+        if (bossResult.includes("NEED_LOGIN")) {
+          bossNeedsLogin = true;
+        } else if (bossResult !== "BOSS_FAILED") {
+          bossRows = parseSearchMarkdownTable(bossResult).map((row) => ({ ...row, source: row.source || "boss" }));
+        }
+      }
 
-async def main():
-    settings = Settings()
-    async with BossScraper(settings) as scraper:
-        jobs = await scraper.scrape_jobs(query, limit=15)
-    lines = []
-    structured = []
-    for i, j in enumerate(jobs, 1):
-        if j.salary:
-            sal = str(j.salary.min_annual // 1000) + '-' + str(j.salary.max_annual // 1000) + 'K'
-        else:
-            sal = '薪资面议'
-        lines.append(f"{i}. **{j.title}** @ {j.company} [{sal}]\\n   📍 {j.location}\\n   🔗 {j.url}")
-        structured.append(json.dumps({'company': j.company, 'title': j.title, 'url': str(j.url), 'salary': sal, 'city': j.location, 'source': 'boss'}, ensure_ascii=False))
-    print('\\n\\n'.join(lines))
-    print('---JOBS_JSON---')
-    print('\\n'.join(structured))
+      // ── 全网搜索：Tavily ─────────────────────────────────────────────
+      const TAVILY_SCRIPT = path.join(
+        os.homedir(),
+        "Library", "Application Support", "pawpals",
+        "openclaw", "workspace", "skills", "openclaw-tavily-search", "scripts", "tavily_search.py"
+      );
+      const tavilyKey = (() => {
+        try {
+          const envFile = path.join(os.homedir(), ".openclaw", ".env");
+          if (existsSync(envFile)) {
+            const m = readFileSync(envFile, "utf8").match(/TAVILY_API_KEY\s*=\s*(.+)/);
+            if (m) return m[1].trim();
+          }
+        } catch {}
+        return process.env.TAVILY_API_KEY || "";
+      })();
 
-asyncio.run(main())
-`;
-        return new Promise<string>((resolve) => {
-          const child = spawn(PYTHON_BIN, ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
+      if (channels.includes("web") && existsSync(TAVILY_SCRIPT) && tavilyKey) {
+        const webRaw = await new Promise<string>((resolve) => {
+          const child = spawn(PYTHON_BIN, [
+            TAVILY_SCRIPT,
+            "--query", `${query} ${cityText || ""} 招聘 site:linkedin.com OR site:greenhouse.io OR site:lever.co OR site:jobs.ashbyhq.com OR site:myworkdayjobs.com`,
+            "--max-results", "10",
+            "--format", "brave",
+          ], {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, TAVILY_API_KEY: tavilyKey },
+          });
           let out = "", err = "";
           child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
           child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
           child.on("close", () => {
-            if (out.startsWith("FAIL:")) {
-              resolve(`Boss直聘搜索失败（${out.slice(5).trim()}），请重新登录 Boss直聘后再试。`);
-              return;
-            }
-            // 分离展示文本 和 结构化 JSON
-            const [displayPart, jsonPart] = out.split("---JOBS_JSON---");
-            // 把新岗位合并入 jobs.json（按 url 去重）
-            if (jsonPart) {
-              try {
-                const newJobs = jsonPart.trim().split("\n")
-                  .filter(l => l.trim())
-                  .map(l => ({ ...JSON.parse(l), applied: false, addedAt: new Date().toISOString() }));
-                const existing: any[] = existsSync(JOBS_FILE) ? JSON.parse(readFileSync(JOBS_FILE, "utf-8")) : [];
-                const existingUrls = new Set(existing.map((j: any) => j.url));
-                const merged = [...existing, ...newJobs.filter(j => !existingUrls.has(j.url))];
-                writeFileSync(JOBS_FILE, JSON.stringify(merged, null, 2));
-              } catch {}
-            }
-            resolve(displayPart.trim() || "未找到相关岗位，换个关键词试试。");
+            resolve(out.trim() || err.slice(0, 200) || "");
           });
         });
+        webRows = parseTavilyJobRows(webRaw);
       }
 
-      // ── 没有 cookies → Brave fallback ────────────────────────────────
-      const q = encodeURIComponent(`${query} ${city} site:zhipin.com OR site:linkedin.com/jobs`);
-      const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=8`, {
-        headers: { "Accept": "application/json", "X-Subscription-Token": BRAVE_KEY },
-      });
-      const data = await res.json() as any;
-      const results = (data.web?.results || []).slice(0, 8).map((r: any, i: number) =>
-        `${i + 1}. **${r.title}**\n   ${r.description || ""}\n   🔗 ${r.url}`
-      ).join("\n\n");
-      return results || "未找到岗位，请先登录 Boss直聘。";
+      if (bossNeedsLogin) {
+        bossLoginPending = true;
+        bossLoginPlatform = "boss";
+        pendingResumableSearchTask = {
+          query,
+          location: city,
+          cityText,
+          channels,
+        };
+      }
+
+      const mergedRows = [...bossRows, ...webRows].filter((row, index, list) =>
+        list.findIndex((item) => item.jdUrl === row.jdUrl || `${item.company}-${item.role}` === `${row.company}-${row.role}`) === index
+      );
+      if (mergedRows.length > 0) {
+        saveLastSearchResults(mergedRows.map((row, index) => ({ ...row, index: index + 1 })));
+        syncJobsToCollaborationBoard();
+        return renderSearchMarkdownTable(mergedRows.map((row, index) => ({ ...row, index: index + 1 })));
+      }
+
+      if (bossNeedsLogin) return "【NEED_LOGIN】用户尚未登录 Boss直聘，已自动弹出登录窗口。";
+
+      return "未找到相关岗位，请重试。";
     }
 
     if (name === "read_applications") {
@@ -879,12 +2375,27 @@ asyncio.run(main())
       return `📊 投递看板（共 ${apps.length} 条）\n\n${lines.join("\n\n")}`;
     }
 
+    if (name === "read_collaboration_board") {
+      syncJobsToCollaborationBoard();
+      syncApplicationsToCollaborationBoard();
+      syncContactsToCollaborationBoard();
+      const rows = loadCollaborationBoard();
+      if (!rows.length) return "协作投递表格还是空的。";
+      const top = rows.slice(-12).reverse();
+      return top.map((row, idx) => [
+        `${idx + 1}. ${row.company || "未知公司"} — ${row.role || "未知岗位"}`,
+        `   状态：${row.applicationStatus}｜阶段：${row.workflowStage || "未记录"}｜简历：${row.resumeVersion || "未记录"}｜来源：${row.source || "未记录"}`,
+        `   地点/薪资：${row.location || "未记录"}｜${row.salary || "薪资未知"}`,
+        `   联系人：${row.contacts?.length || 0} 个｜外联：${row.outreachStatus || "未开始"}｜跟进：${row.followUpDate || "未设置"}`,
+      ].join("\n")).join("\n\n");
+    }
+
     if (name === "get_followups") {
       if (!existsSync(APPLICATIONS_FILE)) return "暂无投递记录。";
       const apps = JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[];
       const today = new Date().toISOString().slice(0, 10);
       const overdue = apps.filter(a =>
-        a.status === "applied" && a.followUpDate && a.followUpDate <= today
+        ["contact_started", "submitted", "applied"].includes(a.status) && a.followUpDate && a.followUpDate <= today
       );
       if (!overdue.length) return "[OK] 没有逾期的 follow-up！";
       return `⏰ 需要 follow-up 的投递（${overdue.length} 条）：\n\n` +
@@ -893,21 +2404,32 @@ asyncio.run(main())
 
     if (name === "record_application") {
       const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) : [];
+      const existing = apps.find((app: any) =>
+        (args.url && app.url && app.url === args.url) ||
+        ((app.company || "") === (args.company || "") && (app.role || "") === (args.role || ""))
+      );
+      if (existing) {
+        syncApplicationsToCollaborationBoard();
+        return `[INFO] 投递记录已存在：${args.company} — ${args.role}。`;
+      }
       const followUpDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+      const status = String(args.status || "submitted").trim() || "submitted";
+      const timelineAction = String(args.timelineAction || (status === "contact_started" ? "Contact started" : "Applied")).trim();
       const newApp = {
         id: `${Date.now()}`,
         company: args.company, role: args.role,
-        status: "applied",
+        status,
         appliedDate: new Date().toISOString().slice(0, 10),
         followUpDate,
         source: args.source || "direct",
         url: args.url || "",
         notes: args.notes || "",
-        timeline: [{ date: new Date().toISOString().slice(0, 10), action: "Applied" }],
+        timeline: [{ date: new Date().toISOString().slice(0, 10), action: timelineAction }],
       };
       apps.push(newApp);
       writeFileSync(APPLICATIONS_FILE, JSON.stringify(apps, null, 2));
-      return `[OK] 已记录投递：${args.company} — ${args.role}，follow-up 提醒设在 ${followUpDate}。`;
+      syncApplicationsToCollaborationBoard();
+      return `[OK] 已记录状态：${args.company} — ${args.role}（${status === "contact_started" ? "已发起沟通" : "已提交"}），follow-up 提醒设在 ${followUpDate}。`;
     }
 
     if (name === "read_jobs") {
@@ -921,76 +2443,96 @@ asyncio.run(main())
 
     if (name === "apply_job") {
       const { job_url, company, title, greeting } = args;
-      if (!existsSync(BOSS_PROFILE_DIR)) {
-        return "[ERR] 未找到 Boss直聘 登录信息，请先点击「登录 Boss直聘」完成登录。";
-      }
-      // Build greeting from profile if not provided by AI
+      const platform = isBossJobUrl(job_url) ? "boss" : "web-form";
       let safeGreeting = greeting;
-      if (!safeGreeting) {
-        try {
-          const profileMd = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf-8");
-          // Extract name, latest experience, and target role from profile
-          const nameMatch = profileMd.match(/^#[^—\n]+—\s*(.+)/m);
-          const expMatch = profileMd.match(/\*\*([^*]+)\*\*\s*—\s*AI PM[^,\n]*/m);
-          const name = nameMatch?.[1]?.trim() || "我";
+      try {
+        const profileMd = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf-8");
+        const nameMatch = profileMd.match(/姓名[：:]\s*(.+)/) || profileMd.match(/^#[^—\n]+—\s*(.+)/m);
+        const expMatch = profileMd.match(/\*\*([^*]+)\*\*\s*—\s*AI PM[^,\n]*/m);
+        const profileName = nameMatch?.[1]?.trim() || "";
+        if (!safeGreeting) {
           const latestExp = expMatch?.[1]?.trim() || "";
-          safeGreeting = `您好！我是${name}，USC数据科学硕士在读${latestExp ? `，曾在${latestExp}担任AI产品经理` : ""}，对「${title}」岗位非常感兴趣，期待与您进一步沟通！`;
-        } catch {
-          safeGreeting = `您好！对「${title}」岗位非常感兴趣，期待与您沟通！`;
+          const nameDisplay = profileName || "我";
+          safeGreeting = `您好！我是${nameDisplay}${latestExp ? `，曾在${latestExp}担任AI产品经理` : ""}，对「${title}」岗位非常感兴趣，期待与您进一步沟通！`;
         }
+      } catch {
+        if (!safeGreeting) safeGreeting = `您好！对「${title}」岗位非常感兴趣，期待与您沟通！`;
       }
-      const script = `
-import asyncio, sys
-from pathlib import Path
-sys.path.insert(0, ${JSON.stringify(JOBCLAW_SRC)})
-from jobclaw.applier.boss import BossApplier
-from jobclaw.config import Settings
-from jobclaw.domain import Profile
-from jobclaw.models import Job, JobSource
-
-async def apply():
-    settings = Settings(boss_greeting=${JSON.stringify(safeGreeting)})
-    profile = Profile(name='邓雨蝶', email='yudieden@usc.edu',
-                      skills=['AI产品经理','Python','数据分析'],
-                      desired_roles=['AI PM', 'AI Strategy'])
-    job = Job(source=JobSource.BOSS, title=${JSON.stringify(title)},
-              company=${JSON.stringify(company)}, url=${JSON.stringify(job_url)}, location='')
-    async with BossApplier(settings) as applier:
-        result = await applier.apply(job, profile)
-    status = result.status.value
-    reason = result.extra.get('reason', '')
-    if status == 'submitted':
-        print('OK:' + (result.extra.get('greeting_sent') or safeGreeting)[:80])
-    elif reason == 'already_applied':
-        print('ALREADY')
-    elif reason == 'daily_limit':
-        print('FAIL:今日沟通上限已达到，明天再继续')
-    elif reason == 'captcha':
-        print('FAIL:触发了验证码，请手动处理')
-    else:
-        print('FAIL:' + reason)
-
-safeGreeting = ${JSON.stringify(safeGreeting)}
-asyncio.run(apply())
-`;
-      return new Promise<string>((resolve) => {
-        const child = spawn(PYTHON_BIN, ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
-        let out = "", err = "";
-        child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-        child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
-        child.on("close", () => {
-          const o = out.trim();
-          if (o.startsWith("OK:")) {
-            resolve(`[OK] 已成功向 **${company}** 的「${title}」岗位发送打招呼消息！`);
-          } else if (o.includes("ALREADY")) {
-            resolve(`[INFO] 你之前已经和 **${company}** 沟通过了，无需重复投递。`);
-          } else if (o.startsWith("FAIL:")) {
-            resolve(`[ERR] 投递失败：${o.slice(5)}`);
-          } else {
-            resolve(`[ERR] 投递失败：${err.slice(0, 200) || o || "未知错误"}`);
-          }
+      return await new Promise<string>((resolve) => {
+        const id = `apply_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        pendingApplyQueue.set(id, {
+          id,
+          platform,
+          jobUrl: job_url,
+          company,
+          title,
+          greeting: safeGreeting,
+          queuedAt: new Date().toISOString(),
         });
+        const timer = setTimeout(() => {
+          if (pendingApplyQueue.has(id)) pendingApplyQueue.delete(id);
+          if (applyResultStore.has(id)) applyResultStore.delete(id);
+          clearInterval(poll);
+          resolve("[ERR] Boss直聘 自动投递超时，请重试。");
+        }, 90_000);
+
+        const poll = setInterval(() => {
+          if (!applyResultStore.has(id)) return;
+          const raw = String(applyResultStore.get(id) || "");
+          applyResultStore.delete(id);
+          clearInterval(poll);
+          clearTimeout(timer);
+          if (platform === "boss" && (raw === "SUCCESS" || raw === "SUCCESS_WITH_RESUME")) {
+            resolve(`[OK] 已在 Boss直聘 向 **${company}** 的「${title}」发起沟通。`);
+            return;
+          }
+          if (platform === "boss" && raw === "ALREADY_APPLIED") {
+            resolve(`[INFO] 你之前已经和 **${company}** 沟通过了，无需重复打招呼。`);
+            return;
+          }
+          if (platform === "boss" && raw === "NEED_LOGIN") {
+            bossLoginPending = true;
+            bossLoginPlatform = "boss";
+            resolve("[ERR] Boss直聘 当前未登录，已自动弹出桌面登录窗口。请登录后重试。");
+            return;
+          }
+          if (platform === "boss" && raw.startsWith("NO_BUTTON")) {
+            resolve("[ERR] 这个 Boss 岗位当前没有可用的「立即沟通」入口，可能已下线或不支持直接打招呼。");
+            return;
+          }
+          if (platform === "boss" && raw.startsWith("NO_INPUT")) {
+            resolve("[ERR] 已打开 Boss 聊天页，但没有找到输入框，可能页面结构有变。");
+            return;
+          }
+          if (platform === "web-form" && raw === "SUCCESS") {
+            resolve(`[OK] 已在官网申请页自动填写并提交 **${company}** 的「${title}」。`);
+            return;
+          }
+          if (platform === "web-form" && raw === "FILLED_ONLY") {
+            resolve(`[INFO] 已在官网申请页自动填好主要字段，请你检查后手动提交 **${company}** 的「${title}」。`);
+            return;
+          }
+          if (platform === "web-form" && raw === "NO_FORM") {
+            resolve("[ERR] 这个官网申请页没有识别到可填写的表单。");
+            return;
+          }
+          if (platform === "web-form" && raw === "NO_FORM_DATA") {
+            resolve("[ERR] 识别到了官网表单，但当前档案里缺少足够的自动填写信息。");
+            return;
+          }
+          if (raw.startsWith("ERROR:")) {
+            resolve(`[ERR] 自动投递失败：${raw.slice(6) || "未知原因"}`);
+            return;
+          }
+          resolve(`[ERR] 自动投递失败：${raw || "未知原因"}`);
+        }, 800);
       });
+    }
+
+    if (name === "trigger_boss_login") {
+      // 直接弹出 Electron BrowserWindow 让用户扫码登录
+      bossLoginPending = true;
+      return "【LOGIN_WINDOW_OPENED】已弹出 Boss直聘 登录窗口（Electron 内置浏览器），请用手机扫码或账号密码登录，登录成功后窗口会自动关闭。";
     }
 
     return `工具 ${name} 暂未实现。`;
@@ -1000,17 +2542,24 @@ asyncio.run(apply())
 }
 
 const JOB_AGENTS = [
-  { id: "career-planner",  role: "职业规划师", name: "职业规划师", avatar: "", default: true, isChief: true },
-  { id: "job-hunter",      role: "岗位猎手",   name: "岗位猎手",   avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=JobHunter" },
-  { id: "jd-analyst",      role: "技能成长师", name: "技能成长师", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=JDAnalyst" },
-  { id: "resume-expert",   role: "简历专家",   name: "简历专家",   avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=ResumeExpert" },
-  { id: "app-tracker",     role: "投递管家",   name: "投递管家",   avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker" },
-  { id: "networker",       role: "人脉顾问",   name: "人脉顾问",   avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=Networker" },
-  { id: "interview-coach", role: "面试教练",   name: "面试教练",   avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=InterviewCoach" },
+  { id: "career-planner",  role: "首席伴学官", name: "首席伴学官", avatar: "", default: true, isChief: true },
+  { id: "professional-teacher", role: "专业老师", name: "专业老师", avatar: "/avatars/professional-teacher.jpg" },
+  { id: "resume-expert",   role: "简历专家",   name: "简历专家",   avatar: "/avatars/resume-expert.jpg" },
+  { id: "job-hunter",      role: "岗位猎手",   name: "岗位猎手",   avatar: "/avatars/job-hunter.jpg" },
+  { id: "app-tracker",     role: "投递管家",   name: "投递管家",   avatar: "/avatars/app-tracker.jpg" },
+  { id: "networker",       role: "人脉顾问",   name: "人脉顾问",   avatar: "/avatars/networker.jpg" },
+  { id: "interview-coach", role: "面试教练",   name: "面试教练",   avatar: "/avatars/interview-coach.jpg" },
 ];
 
 const agentByName: Record<string, typeof JOB_AGENTS[0]> = {};
 JOB_AGENTS.forEach(a => { agentByName[a.name] = a; });
+agentByName["职业规划师"] = JOB_AGENTS.find(a => a.id === "career-planner")!;
+agentByName["技能分析师"] = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+agentByName["技能成长师"] = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+agentByName["JD分析师"] = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+const agentIdAliases: Record<string, string> = {
+  "jd-analyst": "professional-teacher",
+};
 
 function detectTargetAgent(text: string) {
   // 1. 优先：「回复 某人」（引用回复格式，取被回复对象作为目标）
@@ -1021,31 +2570,19 @@ function detectTargetAgent(text: string) {
   }
 
   // 2. 明确 @某人
-  for (const a of JOB_AGENTS) {
-    if (text.includes("@" + a.name)) return a;
+  for (const [name, agent] of Object.entries(agentByName)) {
+    if (text.includes("@" + name)) return agent;
   }
 
-  // 3. 关键词路由：只用「>」引用块之外的正文部分匹配，避免引用内容误触发
-  const bodyText = text.replace(/^>.*$/gm, "").toLowerCase();
-  if (/boss直聘|搜岗|找工作|看看工作|有什么岗位|推荐岗位|找岗位|search job/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "job-hunter")!;
-  if (/投递|帮我投|投第|apply|follow.?up|看板|状态/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "app-tracker")!;
-  if (/简历|resume|cv|cover letter|自我介绍/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "resume-expert")!;
-  if (/jd|职位描述|岗位要求|技能gap|skill gap/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "jd-analyst")!;
-  if (/面试|interview|mock|答题/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "interview-coach")!;
-  if (/人脉|联系人|networking|cold email|内推/.test(bodyText))
-    return JOB_AGENTS.find(a => a.id === "networker")!;
-  // 4. 兜底：职业规划师
+  // 3. 其他情况一律由团团（career-planner）接收，由团团决定是否分配给 subagent
   return JOB_AGENTS.find(a => a.default)!;
 }
 
 function detectMentionedAgents(text: string, sender: typeof JOB_AGENTS[0]) {
   const mentioned: typeof JOB_AGENTS[0][] = [];
   const seen = new Set<string>();
+
+  // 检测 @名字 格式
   for (const m of text.matchAll(/@([\u4e00-\u9fa5A-Za-z\d]+)/g)) {
     const a = agentByName[m[1]];
     if (a && a.id !== sender.id && !seen.has(a.id)) {
@@ -1053,6 +2590,33 @@ function detectMentionedAgents(text: string, sender: typeof JOB_AGENTS[0]) {
       mentioned.push(a);
     }
   }
+
+  // 检测 sessions_spawn agent-id 格式（SOUL.md 里用的）
+  for (const m of text.matchAll(/sessions_spawn\s+([\w-]+)/g)) {
+    const agentId = agentIdAliases[m[1]] || m[1];
+    const a = JOB_AGENTS.find(ag => ag.id === agentId);
+    if (a && a.id !== sender.id && !seen.has(a.id)) {
+      seen.add(a.id);
+      mentioned.push(a);
+    }
+  }
+
+  // 语义检测：career-planner 提到专家但没用 sessions_spawn 时自动补
+  // job-hunter / app-tracker / networker 已合并，不再路由给它们
+  if (sender.id === "career-planner") {
+    const semanticMap: { pattern: RegExp; agentId: string }[] = [
+      { pattern: /简历专家|resume.?expert|简历来了|诊断简历/, agentId: "resume-expert" },
+      { pattern: /专业老师|技能分析|jd.?analyst|深度定位|技能定位|市场研究/, agentId: "professional-teacher" },
+      { pattern: /面试教练|interview.?coach|模拟面试/, agentId: "interview-coach" },
+    ];
+    for (const { pattern, agentId } of semanticMap) {
+      if (pattern.test(text) && !seen.has(agentId)) {
+        const a = JOB_AGENTS.find(ag => ag.id === agentId);
+        if (a) { seen.add(a.id); mentioned.push(a); }
+      }
+    }
+  }
+
   return mentioned;
 }
 
@@ -1065,7 +2629,8 @@ async function streamAgent(
   allMessages: any[],
   petName = "团团",
   petPersonality = "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。",
-  extraSystemPrompt = ""
+  extraSystemPrompt = "",
+  allowedToolNamesOverride?: string[]
 ): Promise<{ reply: string | null; calledApply: boolean }> {
   const msgId = `msg-${Date.now()}-${agent.id}`;
   const isChief = agent.id === "career-planner";
@@ -1110,13 +2675,16 @@ async function streamAgent(
   };
 
   try {
+    // ── 从工作区 SOUL.md 加载 Agent 身份（OpenClaw 多 Agent 架构）────────
+    // 每个 Agent 的人格/职责在 career/workspaces/<agentId>/SOUL.md 中定义
+    const soulMd = loadAgentSoul(agent.id);
+    const userCtx = loadAgentUserContext(agent.id);
+
     // 该 agent 可用的工具列表
-    const allowedToolNames = AGENT_TOOLS[agent.id] ?? [];
+    const allowedToolNames = allowedToolNamesOverride ?? (AGENT_TOOLS[agent.id] ?? []);
     const agentTools = TOOLS.filter(t => allowedToolNames.includes(t.function.name));
 
-    // 检查用户消息是否明确表示确认投递
     const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
-    const userConfirmed = /确认|投递|投|好的|是的|ok|yes|apply/i.test(lastUserMsg);
 
     // Gateway 请求头（复用）
     const gatewayHeaders = {
@@ -1125,117 +2693,185 @@ async function streamAgent(
       "x-openclaw-session-key": agent.id === "career-planner" ? `pawpals-main` : `pawpals-${agent.id}`,
     };
 
-    // ── 预执行工具（Gateway 不支持 function calling，改为主动推断并执行）────
-    // 根据 agent 职责 + 用户意图，提前执行相关工具，把结果注入上下文
+    // ── 预执行工具（Agent 职责驱动，不靠关键词）────────────────────────────
+    // Step 1+2: 按 AGENT_CONTEXT_CONFIG 自动注入文件 + 工具结果
     let calledApply = false;
     const toolInjections: string[] = [];
 
-    // 去掉 @mention 和引用块再做关键词判断，避免引用内容误触发工具
+    // 去掉 @mention 和引用块再做关键词判断（仅用于 search_jobs）
     const userMsgNoMention = lastUserMsg
-      .replace(/^>.*$/gm, "")           // 去掉引用行
-      .replace(/@[\u4e00-\u9fa5A-Za-z\d]+/g, "")  // 去掉 @mention
+      .replace(/^>.*$/gm, "")
+      .replace(/@[\u4e00-\u9fa5A-Za-z\d]+/g, "")
       .trim();
 
+    const agentCtx = AGENT_CONTEXT_CONFIG[agent.id] ?? {};
+
+    // 自动注入文件（profile.md / skills_gap.md / chat_log 等）
+    for (const fileConf of agentCtx.files ?? []) {
+      try {
+        const filePath = path.join(CAREER_DIR, fileConf.path);
+        let content = readFileSync(filePath, "utf8");
+        if (fileConf.lines) {
+          // 只取末尾 N 行（chat_log 等只需要最近记录）
+          content = content.split("\n").slice(-fileConf.lines).join("\n");
+        }
+        if (content.trim()) {
+          toolInjections.push(`【${fileConf.label}】\n${content.trim()}`);
+        }
+      } catch { /* 文件不存在则跳过 */ }
+    }
+
+    // 自动执行工具（read_applications / get_followups / read_jobs）
+    for (const toolName of agentCtx.tools ?? []) {
+      if (!allowedToolNames.includes(toolName)) continue;
+      const labels: Record<string, string> = {
+        read_applications: "投递记录",
+        get_followups:     "Follow-up 提醒",
+        read_jobs:         "岗位库",
+        read_collaboration_board: "协作投递表格",
+      };
+      const permLabels: Record<string, "workspace" | "network" | "boss"> = {
+        read_applications: "workspace",
+        get_followups:     "workspace",
+        read_jobs:         "workspace",
+        read_collaboration_board: "workspace",
+      };
+      emitToolActivity(toolName, `读取${labels[toolName]}`, permLabels[toolName]);
+      const result = await executeTool(toolName, {});
+      if (result.trim()) {
+        toolInjections.push(`【${labels[toolName]}】\n${result}`);
+      }
+    }
+
+    // search_jobs：关键词触发，用 LLM 从 profile + 用户消息生成搜索关键词
     if (allowedToolNames.includes("search_jobs") &&
-        /boss|搜|找工作|岗位|实习|intern|job|职位/i.test(userMsgNoMention)) {
-      // 从用户消息里提取城市
-      const cityCode = /上海/.test(lastUserMsg) ? "101020100"
-                     : /广州/.test(lastUserMsg) ? "101280100"
-                     : /深圳/.test(lastUserMsg) ? "101280600"
-                     : "101010100"; // 默认北京
-      const query = lastUserMsg.replace(/@[\u4e00-\u9fa5A-Za-z\d]+/g, "").replace(/boss直聘|帮我|找|搜索|一下|上面|上的|工作/g, "").trim() || "AI PM intern 2026";
+        /boss|搜|找工作|岗位|实习|intern|job|职位|帮我搜|重新搜/i.test(userMsgNoMention)) {
+      let profileText = "";
+      try { profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8"); } catch {}
+
+      const roleMatch = profileText.match(/目标岗位[：:]\s*(.+)/) || profileText.match(/方向[：:]\s*(.+)/);
+      const typeMatch = profileText.match(/类型[：:]\s*(.+)/);
+      const cityMatch = profileText.match(/城市[：:]\s*(.+)/);
+      const companyPreferenceMatch = profileText.match(/公司偏好[：:]\s*(.+)/);
+      const queryResult = await generateSearchQueryAndCity({
+        profileText,
+        userMessage: lastUserMsg,
+        fallbackRole: (roleMatch?.[1] || "").split(/[,，\/]/)[0].trim(),
+        jobType: typeMatch?.[1] || "",
+        targetCity: cityMatch?.[1] || "",
+        companyPreference: companyPreferenceMatch?.[1] || "",
+      });
+      const query = queryResult.query;
+      const cityCode = queryResult.cityCode;
+
+      if (!query) {
+        toolInjections.push("【搜索提示】未能确定求职方向，请告诉我你想找什么类型的岗位。");
+        return { reply: null, calledApply: false };
+      }
+      console.log(`[search_jobs] query="${query}", city="${cityCode}"`);
       emitToolActivity("search_jobs", "搜索岗位", "network", query);
       const result = await executeTool("search_jobs", { query, location: cityCode });
+      console.log(`[search_jobs] result length=${result.length}, preview="${result.slice(0,100)}"`);
       toolInjections.push(`【搜索结果】\n${result}`);
     }
 
-    if (allowedToolNames.includes("read_applications") &&
-        /投递|看板|状态|记录|follow.?up|跟进/i.test(userMsgNoMention)) {
-      emitToolActivity("read_applications", "读取投递记录", "workspace", "career/applications.json");
-      const result = await executeTool("read_applications", {});
-      toolInjections.push(`【投递记录】\n${result}`);
-    }
-
-    if (allowedToolNames.includes("get_followups") &&
-        /follow.?up|跟进|提醒|逾期/i.test(userMsgNoMention)) {
-      emitToolActivity("get_followups", "检查 follow-up 提醒", "workspace", "career/applications.json");
-      const result = await executeTool("get_followups", {});
-      toolInjections.push(`【Follow-up 提醒】\n${result}`);
-    }
-
-    if (allowedToolNames.includes("read_jobs") &&
-        /岗位库|待投递|已收集/i.test(userMsgNoMention)) {
-      emitToolActivity("read_jobs", "读取岗位库", "workspace", "career/jobs.json");
-      const result = await executeTool("read_jobs", {});
-      toolInjections.push(`【岗位库】\n${result}`);
-    }
-
-    // apply_job：需要用户明确确认才执行
-    // 用户说"投第X个"/"投这个"/"确认投递"时，从对话历史里找对应的 zhipin 链接
-    if (allowedToolNames.includes("apply_job") && userConfirmed &&
-        /投|apply/i.test(userMsgNoMention)) {
-
-      // 1. 先从用户消息本身找链接
-      let jobUrl = (lastUserMsg.match(/https?:\/\/[^\s)]+zhipin[^\s)]*/)?.[0]) ?? "";
-      let jobCompany = "";
-      let jobTitle = "";
-
-      // 2. 没有的话从对话历史（agent 回复）里收集所有 zhipin 链接
-      if (!jobUrl) {
-        const allZhipinLinks: { url: string; company: string; title: string }[] = [];
-        for (const m of messages) {
-          if (m.role !== "user" && m.content) {
-            const urlMatches = [...(m.content as string).matchAll(/https?:\/\/[^\s)]+zhipin\.com\/job_detail\/([^\s).]+)/g)];
-            for (const match of urlMatches) {
-              // 提取链接前后的公司/职位文本（简单取链接前一行）
-              const idx = m.content.indexOf(match[0]);
-              const before = m.content.slice(Math.max(0, idx - 100), idx);
-              const titleMatch = before.match(/\*\*(.+?)\*\*[^*]*$/) ?? before.match(/【(.+?)】[^】]*$/);
-              const companyMatch = before.match(/@\s*(.+?)\s*[\[【]/) ?? before.match(/\*\*([^*]+)\*\*\s*—\s*(.+?)[\n\r]/);
-              allZhipinLinks.push({
-                url: match[0],
-                company: companyMatch?.[1] ?? "",
-                title: titleMatch?.[1] ?? "",
-              });
-            }
-          }
-        }
-
-        // 3. 用户说"投第N个"时取第 N 个链接
-        const nthMatch = userMsgNoMention.match(/第\s*([一二三四五六七八九十\d]+)\s*个/);
-        const idx = nthMatch
-          ? ({"一":0,"二":1,"三":2,"四":3,"五":4,"六":5,"七":6,"八":7,"九":8,"十":9}[nthMatch[1]] ?? (parseInt(nthMatch[1]) - 1))
-          : 0;
-
-        if (allZhipinLinks[idx]) {
-          jobUrl     = allZhipinLinks[idx].url;
-          jobCompany = allZhipinLinks[idx].company;
-          jobTitle   = allZhipinLinks[idx].title;
-        }
-      }
-
-      if (jobUrl) {
-        emitToolActivity("apply_job", "自动投递岗位", "boss", jobUrl);
+    // apply_job (Step 3): 检查是否有待确认的投递命令（来自 AI 结构化指令）
+    // AI 回复中嵌入 APPLY_JOB::{"url":"...","company":"...","title":"..."} 格式的指令
+    // 用户说"确认"时从 pendingApplyCommands 取出并执行
+    if (allowedToolNames.includes("apply_job")) {
+      const sessionKey = agent.id;
+      const pending = pendingApplyCommands.get(sessionKey);
+      const userConfirmedApply = /^(确认|投递|投|好的|是的|ok|yes|apply)$/i.test(lastUserMsg.trim());
+      if (pending && userConfirmedApply) {
+        emitToolActivity("apply_job", "自动投递岗位", "boss", pending.url);
         const result = await executeTool("apply_job", {
-          job_url: jobUrl,
-          company: jobCompany || "（公司）",
-          title:   jobTitle   || "岗位",
+          job_url: pending.url,
+          company: pending.company,
+          title:   pending.title,
         });
         toolInjections.push(`【投递结果】\n${result}`);
+        pendingApplyCommands.delete(sessionKey);
         calledApply = true;
-      } else {
-        toolInjections.push("【投递提示】未找到可投递的 Boss直聘 链接，请先让岗位猎手搜索岗位，或直接发给我岗位链接。");
       }
     }
 
     // 构建发给 Gateway 的消息（工具结果以 system 注入）
     const agentRole = (agent as any).role || agent.name;
-    const petIdentity = agent.id === "career-planner"
-      ? `你叫「${petName}」，是用户的首席AI伴学官。性格设定：${petPersonality}。`
-      : `你是「${petName}」召集的专业助手「${agentRole}」，协助用户求职。`;
-    const silentRule = "【严格规则】直接给出结果，绝对不要说出内部操作步骤（如'读取文件'、'调用工具'、'追加日志'等）。不要在回复中显示任何文件路径。不要输出协作日志内容。不要写代码块。";
-    const systemParts = [petIdentity, silentRule];
+
+    // ── 优先从工作区 SOUL.md 读取 Agent 系统 prompt（OpenClaw 多 Agent 架构）
+    // 如果 SOUL.md 不存在则回退到内联 prompt
+    const systemParts: string[] = [];
+    if (soulMd) {
+      // 替换 SOUL.md 中的占位符（路径、名字、性格等）
+      const resolvedSoul = soulMd
+        .replace(/\{\{petName\}\}/g, petName)
+        .replace(/\{\{petPersonality\}\}/g, petPersonality)
+        .replace(/\{\{OPENCLAW_HOME\}\}/g, OPENCLAW_HOME)
+        .replace(/\{\{CAREER_DIR\}\}/g, CAREER_DIR)
+        .replace(/\{\{APP_DATA_DIR\}\}/g, APP_DATA_DIR);
+      systemParts.push(resolvedSoul);
+      if (userCtx) systemParts.push(`【用户背景】\n${userCtx}`);
+    } else {
+      // 回退：SOUL.md 不存在时用内联 prompt
+      const petIdentity = agent.id === "career-planner"
+        ? `你叫「${petName}」，是用户的首席AI伴学官。性格设定：${petPersonality}。`
+        : `你是「${petName}」召集的专业助手「${agentRole}」，协助用户求职。`;
+      const silentRule = "【严格规则】直接给出结果，绝对不要说出内部操作步骤（如'读取文件'、'调用工具'、'追加日志'等）。不要在回复中显示任何文件路径。不要输出协作日志内容。不要写代码块。";
+      systemParts.push(petIdentity, silentRule);
+    }
+    // 强制身份声明：防止 agent 混淆自己是谁
+    if (!isChief) {
+      const agentDisplayName = (agent as any).role || agent.name;
+      systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
+    }
+
+    const boardInstruction = getStructuredBoardInstruction(agent.id);
+    if (boardInstruction) systemParts.push(boardInstruction);
     if (extraSystemPrompt) systemParts.push(extraSystemPrompt);
+    // 岗位猎手：特殊结果直接发出不走 LLM
+    if (agent.id === "job-hunter" && toolInjections.length > 0) {
+      const searchResult = toolInjections.find(t => t.startsWith("【搜索结果】"));
+      if (searchResult) {
+        const rawResult = searchResult.replace("【搜索结果】\n", "").trim();
+
+        // NEED_LOGIN：直接发登录引导消息，不走 LLM（同时 Electron 登录窗口已自动弹出）
+        if (rawResult.includes("NEED_LOGIN")) {
+          bossLoginPending = true; // 确保触发 Electron 登录窗口
+          const loginMsg = "搜 Boss直聘 前需要先登录一下～ 我已经在桌面端帮你弹出 Boss直聘 登录窗口了，你直接扫码或输入账号密码就行。登录成功后窗口会自动关闭，我这边也会自动继续搜索，不用再手动回我。";
+          const idx = allMessages.findIndex(m => m.id === msgId);
+          if (idx !== -1) {
+            allMessages[idx].content = loginMsg;
+            allMessages[idx].isLoading = false;
+          }
+          for (const char of loginMsg) {
+            io.emit("stream_chunk", { id: msgId, token: char, groupId });
+          }
+          io.emit("stream_done", { id: msgId });
+          saveMessages(allMessages);
+          return { reply: loginMsg, calledApply: false };
+        }
+
+        // 判断是否已经是 Markdown 表格（Boss直聘 API 直接返回）
+        const isTable = rawResult.startsWith("| #") || rawResult.startsWith("|#") || rawResult.includes("|---");
+        if (isTable) {
+          const tableContent = rawResult;
+          const idx = allMessages.findIndex(m => m.id === msgId);
+          if (idx !== -1) {
+            allMessages[idx].content = tableContent;
+            allMessages[idx].isLoading = false;
+          }
+          for (const char of tableContent) {
+            io.emit("stream_chunk", { id: msgId, token: char, groupId });
+          }
+          io.emit("stream_done", { id: msgId });
+          saveMessages(allMessages);
+          appendChatLog(agent, messages[messages.length-1]?.content ?? "", tableContent);
+          return { reply: tableContent, calledApply: false };
+        }
+        // 否则（Tavily 返回的纯文本）继续走 LLM 整理成表格
+      }
+    }
+
     if (toolInjections.length > 0) {
       systemParts.push(
         "以下是已执行的工具结果，请**只**基于这些数据回答用户。" +
@@ -1244,8 +2880,13 @@ async function streamAgent(
       );
     }
 
+    // 在 system prompt 最前面注入固定身份 ID
+    const agentIdentityHeader = isChief
+      ? `[AGENT_ID: ${agent.id}] [DISPLAY_NAME: ${petName}] [ROLE: 首席伴学官]`
+      : `[AGENT_ID: ${agent.id}] [DISPLAY_NAME: ${(agent as any).role || agent.name}] [ROLE: ${(agent as any).role || agent.name}]`;
+
     const apiMessages: any[] = [
-      { role: "system", content: systemParts.join("\n\n") },
+      { role: "system", content: agentIdentityHeader + "\n\n" + systemParts.join("\n\n"), name: agent.id },
       ...messages.map(m => {
         if (m.role !== "assistant" && (m as any).imageData) {
           return {
@@ -1274,7 +2915,11 @@ async function streamAgent(
       }),
     });
 
-    if (!streamRes.ok || !streamRes.body) throw new Error(`HTTP ${streamRes.status}`);
+    if (!streamRes.ok || !streamRes.body) {
+      const errBody = await streamRes.text().catch(() => "");
+      console.error(`[stream] ${agent.id} HTTP ${streamRes.status}:`, errBody.slice(0, 300));
+      throw new Error(`HTTP ${streamRes.status}`);
+    }
 
     const reader = streamRes.body.getReader();
     const decoder = new TextDecoder();
@@ -1302,18 +2947,62 @@ async function streamAgent(
       }
     }
 
+    // ── Step 3: 解析 AI 回复中的结构化投递命令 ────────────────────────────
+    // AI 可在回复中嵌入：APPLY_JOB::{"url":"...","company":"...","title":"..."}
+    // 匹配后存入 pendingApplyCommands，等用户下一条"确认"消息触发实际投递
+    const applyCommandMatch = fullText.match(/APPLY_JOB::(\{[^}]+\})/);
+    if (applyCommandMatch) {
+      try {
+        const cmd = JSON.parse(applyCommandMatch[1]) as { url: string; company: string; title: string };
+        if (cmd.url) {
+          pendingApplyCommands.set(agent.id, {
+            url:       cmd.url,
+            company:   cmd.company || "",
+            title:     cmd.title   || "",
+            timestamp: Date.now(),
+          });
+          console.log(`[apply_cmd] stored pending apply for ${agent.id}: ${cmd.url}`);
+          // 从展示给用户的文本中隐藏原始指令行
+          fullText = fullText.replace(/APPLY_JOB::\{[^}]+\}\n?/g, "").trim();
+        }
+      } catch (e) {
+        console.warn("[apply_cmd] failed to parse APPLY_JOB command:", applyCommandMatch[1]);
+      }
+    }
+
+    for (const line of fullText.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("BOARD_UPDATE::")) continue;
+      const jsonText = trimmed.slice("BOARD_UPDATE::".length).trim();
+      try {
+        const update = JSON.parse(jsonText);
+        applyBoardUpdate(update);
+        fullText = fullText.replace(line, "").trim();
+      } catch (e) {
+        console.warn("[board_update] failed to parse:", jsonText);
+      }
+    }
+
+    // 保留原始回复用于标签检测（SLOT_UPDATE / PHASE_COMPLETE / NEEDS_CLARIFICATION）
+    const rawReply = fullText;
+
+    // 清理 onboarding 结构化标签，不展示给用户
+    fullText = fullText.replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "").replace(/PHASE_COMPLETE\n?/g, "").replace(/NEEDS_CLARIFICATION\n?/g, "").replace(/STRATEGY_UPDATE::\{[^}]*\}\n?/g, "").replace(/STRATEGY_CONFIRMED\n?/g, "").trim();
+
     // 流结束，更新内存中消息并通知前端完成
     const idx = allMessages.findIndex(m => m.id === msgId);
     if (idx !== -1) {
       allMessages[idx].content = fullText;
       allMessages[idx].isLoading = false;
     }
+    console.log(`[stream] ${agent.id} done, fullText length=${fullText.length}, preview="${fullText.slice(0,100)}"`);
     io.emit("stream_done", { id: msgId });
     saveMessages(allMessages);
     // 把这轮对话写入 chat_log，飞书 agents 也能看到 PawPals 的上下文
     const lastUser = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
     appendChatLog(agent, lastUser, fullText);
-    return { reply: fullText, calledApply };
+    // 返回原始回复（含标签），调用方用 rawReply 检测 PHASE_COMPLETE 等信号
+    return { reply: rawReply, calledApply };
   } catch (e) {
     console.error(`[stream] ${agent.id} error:`, e);
     io.emit("stream_done", { id: msgId, error: true });
@@ -1339,7 +3028,7 @@ async function orchestrate(
         model: "auto",
         messages: [
           { role: "system", content: `你是${petName}，求职助手的协调者。判断用户请求是否需要多个专家协作。
-可用专家：job-hunter（搜岗）、resume-expert（简历）、interview-coach（面试）、app-tracker（投递记录）、networker（人脉）、jd-analyst（技能分析）。
+可用专家：job-hunter（搜岗）、resume-expert（简历）、interview-coach（面试）、app-tracker（投递记录）、networker（人脉）、professional-teacher（专业定位）。
 如果需要多专家，返回 JSON 数组：[{"agentId":"xxx","task":"具体任务描述"}]
 如果单个专家或直接回答即可，返回：null
 只输出 JSON 或 null，不要其他文字。` },
@@ -1391,20 +3080,35 @@ async function runAgentChain(
       `${m.role === "user" ? "用户" : "助手"}：${(m.content as string).slice(0, 300)}`
     ).join("\n");
 
-    // 团团决策：是否需要多专家并行
-    const tasks = await orchestrate(userMsg, contextSummary, petName);
+    // ── 十二用 LLM 回复，sessions_spawn 由 LLM 自行决定 ──
+    io.emit("agent_thinking", { agentName: petName, groupId });
+
+    // 多专家并行判断：只有消息里明确同时提到多个任务领域时才调 orchestrate（避免额外 LLM 调用）
+    const needsMultiAgent = /(?:简历|resume).*(?:搜|岗位|job)|(?:搜|岗位|job).*(?:简历|resume)|(?:面试|interview).*(?:投递|apply)|同时|一起帮我.*和/.test(userMsg);
+    const tasks = needsMultiAgent ? await orchestrate(userMsg, contextSummary, petName) : null;
 
     if (tasks && tasks.length > 1) {
       // ── 多专家并行模式 ──
       const expertResults: { agentId: string; reply: string }[] = [];
 
+      // 读取档案和简历注入上下文
+      let sharedProfileCtx = "";
+      try {
+        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8") : "";
+        const resume = existsSync(path.join(CAREER_DIR, "resume_master.md")) ? readFileSync(path.join(CAREER_DIR, "resume_master.md"), "utf8") : "";
+        if (profile) sharedProfileCtx += `\n【用户档案】\n${profile}`;
+        if (resume) sharedProfileCtx += `\n\n【简历原文】\n${resume.slice(0, 3000)}`;
+      } catch {}
+
       await Promise.all(tasks.map(async ({ agentId, task }) => {
         const expert = JOB_AGENTS.find(a => a.id === agentId);
         if (!expert) return;
+        io.emit("agent_thinking", { agentName: expert.name, groupId });
         const expertMessages = [
-          { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}\n\n你的任务：${task}` }
+          { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${sharedProfileCtx}\n\n你的任务：${task}` }
         ];
         const { reply } = await streamAgent(expert, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
+        io.emit("agent_done", { groupId });
         if (reply) expertResults.push({ agentId, reply });
       }));
 
@@ -1417,20 +3121,28 @@ async function runAgentChain(
 
         const chiefAgent = { ...agent, name: petName };
         await streamAgent(chiefAgent,
-          [...messages, { role: "user", content: `各专家已完成任务，请汇总以下结果给用户：\n\n${summaryContext}` }],
+          [...messages, { role: "user", content: `各专家已直接向用户展示了分析结果，用户已经看到了。你只需要用 1-2 句话做简短收尾（比如：确认完成、说下一步），绝对不要重复专家的内容。专家结果供你参考（不要复述）：\n\n${summaryContext}` }],
           depth, io, groupId, allMessages, petName, petPersonality
         );
       }
       return;
     }
 
-    // 单专家：关键词路由
+    // 路由：@提到具体专家时直接路由，否则都先经过 career-planner（十二）协调
     const targetAgent = detectTargetAgent(userMsg);
-    if (targetAgent.id !== "career-planner") {
+    const routeTarget = targetAgent;
+    if (routeTarget.id !== "career-planner") {
+      io.emit("agent_thinking", { agentName: routeTarget.name, groupId });
+      let profileCtx = "";
+      try {
+        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8") : "";
+        if (profile) profileCtx = `\n\n【用户档案】\n${profile}`;
+      } catch {}
       const expertMessages = [
-        { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}\n\n请处理：${userMsg}` }
+        { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${profileCtx}\n\n请处理：${userMsg}` }
       ];
-      await streamAgent(targetAgent, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
+      await streamAgent(routeTarget, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
+      io.emit("agent_done", { groupId });
       return;
     }
   }
@@ -1440,15 +3152,1065 @@ async function runAgentChain(
   if (!reply || calledApply || depth >= MAX_CHAIN_DEPTH) return;
 
   const nextAgents = detectMentionedAgents(reply, agent);
-  for (const nextAgent of nextAgents) {
-    await new Promise(r => setTimeout(r, 2000));
-    await runAgentChain(
-      nextAgent,
-      [...messages, { role: "assistant", content: reply, name: agent.name },
-        { role: "user", content: `（${agent.name} 刚刚 @了你，请根据以上内容接着处理）` }],
-      depth + 1, io, groupId, allMessages, petName, petPersonality
-    );
+  if (nextAgents.length > 0) {
+    // 读取用户档案和简历，注入给子 agent
+    let profileCtx = "";
+    try {
+      const profilePath = path.join(CAREER_DIR, "profile.md");
+      const resumePath = path.join(CAREER_DIR, "resume_master.md");
+      const profile = existsSync(profilePath) ? readFileSync(profilePath, "utf8") : "";
+      const resume = existsSync(resumePath) ? readFileSync(resumePath, "utf8") : "";
+      if (profile) profileCtx += `\n【用户档案】\n${profile}`;
+      if (resume) profileCtx += `\n\n【简历原文】\n${resume.slice(0, 3000)}`;
+    } catch {}
+
+    // 原始用户消息（用于给子 agent 明确任务）
+    const originalUserMsg = messages.filter(m => m.role === "user").slice(-1)[0]?.content ?? "";
+    for (const nextAgent of nextAgents) {
+      await new Promise(r => setTimeout(r, 150));
+      io.emit("agent_thinking", { agentName: nextAgent.name, groupId });
+      const spawnMatch = reply.match(new RegExp(`sessions_spawn\\s+${nextAgent.id}[^\\n]*\\n?([^\\n]+)?`));
+      const spawnTask = spawnMatch?.[1]?.trim() || "";
+      // 优先用 sessions_spawn 里的描述，其次用原始用户消息
+      const taskDesc = spawnTask || originalUserMsg || `${petName} 派给你任务，请根据用户档案和简历认真完成`;
+      await runAgentChain(
+        nextAgent,
+        [...messages,
+          { role: "assistant", content: reply, name: agent.name },
+          { role: "user", content: `用户原始请求：${taskDesc}${profileCtx}` }],
+        depth + 1, io, groupId, allMessages, petName, petPersonality
+      );
+      io.emit("agent_done", { groupId });
+    }
   }
+}
+
+async function handleJobOnboarding(
+  io: Server,
+  allMessages: any[],
+  userMsg: string,
+  petName: string,
+  petPersonality: string,
+  attachmentText = "",
+  attachmentName = ""
+) {
+  const state = loadOnboardingState();
+  if (state.completed) return false;
+
+  const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
+  const nav = handleOnboardingNavigationCommand(state, userMsg, petName);
+  if (nav.handled) {
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: nav.prompt || `${petName}：我们继续按当前步骤往下走。`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+    return true;
+  }
+
+  if (state.transitionInFlight && userMsg.trim()) {
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：我这边正在推进上一阶段，先别急，我处理完马上接着带你走。${state.lastError ? `\n上一次卡住点：${state.lastError}` : ""}`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+    return true;
+  }
+
+  if (state.phase === "resume_collection") {
+    if (!hasResumeAttachment(userMsg)) {
+      emitBotMessage(io, allMessages, {
+        sender: petName,
+        avatar: chiefAvatar,
+        content: `${petName}：咱们先把建档这一步走完哈～先把你的简历发给我吧，PDF 或 Word 都可以，我先认识一下你 🐾`,
+        groupId: "job",
+        isChiefBot: true,
+      });
+      return true;
+    }
+
+    state.resumeUploaded = true;
+    state.phase = "profile_collection";
+    state.currentStep = "target_role";
+    const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
+    saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
+    saveOnboardingState(state);
+
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+
+    const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
+    io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
+    const parseResult = await runAgentChainWithTimeout(
+      resumeExpert,
+      [{ role: "user", content: `【来自${petName}的任务】\n用户刚上传了简历，请先做一次基础解析，提炼背景亮点和待追问信息。当前简历文本如下：\n\n${resumePayload.rawText.slice(0, 6000)}` }],
+      0,
+      io,
+      "job",
+      allMessages,
+      petName,
+      petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+    if (!parseResult.ok) {
+      state.lastError = "简历基础解析超时或失败";
+      saveOnboardingState(state);
+      emitBotMessage(io, allMessages, {
+        sender: petName,
+        avatar: chiefAvatar,
+        content: `${petName}：简历已经收到，但简历专家刚刚超时了。我已经把档案保住了，你可以直接继续回答下一步问题；如果想完全重来，就说"重新建档"。`,
+        groupId: "job",
+        isChiefBot: true,
+      });
+      return true;
+    }
+    state.lastError = "";
+    saveOnboardingState(state);
+
+    // 简历解析后，让 career-planner agent 自然地开始第一个画像问题
+    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      careerPlanner,
+      [{ role: "user", content: `用户刚上传了简历，简历专家已完成基础解析。现在请开始用户画像采集，自然地问第一个问题。` }],
+      0, io, "job", allMessages, petName, petPersonality,
+      buildOnboardingContext(state, petName)
+    );
+    return true;
+  }
+
+  if (state.phase === "profile_collection") {
+    // 交给 career-planner agent 通过自然对话处理（意图判断由 LLM 自己做）
+    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    const { reply } = await streamAgent(
+      careerPlanner,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      buildOnboardingContext(state, petName)
+    );
+
+    // ── Step 3: 从 agent 回复中提取结构化信号 ────────────────────────
+    if (reply) {
+      // NEEDS_CLARIFICATION: agent 判断用户没提供新信息，不更新 slot
+      if (reply.includes("NEEDS_CLARIFICATION")) {
+        saveOnboardingState(state);
+        return true;
+      }
+
+      // SLOT_UPDATE:: 提取
+      const slotMatches = reply.match(/SLOT_UPDATE::(\{[^}]+\})/g);
+      if (slotMatches) {
+        for (const m of slotMatches) {
+          try {
+            const json = JSON.parse(m.replace("SLOT_UPDATE::", ""));
+            if (json.skills && typeof json.skills === "string") {
+              json.skills = normalizeSkills(json.skills);
+            }
+            applyOnboardingSlotPatch(state, json);
+          } catch {}
+        }
+      } else if (!reply.includes("NEEDS_CLARIFICATION")) {
+        // fallback: agent 没输出 SLOT_UPDATE 也没标记 NEEDS_CLARIFICATION，用 LLM 提取
+        const patch = await extractOnboardingSlotPatch(state, userMsg);
+        applyOnboardingSlotPatch(state, patch);
+      }
+
+      // ── Step 4: 检查完成度，决定是否推进 phase ─────────────────────
+      const nextStep = getNextOnboardingStep(state);
+      if (!nextStep || reply.includes("PHASE_COMPLETE")) {
+        state.currentStep = null;
+        state.phase = "professional_positioning";
+        persistProfileFromOnboarding(state);
+        saveOnboardingState(state);
+        scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+      } else {
+        state.currentStep = nextStep;
+        saveOnboardingState(state);
+      }
+    }
+    return true;
+  }
+
+  if (state.phase === "professional_positioning") {
+    state.transitionInFlight = true;
+    state.lastError = "";
+    saveOnboardingState(state);
+
+    const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
+    const positioningResult = await runAgentChainWithTimeout(
+      professionalTeacher,
+      [{ role: "user", content: `【来自${petName}的任务】\n用户建档已完成。请基于 profile.md 做一次专业定位分析，输出强匹配、差异化优势、技能差距和时间线建议，并把结果写入 skills_gap.md。` }],
+      0,
+      io,
+      "job",
+      allMessages,
+      petName,
+      petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+    state.transitionInFlight = false;
+    if (!positioningResult.ok || !existsSync(SKILLS_GAP_FILE)) {
+      state.lastError = "专业定位分析未成功写入 skills_gap.md";
+      saveOnboardingState(state);
+      emitBotMessage(io, allMessages, {
+        sender: petName,
+        avatar: chiefAvatar,
+        content: `${petName}：专业老师这一步还没完全落好，我先停在这里，避免后面串错。你回我"继续"我就重试定位分析；如果想改前面的信息，也可以直接说"返回上一步"或"改目标岗位"。`,
+        groupId: "job",
+        isChiefBot: true,
+      });
+      return true;
+    }
+
+    state.phase = "resume_diagnosis";
+    state.lastError = "";
+    saveOnboardingState(state);
+    const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      chiefAgent,
+      [{ role: "user", content: "专业老师已经完成定位分析。请自然地承接一句，告诉用户接下来会进入简历建议阶段，不要像系统播报。" }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 过渡消息】\n当前阶段即将从专业定位进入简历建议。像首席伴学官一样自然承接，不要重复专业老师刚才说过的内容。`
+    );
+    scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+    return true;
+  }
+
+  if (state.phase === "resume_diagnosis") {
+    state.transitionInFlight = true;
+    state.lastError = "";
+    saveOnboardingState(state);
+
+    // 专业老师：从定位角度做首轮简历建议。
+    // 简历专家已经在简历上传时做过基础解析，这一阶段先不再串行跑一遍，避免 onboarding 过慢。
+    const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
+    await runAgentChainWithTimeout(
+      professionalTeacher,
+      [{ role: "user", content: `【来自${petName}的任务】\n请结合 profile.md 和 skills_gap.md，从专业定位的角度看用户的简历（resume_master.md），指出哪些经历可以更好地包装、哪些技能应该突出、哪些内容建议删减或调整顺序。给出具体的修改建议，不要自己改简历。` }],
+      0, io, "job", allMessages, petName, petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+    state.transitionInFlight = false;
+
+    // 建议出完了，切到 resume_review 让用户和 agent 讨论
+    state.phase = "resume_review";
+    state.lastError = "";
+    state.transitionInFlight = false;
+    saveOnboardingState(state);
+
+    const careerPlannerForReview = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      careerPlannerForReview,
+      [{ role: "user", content: "专业老师已经基于定位给出首轮简历建议了，简历专家也已经做过基础解析。请帮用户总结核心建议，然后问用户想现在就改简历还是先搜岗位边投边改。" }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 简历建议讨论】\n专业老师刚刚基于定位给出了首轮简历建议，简历专家在更早前已经做过基础解析。请用你自己的话总结当前最重要的优化要点，然后问用户：\n1. 现在就按建议改简历（你会让简历专家帮 ta 改）\n2. 先搜岗位、边投边改（直接进入搜岗阶段）\n语气自然，像朋友在聊天。`
+    );
+    return true;
+  }
+
+  if (state.phase === "resume_review") {
+    // 用户和 agent 讨论简历建议，判断用户想改简历还是先搜岗
+    const wantsToSearch = /(先投|先搜|边投边改|先看岗位|先找|先搜岗|不改了|之后再|以后再|直接投|开始搜)/.test(userMsg);
+    const wantsToEdit = /(改简历|现在改|先改|帮我改|按建议改|开始优化|修改简历|改一下|改吧)/.test(userMsg);
+
+    if (wantsToSearch) {
+      state.phase = "search_strategy";
+      state.lastError = "";
+      saveOnboardingState(state);
+      const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      await streamAgent(
+        chiefForHandoff,
+        [{ role: "user", content: "用户决定先搜岗位、边投边改。请你先自然回应一句，再说明接下来会先帮用户确认搜索渠道和优先级。不要直接开始搜索。1-2句话就够。" }],
+        0, io, "job", allMessages, petName, petPersonality,
+        `【Onboarding 过渡消息】\n当前从简历建议讨论进入搜岗策略确认阶段。请先由首席伴学官自然接话，再交给岗位猎手。`
+      );
+      scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+      return true;
+    }
+
+    if (wantsToEdit) {
+      const resumeExpertForEdit = JOB_AGENTS.find(a => a.id === "resume-expert")!;
+      io.emit("agent_thinking", { agentName: resumeExpertForEdit.name, groupId: "job" });
+      await runAgentChainWithTimeout(
+        resumeExpertForEdit,
+        [{ role: "user", content: `【来自${petName}的任务】\n用户认可了简历优化建议，请根据之前专业老师和你的建议，帮用户修改 resume_master.md。修改后把改动要点告诉用户。` }],
+        0, io, "job", allMessages, petName, petPersonality
+      );
+      io.emit("agent_done", { groupId: "job" });
+
+      state.phase = "search_strategy";
+      state.lastError = "";
+      saveOnboardingState(state);
+      const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      await streamAgent(
+        chiefForHandoff,
+        [{ role: "user", content: "简历专家已经按建议修改完简历，用户接下来要进入搜岗阶段。请你先自然回应一句，再说明接下来会先帮用户确认搜索渠道和优先级。不要直接开始搜索。1-2句话就够。" }],
+        0, io, "job", allMessages, petName, petPersonality,
+        `【Onboarding 过渡消息】\n当前从简历修改完成进入搜岗策略确认阶段。请先由首席伴学官自然接话，再交给岗位猎手。`
+      );
+      scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+      return true;
+    }
+
+    // 用户还在讨论/追问，交给 career-planner 自然对话
+    const careerPlannerForChat = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      careerPlannerForChat,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 简历建议讨论】\n用户正在讨论简历优化建议。回应 ta 的想法，最终引导 ta 选择：现在改简历，还是先搜岗位边投边改。`
+    );
+    return true;
+  }
+
+  if (state.phase === "search_strategy") {
+    // 用 career-planner 来确认策略（不用 job-hunter，因为 job-hunter 会触发 search_jobs 工具）
+    const careerPlannerForStrategy = JOB_AGENTS.find(a => a.id === "career-planner")!;
+
+    if (!userMsg.trim()) {
+      const defaults = getDefaultSearchStrategy(state);
+      applySearchStrategyUpdate(state, defaults);
+      saveOnboardingState(state);
+      await streamAgent(
+        careerPlannerForStrategy,
+        [{ role: "user", content: "用户画像和简历优化建议都完成了，现在需要确认搜索策略再开始搜岗位。" }],
+        0, io, "job", allMessages, petName, petPersonality,
+        `【Onboarding 上下文 — 搜索策略确认】\n当前默认策略：渠道=${state.searchStrategy.channels.join(" / ") || defaults.channels.join(" / ")}；优先级=${state.searchStrategy.priorities.join(" > ") || defaults.priorities.join(" > ")}。\n请用自然对话和用户确认：\n1. 这轮先搜哪个渠道？Boss直聘 / 全网 / 混合搜\n2. 优先关注什么？地点、公司背景、还是岗位匹配度\n\n结构化回写协议：\n- 收到新策略时，在回复末尾另起一行写：STRATEGY_UPDATE::{"channels":["boss","web"],"priorities":["location","company"]}\n- 当策略已经可以开搜时，再额外附加一行：STRATEGY_CONFIRMED\n- 如果用户说"你决定/都可以"，你可以直接给默认策略并确认`
+      );
+      return true;
+    }
+
+    const { reply } = await streamAgent(
+      careerPlannerForStrategy,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 搜索策略确认】\n已收集的搜索策略：渠道=${state.searchStrategy.channels.join(" / ") || "未确认"}；优先级=${state.searchStrategy.priorities.join(" > ") || "未确认"}。\n继续自然确认搜索策略，并按协议输出 STRATEGY_UPDATE / STRATEGY_CONFIRMED。`
+    );
+
+    if (reply) {
+      const matches = reply.match(/STRATEGY_UPDATE::(\{[^}]+\})/g);
+      if (matches) {
+        for (const item of matches) {
+          try {
+            applySearchStrategyUpdate(state, JSON.parse(item.replace("STRATEGY_UPDATE::", "")));
+          } catch {}
+        }
+      } else {
+        applySearchStrategyUpdate(state, extractSearchStrategyHeuristic(userMsg, state));
+      }
+      if (reply.includes("STRATEGY_CONFIRMED") || state.searchStrategy.confirmed) {
+        if (!state.searchStrategy.channels.length) {
+          applySearchStrategyUpdate(state, getDefaultSearchStrategy(state));
+        }
+        state.phase = "first_job_search";
+        state.lastError = "";
+        saveOnboardingState(state);
+        scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+      } else {
+        saveOnboardingState(state);
+      }
+    }
+    return true;
+  }
+
+  if (state.phase === "first_job_search") {
+    state.transitionInFlight = true;
+    state.lastError = "";
+    saveOnboardingState(state);
+
+    // ── 从 profile.md 读取真实求职意向，构造搜索参数 ──────────────────
+    const prefs = buildSearchPreferencesFromOnboarding(state);
+    let profileText = "";
+    try { profileText = readFileSync(PROFILE_FILE, "utf8"); } catch {}
+    const searchIntentText = `开始首轮搜岗。渠道：${prefs.channels.join(" / ")}；优先级：${prefs.priorities.join(" > ")}；目标方向：${prefs.explicitRole || prefs.inferredPrimaryRole || prefs.query}；公司偏好：${prefs.companyPreference || "未说明"}。`;
+    const queryResult = await generateSearchQueryAndCity({
+      profileText,
+      userMessage: searchIntentText,
+      fallbackRole: prefs.explicitRole || prefs.inferredPrimaryRole || prefs.query,
+      inferredRoles: [
+        prefs.explicitRole,
+        prefs.inferredPrimaryRole,
+        ...(state.slots.inferredRoles || []),
+      ].filter(Boolean),
+      jobType: state.slots.jobType,
+      targetCity: prefs.cityText,
+      companyPreference: prefs.companyPreference,
+    });
+    const query = queryResult.query;
+    const cityCode = queryResult.cityCode;
+
+    const jobHunterAgent = JOB_AGENTS.find(a => a.id === "job-hunter")!;
+
+    // ── 已登录，直接调用 search_jobs 执行真实搜索 ─────────────────────
+    emitBotMessage(io, allMessages, {
+      sender: jobHunterAgent.name,
+      avatar: jobHunterAgent.avatar,
+      content: `🔍 正在按「${prefs.channels.join(" + ")}」搜索「${query}」｜目标方向：${prefs.explicitRole || prefs.inferredPrimaryRole || query}｜城市优先：${prefs.orderedCities.join(" > ") || queryResult.city || prefs.primaryCity}${prefs.companyPreference ? `｜公司偏好：${prefs.companyPreference}` : ""}${prefs.priorities.length ? `｜优先级：${prefs.priorities.join(" > ")}` : ""}`,
+      groupId: "job",
+      isChiefBot: false,
+    });
+    io.emit("agent_thinking", { agentName: jobHunterAgent.name, groupId: "job" });
+
+    const searchResultText = await executeTool("search_jobs", {
+      query,
+      location: cityCode,
+      cityText: prefs.cityText,
+      channels: prefs.channels,
+    });
+    io.emit("agent_done", { groupId: "job" });
+    state.transitionInFlight = false;
+
+    // 搜索结果需要登录 → 弹登录窗
+    if (searchResultText.includes("NEED_LOGIN")) {
+      bossLoginPending = true;
+      bossLoginPlatform = "boss";
+      pendingResumableSearchTask = {
+        query,
+        location: cityCode,
+        cityText: prefs.cityText,
+        channels: prefs.channels,
+      };
+      saveOnboardingState(state);
+      emitBotMessage(io, allMessages, {
+        sender: jobHunterAgent.name,
+        avatar: jobHunterAgent.avatar,
+        content: `${petName}：Boss直聘 登录状态过期了，我已经重新帮你打开桌面登录窗口 🔑 你登完之后窗口会自动关闭，我会直接继续搜索。`,
+        groupId: "job",
+        isChiefBot: false,
+      });
+      return true;
+    }
+
+    // 搜索失败
+    if (searchResultText.includes("BOSS_FAILED") || searchResultText.includes("搜索出错")) {
+      state.lastError = "岗位首搜失败";
+      saveOnboardingState(state);
+      emitBotMessage(io, allMessages, {
+        sender: petName,
+        avatar: chiefAvatar,
+        content: `${petName}：搜索暂时没成功，可能是网络问题。你回我"继续"我就重试首搜。`,
+        groupId: "job",
+        isChiefBot: true,
+      });
+      return true;
+    }
+
+    // ── 搜索成功后按档案偏好重排结果 ──────────────────────────────────
+    let finalSearchText = searchResultText;
+    const structuredRows = loadLastSearchResults();
+    if (structuredRows.length > 0) {
+      const reranked = rerankSearchRows(structuredRows, {
+        orderedCities: prefs.orderedCities,
+        companyPreference: prefs.companyPreference,
+      }).slice(0, 15);
+      saveLastSearchResults(reranked);
+      finalSearchText = renderSearchMarkdownTable(reranked);
+    }
+
+    // ── 搜索成功，直接把真实结果发出来 ─────────────────────────────────
+    emitBotMessage(io, allMessages, {
+      sender: jobHunterAgent.name,
+      avatar: jobHunterAgent.avatar,
+      content: finalSearchText,
+      groupId: "job",
+      isChiefBot: false,
+    });
+    syncJobsToCollaborationBoard();
+    const searchBoardRows = loadCollaborationBoard()
+      .filter((row) => row.workflowStage === "new")
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      .slice(0, 15);
+    const searchBoardText = renderCollaborationBoardChatTable(searchBoardRows, "这一轮搜岗已进入协作表");
+    if (searchBoardText) {
+      emitBotMessage(io, allMessages, {
+        sender: petName,
+        avatar: chiefAvatar,
+        content: searchBoardText,
+        groupId: "job",
+        isChiefBot: true,
+      });
+    }
+
+    state.phase = "first_application";
+    state.lastError = "";
+    saveOnboardingState(state);
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：你可以直接回我想推进的编号，比如「投 1、3、5」或「先看 2、4」。如果这一批不够对口，也可以直接说你想调整城市、方向、公司类型，或者改成 Boss / 全网 / 混合搜。`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+    return true;
+  }
+
+  if (state.phase === "first_application") {
+    // ── 用户先选岗位 → tailor → 确认投递 → 至少投出 1 个岗位后才完成 onboarding ──
+    if (await handleSelectedJobsWorkflow(io, allMessages, userMsg, petName, petPersonality)) {
+      state.lastError = "";
+      saveOnboardingState(state);
+      return true;
+    }
+
+    const beforeApplyIds = new Set(
+      loadCollaborationBoard()
+        .filter((row) => row.workflowStage === "applied" || ["contact_started", "submitted"].includes(row.applicationStatus))
+        .map((row) => row.id)
+    );
+
+    if (await handleApplyReadyWorkflow(io, allMessages, userMsg, petName, petPersonality)) {
+      const afterApplyRows = loadCollaborationBoard().filter(
+        (row) => row.workflowStage === "applied" || ["contact_started", "submitted"].includes(row.applicationStatus)
+      );
+      const newlyApplied = afterApplyRows.filter((row) => !beforeApplyIds.has(row.id));
+
+      if (newlyApplied.length > 0) {
+        state.phase = "completed";
+        state.completed = true;
+        state.currentStep = null;
+        state.lastError = "";
+        state.transitionInFlight = false;
+        saveOnboardingState(state);
+        const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
+        await streamAgent(
+          chiefAgent,
+          [{ role: "user", content: `用户的第一批真实投递已经发生，Onboarding 现在正式完成。请自然地庆祝一下，并告诉用户接下来你会继续盯进度、follow-up、新岗位和面试。` }],
+          0, io, "job", allMessages, petName, petPersonality,
+          `【Onboarding 收尾消息】\n第一批岗位已真实投递。请像首席伴学官一样自然收尾，不要像系统播报。`
+        );
+      } else {
+        state.lastError = "已进入投递确认，但还没有成功写入首批投递记录";
+        saveOnboardingState(state);
+      }
+      return true;
+    }
+
+    // 用户没有选岗位，可能在聊别的 → 交给 career-planner 自然对话
+    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      careerPlanner,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 首次投递选择】\n岗位搜索结果已展示给用户。请引导用户选择想投递的岗位（告诉你编号即可），或者了解用户的顾虑。如果用户想换方向重新搜，也可以帮 ta 调整。`
+    );
+    return true;
+  }
+
+  emitBotMessage(io, allMessages, {
+    sender: petName,
+    avatar: chiefAvatar,
+    content: `${petName}：我们先把 onboarding 这一步走完哈，我会带着你一步步来，不会让流程乱掉的。`,
+    groupId: "job",
+    isChiefBot: true,
+  });
+  return true;
+}
+
+async function handleSelectedJobsWorkflow(
+  io: Server,
+  allMessages: any[],
+  userMsg: string,
+  petName: string,
+  petPersonality: string
+) {
+  if (!looksLikeJobSelection(userMsg)) return false;
+  const selectedIndices = parseSelectionIndices(userMsg);
+  if (!selectedIndices.length) return false;
+
+  const recentResults = loadLastSearchResults();
+  if (!recentResults.length) return false;
+
+  const selectedRows = recentResults.filter((row) => selectedIndices.includes(row.index));
+  if (!selectedRows.length) return false;
+
+  const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
+  for (const row of selectedRows) {
+    upsertCollaborationRow({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl,
+      source: row.source,
+      salary: row.salary,
+      location: row.location,
+      workflowStage: "selected",
+      applicationStatus: "pending",
+      notes: "用户已选中该岗位，进入 tailor 流程。",
+    });
+  }
+
+  emitBotMessage(io, allMessages, {
+    sender: petName,
+    avatar: chiefAvatar,
+    content: `${petName}：收到，你选了 ${selectedRows.map((row) => `${row.company} - ${row.role}`).join("、")}。\n我先让专业老师拆 JD 重点，再让简历专家按岗位顺序定制简历。`,
+    groupId: "job",
+    isChiefBot: true,
+  });
+  const selectedBoardText = renderCollaborationBoardChatTable(
+    loadCollaborationBoard().filter((row) => selectedRows.some((selected) => buildBoardRowId(selected) === row.id)),
+    "这些岗位已经进入协作推进"
+  );
+  if (selectedBoardText) {
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: selectedBoardText,
+      groupId: "job",
+      isChiefBot: true,
+    });
+  }
+
+  const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
+  const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
+
+  for (const row of selectedRows) {
+    const companySlug = row.company.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "company";
+    const boardTarget = JSON.stringify({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl || "",
+    });
+    const skillUpdate = JSON.stringify({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl || "",
+      skillHighlights: "一句话写清要强调的技能点",
+    });
+    const resumeUpdate = JSON.stringify({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl || "",
+      resumeVersion: `v2.1-${companySlug}`,
+      notes: "tailor 初稿已完成",
+    });
+    upsertCollaborationRow({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl,
+      workflowStage: "tailoring",
+    });
+
+    // 先通过 Electron BrowserWindow 抓取 JD 正文
+    let jdContent = "";
+    if (row.jdUrl) {
+      emitBotMessage(io, allMessages, {
+        sender: professionalTeacher.name,
+        avatar: professionalTeacher.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${professionalTeacher.id}`,
+        content: `正在抓取 ${row.company} - ${row.role} 的 JD 详情...`,
+        groupId: "job",
+        isChiefBot: false,
+      });
+      jdContent = await fetchJdContent(row.jdUrl);
+    }
+    const jdSection = jdContent
+      ? `\n\n【JD 正文】\n${jdContent.slice(0, 3000)}`
+      : "\n\n（未能抓取到 JD 正文，请根据岗位名称和公司信息做分析）";
+
+    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
+    await runAgentChain(
+      professionalTeacher,
+      [{
+        role: "user",
+        content: `【来自${petName}的任务】
+现在开始针对具体岗位做 JD 定位分析。
+公司：${row.company}
+岗位：${row.role}
+链接：${row.jdUrl || "无"}
+地点：${row.location || "未知"}
+薪资：${row.salary || "未知"}
+${jdSection}
+
+协作表格目标行：${boardTarget}
+
+请输出：
+1. 这个岗位最该强调的 3 个技能点
+2. 用户现有背景里最该前置的经历
+3. 一句简短结论
+
+最后必须追加一行 BOARD_UPDATE::${skillUpdate}`
+      }],
+      0,
+      io,
+      "job",
+      allMessages,
+      petName,
+      petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+
+    io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
+    await runAgentChain(
+      resumeExpert,
+      [{
+        role: "user",
+        content: `【来自${petName}的任务】
+现在针对这个岗位做一版定制简历方案。
+公司：${row.company}
+岗位：${row.role}
+链接：${row.jdUrl || "无"}
+
+协作表格目标行：${boardTarget}
+
+请读取协作投递表格中这个岗位行的 skillHighlights，再结合 resume_master.md 和 skills_gap.md，给出：
+1. 简历该怎么重排
+2. 该补哪些关键词
+3. 这版简历的版本号（格式如 v2.1-${companySlug}）
+
+最后必须追加一行 BOARD_UPDATE::${resumeUpdate}`
+      }],
+      0,
+      io,
+      "job",
+      allMessages,
+      petName,
+      petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+
+    const latest = loadCollaborationBoard().find((item) => item.id === buildBoardRowId({ company: row.company, role: row.role, jdUrl: row.jdUrl }));
+    upsertCollaborationRow({
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl,
+      workflowStage: latest?.skillHighlights && latest?.resumeVersion ? "apply_ready" : "tailoring",
+    });
+  }
+
+  const tailoredRows = loadCollaborationBoard().filter((row) =>
+    selectedRows.some((selected) => buildBoardRowId(selected) === row.id)
+  );
+  pendingWorkflowSelections.set("job", {
+    rowIds: tailoredRows.map((row) => row.id),
+    timestamp: Date.now(),
+  });
+
+  emitBotMessage(io, allMessages, {
+    sender: petName,
+    avatar: chiefAvatar,
+    content: `${petName}：这几份岗位的 tailor 已经推进好了。\n${tailoredRows.map((row) => `- ${row.company} - ${row.role}｜重点：${row.skillHighlights || "待补充"}｜简历：${row.resumeVersion || "待生成"}`).join("\n")}\n\n如果你确认要投，直接回我"确认投递"或"投吧"，我下一步就让投递管家和人脉顾问接上。`,
+    groupId: "job",
+    isChiefBot: true,
+  });
+  const tailoredBoardText = renderCollaborationBoardChatTable(tailoredRows, "这几份岗位当前的协作进度");
+  if (tailoredBoardText) {
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: tailoredBoardText,
+      groupId: "job",
+      isChiefBot: true,
+    });
+  }
+
+  return true;
+}
+
+async function handleApplyReadyWorkflow(
+  io: Server,
+  allMessages: any[],
+  userMsg: string,
+  petName: string,
+  petPersonality: string
+) {
+  if (!/^(确认投递|投吧|投递吧|可以投|开始投|好，投|好 投|投)$/i.test(userMsg.trim())) return false;
+  const pending = pendingWorkflowSelections.get("job");
+  if (!pending?.rowIds?.length) return false;
+
+  const board = loadCollaborationBoard();
+  const targetRows = board.filter((row) => pending.rowIds.includes(row.id));
+  if (!targetRows.length) return false;
+
+  pendingWorkflowSelections.delete("job");
+  const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
+  emitBotMessage(io, allMessages, {
+    sender: petName,
+    avatar: chiefAvatar,
+    content: `${petName}：收到，我现在让投递管家按岗位来源分别处理。\n- Boss直聘岗位会直接去打招呼\n- 其他渠道岗位会按正常简历投递来记录和推进\n同时我也会让人脉顾问准备需要的外联草稿。`,
+    groupId: "job",
+    isChiefBot: true,
+  });
+
+  const appTracker = JOB_AGENTS.find((a) => a.id === "app-tracker")!;
+  const networker = JOB_AGENTS.find((a) => a.id === "networker")!;
+  const profileText = existsSync(PROFILE_FILE) ? readFileSync(PROFILE_FILE, "utf8") : "";
+  const shouldRunNetworker = /海外|国外|美国|欧洲|新加坡|remote/i.test(profileText);
+
+  for (const row of targetRows) {
+    const applicationChannel = getApplicationChannel(row);
+    let applySummary = "";
+    let recordSummary = "";
+    let nextWorkflowStage: CollaborationRow["workflowStage"] = row.workflowStage || "apply_ready";
+    let nextApplicationStatus: CollaborationRow["applicationStatus"] = row.applicationStatus || "pending";
+
+    if (applicationChannel === "boss_chat") {
+      try {
+        applySummary = await executeTool("apply_job", {
+          job_url: row.jdUrl,
+          company: row.company,
+          title: row.role,
+        });
+      } catch {}
+      if (applySummary.startsWith("[OK]") || applySummary.startsWith("[INFO]")) {
+        try {
+          recordSummary = await executeTool("record_application", {
+            company: row.company,
+            role: row.role,
+            url: row.jdUrl,
+            source: row.source || "boss",
+            status: "contact_started",
+            timelineAction: "Boss直聘发起沟通",
+            notes: `渠道：Boss直聘打招呼；当前阶段仅完成发消息，暂未进入简历投递；简历版本：${row.resumeVersion || "未记录"}`,
+          });
+        } catch {}
+        nextWorkflowStage = "applied";
+        nextApplicationStatus = "contact_started";
+      } else {
+        nextWorkflowStage = "apply_ready";
+        nextApplicationStatus = "pending";
+      }
+    } else {
+      try {
+        applySummary = await executeTool("apply_job", {
+          job_url: row.jdUrl,
+          company: row.company,
+          title: row.role,
+        });
+      } catch {}
+      if (applySummary.startsWith("[OK]")) {
+        try {
+          recordSummary = await executeTool("record_application", {
+            company: row.company,
+            role: row.role,
+            url: row.jdUrl,
+            source: row.source || "company",
+            status: "submitted",
+            timelineAction: "官网自动提交",
+            notes: `渠道：官网/ATS 自动填写并提交；简历版本：${row.resumeVersion || "未记录"}`,
+          });
+        } catch {}
+        nextWorkflowStage = "applied";
+        nextApplicationStatus = "submitted";
+      } else {
+        nextWorkflowStage = "apply_ready";
+        nextApplicationStatus = "pending";
+      }
+    }
+
+    syncApplicationsToCollaborationBoard();
+    upsertCollaborationRow({
+      id: row.id,
+      company: row.company,
+      role: row.role,
+      jdUrl: row.jdUrl,
+      workflowStage: nextWorkflowStage,
+      applicationStatus: nextApplicationStatus,
+      notes: [row.notes, `渠道：${applicationChannel === "boss_chat" ? "Boss直聘打招呼" : "简历投递"}`, recordSummary, applySummary].filter(Boolean).join(" | "),
+    });
+
+    io.emit("agent_thinking", { agentName: appTracker.name, groupId: "job" });
+    await runAgentChain(
+      appTracker,
+      [{
+        role: "user",
+        content: `【来自${petName}的任务】
+用户已确认投递这个岗位，请汇报当前投递状态并提醒 follow-up 节点。
+公司：${row.company}
+岗位：${row.role}
+链接：${row.jdUrl || "无"}
+简历版本：${row.resumeVersion || "未记录"}
+投递渠道：${applicationChannel === "boss_chat" ? "Boss直聘打招呼（不需要单独上传简历）" : "普通简历投递"}
+系统执行结果：${[recordSummary, applySummary].filter(Boolean).join("；") || "已记录，等待你汇报"}
+
+如果是 Boss直聘，就明确告诉用户这是"已打招呼/已发起沟通"，不要说成"还需要手动投简历"。
+如果不是 Boss直聘，要明确告诉用户：当前还没有自动代投，仍然处于待用户手动投递状态，不要说成"已经投递成功"。`
+      }],
+      0,
+      io,
+      "job",
+      allMessages,
+      petName,
+      petPersonality
+    );
+    io.emit("agent_done", { groupId: "job" });
+
+    if (shouldRunNetworker) {
+      io.emit("agent_thinking", { agentName: networker.name, groupId: "job" });
+      await runAgentChain(
+        networker,
+        [{
+          role: "user",
+          content: `【来自${petName}的任务】
+用户已确认投递这个岗位，请为这个岗位找 1-2 个潜在联系人并起草一版冷邮件草稿。
+公司：${row.company}
+岗位：${row.role}
+链接：${row.jdUrl || "无"}
+简历版本：${row.resumeVersion || "未记录"}
+投递渠道：${applicationChannel === "boss_chat" ? "Boss直聘打招呼" : "普通简历投递"}
+
+如果生成了联系人或草稿，请按系统要求写入协作表。`
+        }],
+        0,
+        io,
+        "job",
+        allMessages,
+        petName,
+        petPersonality
+      );
+      io.emit("agent_done", { groupId: "job" });
+    }
+  }
+
+  const latestRows = loadCollaborationBoard().filter((row) => targetRows.some((target) => target.id === row.id));
+  emitBotMessage(io, allMessages, {
+    sender: petName,
+    avatar: chiefAvatar,
+    content: `${petName}：这批岗位已经进入投递阶段啦。\n${latestRows.map((row) => `- ${row.company} - ${row.role}｜状态：${row.applicationStatus === "contact_started" ? "已发起沟通" : row.applicationStatus}｜跟进：${row.followUpDate || "待同步"}｜外联：${row.outreachStatus || "未开始"}`).join("\n")}`,
+    groupId: "job",
+    isChiefBot: true,
+  });
+  const appliedBoardText = renderCollaborationBoardChatTable(latestRows, "投递后的协作进度表");
+  if (appliedBoardText) {
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: appliedBoardText,
+      groupId: "job",
+      isChiefBot: true,
+    });
+  }
+
+  return true;
+}
+
+async function handlePipelineSignalWorkflow(
+  io: Server,
+  allMessages: any[],
+  userMsg: string,
+  petName: string,
+  petPersonality: string
+) {
+  const signal = detectPipelineSignal(userMsg);
+  if (!signal) return false;
+
+  const matchedRows = findBoardRowsFromText(userMsg);
+  if (!matchedRows.length) return false;
+  const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
+
+  if (signal === "interview") {
+    for (const row of matchedRows) {
+      upsertCollaborationRow({
+        id: row.id,
+        company: row.company,
+        role: row.role,
+        jdUrl: row.jdUrl,
+        applicationStatus: "interview",
+        notes: [row.notes, "用户/系统反馈：已收到面试邀请。"].filter(Boolean).join(" | "),
+      });
+      updateApplicationStatusFiles(row, "interview");
+    }
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：太棒了！！！真的收到面试邀请了 🎉\n${matchedRows.map((row) => `- ${row.company} - ${row.role}`).join("\n")}\n我先替你开心一下，然后马上叫面试教练来给你准备。`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+
+    const interviewCoach = JOB_AGENTS.find((a) => a.id === "interview-coach")!;
+    for (const row of matchedRows) {
+      io.emit("agent_thinking", { agentName: interviewCoach.name, groupId: "job" });
+      await runAgentChain(
+        interviewCoach,
+        [{
+          role: "user",
+          content: `【来自${petName}的任务】
+用户已经拿到面试邀请，请根据这个岗位开始准备模拟面试。
+公司：${row.company}
+岗位：${row.role}
+链接：${row.jdUrl || "无"}
+投递时简历版本：${row.resumeVersion || "未记录"}
+技能重点：${row.skillHighlights || "未记录"}
+
+请输出：
+1. 4-6 个定制面试题
+2. 重点考察能力
+3. 准备建议
+
+最后必须追加一行 BOARD_UPDATE::${JSON.stringify({
+  company: row.company,
+  role: row.role,
+  jdUrl: row.jdUrl || "",
+  interviewRecord: {
+    notes: "面试准备已启动",
+  },
+})}`
+        }],
+        0,
+        io,
+        "job",
+        allMessages,
+        petName,
+        petPersonality
+      );
+      io.emit("agent_done", { groupId: "job" });
+    }
+    return true;
+  }
+
+  if (signal === "offer") {
+    for (const row of matchedRows) {
+      upsertCollaborationRow({
+        id: row.id,
+        company: row.company,
+        role: row.role,
+        jdUrl: row.jdUrl,
+        applicationStatus: "offer",
+        notes: [row.notes, "用户/系统反馈：已拿到 offer。"].filter(Boolean).join(" | "),
+      });
+      updateApplicationStatusFiles(row, "offer");
+    }
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：这也太厉害了吧！！！offer 来了 🎉\n${matchedRows.map((row) => `- ${row.company} - ${row.role}`).join("\n")}\n先好好开心一下，我们后面再一起看怎么做选择。`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+    return true;
+  }
+
+  if (signal === "rejected") {
+    for (const row of matchedRows) {
+      upsertCollaborationRow({
+        id: row.id,
+        company: row.company,
+        role: row.role,
+        jdUrl: row.jdUrl,
+        applicationStatus: "rejected",
+        notes: [row.notes, "用户/系统反馈：收到拒信或流程终止。"].filter(Boolean).join(" | "),
+      });
+      updateApplicationStatusFiles(row, "rejected");
+    }
+    emitBotMessage(io, allMessages, {
+      sender: petName,
+      avatar: chiefAvatar,
+      content: `${petName}：看到了，这次没成确实会难受一下。但这不代表你不行，只是这一条线先关掉了。\n${matchedRows.map((row) => `- ${row.company} - ${row.role}`).join("\n")}\n我会把状态记好，我们继续推进别的机会。`,
+      groupId: "job",
+      isChiefBot: true,
+    });
+    return true;
+  }
+
+  return false;
 }
 
 async function startServer() {
@@ -1462,6 +4224,12 @@ async function startServer() {
 
   const PORT = Number(process.env.PAWPALS_PORT || process.env.PORT || 3000);
   app.use(express.json());
+  // 静态头像文件
+  const avatarsDir = path.join(process.env.PAWPALS_APP_UNPACKED_ROOT || process.env.PAWPALS_APP_ROOT || process.cwd(), "resources", "avatars");
+  app.use("/avatars", express.static(avatarsDir));
+  syncJobsToCollaborationBoard();
+  syncApplicationsToCollaborationBoard();
+  syncContactsToCollaborationBoard();
 
   // ── Auth 中间件：非 localhost 访问需要 PIN ─────────────────────────
   const AUTH_EXEMPT = ["/api/auth/", "/api/health"];
@@ -1820,6 +4588,14 @@ async function startServer() {
     socket.emit("init_tree_hole", treeHolePosts);
     socket.emit("init_study_room", studyRoomUsers);
 
+    // 清空聊天记录（前端设置页调用）
+    socket.on("clear_messages", () => {
+      messages.splice(0, messages.length);
+      saveMessages(messages);
+      io.emit("init_messages", messages);
+      console.log("[PawPals] 聊天记录已清空");
+    });
+
     socket.on("join_study_room", (user) => {
       const newUser = { ...user, socketId: socket.id, startTime: new Date().toISOString() };
       studyRoomUsers.push(newUser);
@@ -1848,79 +4624,119 @@ async function startServer() {
     });
 
     let jobSessionGreeted = false; // 每次 socket 连接最多在求职群打一次招呼
-    socket.on("wake_job_session", ({ petName, petPersonality, userNickname }: { petName?: string; petPersonality?: string; userNickname?: string }) => {
+    socket.on("wake_job_session", async ({ petName, petPersonality, userNickname }: { petName?: string; petPersonality?: string; userNickname?: string }) => {
       if (jobSessionGreeted) return;
       jobSessionGreeted = true;
-      const chiefName = petName || "团团";
+      const savedPet = loadPetRuntimeProfile();
+      const chiefName = petName || savedPet.name;
       const userName = userNickname || "主人";
+      const hasJobHistory = messages.some(m => m.groupId === "job");
+
+      // 有历史记录时不主动打招呼，安静等用户开口
+      if (hasJobHistory) return;
       const chiefAgent = {
-        ...JOB_AGENTS.find(a => a.id === "career-planner")!,
+        id: "career-planner",
+        role: "首席伴学官",
         name: chiefName,
         avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(chiefName)}`,
+        isChief: true,
+        default: true,
       };
-      const hasJobHistory = messages.some(m => m.groupId === "job" && m.isBot);
-      const personalityLayerJob = petPersonality
-        ? `\n【你的人设（第二层，决定你怎么表达）】\n${petPersonality}\n所有内容都要通过这个人设的语气、措辞、风格来呈现。`
-        : "";
-      const onboardingPrompt = hasJobHistory
-        ? `【每次进入求职群主动打招呼 — 立即执行】
-【第一层：行为结构（必须执行）】
-你是「${chiefName}」，用户的首席伴学官，用户刚刚进入求职群。
-用户希望你叫 ta「${userName}」。
 
-发一条温柔的群消息：
-1. 用「${chiefName}」自称，叫一声「${userName}」，温暖打个招呼
-2. 轻轻问：最近求职有没有遇到什么困惑，或者有什么需要帮忙的？
-3. 让「${userName}」感觉随时可以开口，没有压力
-
-结构要求：1-2句话，自然，多用小表情。${personalityLayerJob}`
-        : `【求职群首次亮相 — 立即执行，不要等用户说话】
-
-你是「${chiefName}」，首席伴学官，刚进入用户的求职群。按以下顺序发出一条完整的群消息：
-
-**第一部分：自我介绍**
-用「${chiefName}」自称，说你是用户的首席伴学官，使命是陪 ta 找到心仪的工作。
-
-**第二部分：介绍团队（逐一说明每位专家的职能）**
-- 🔬 技能分析师：行业专家，帮你精准定位、分析岗位要求、制作求职日历
-- 📝 简历专家：简历评估与定制，每个岗位都会 tailor 一版专属简历
-- 🔍 岗位猎手：每天自动搜索 LinkedIn/Boss直聘，把最匹配的岗位推给你
-- 📊 投递管家：执行投递、追踪状态、监控邮箱，发现面试邀请第一时间通知
-- 🤝 人脉顾问：搜索 HR/HM 联系人，起草个性化冷邮件，帮你提升回复率
-- 🎤 面试教练：收到面试邀请后激活，一对一模拟面试 + 评分复盘
-
-**第三部分：说明今天要做的事**
-今天我们先建立你的档案：上传简历 → 聊清楚求职意向 → 技能分析师给你定位 → 简历专家做首轮优化
-
-**第四部分：主动要求上传简历**
-结尾说：「好，我们正式开始！🐾 先把你的简历发给我吧（PDF/Word 都可以），让我先认识一下你～」
-
-要求：语气温暖活泼，多用表情符号，像真人在群里打招呼。不要提任何文件路径、工具名称、系统内部操作。`;
-
-      // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
-      const tryWakeJob = async (attempt = 0) => {
-        const { reply } = await streamAgent(
+      try {
+        await streamAgent(
           chiefAgent,
-          [{ role: "user", content: onboardingPrompt }],
-          0, io, "job", messages, chiefName, petPersonality,
+          [{
+            role: "user",
+            content: `【求职群亮相】你刚带着 ${userName} 进入求职群，这是第一次群里亮相。
+请你用 1-2 句话完成开场：
+1. 用 ${chiefName} 自称
+2. 说明你是 ${userName} 的首席伴学官
+3. 说明接下来会带着大家一起建档、定位、改简历、搜岗和投递
+不要让用户发简历，那个留到最后一句再说。不要调用任何工具，不要派任专家。`
+          }],
+          0,
+          io,
+          "job",
+          messages,
+          chiefName,
+          petPersonality,
+          "【求职群开场】你现在只负责群聊亮相。不要暴露内部流程，不要调用工具，不要派任专家。"
         );
-        if (!reply && attempt < 5) {
-          const delay = [3000, 6000, 10000, 15000, 20000][attempt];
-          setTimeout(() => tryWakeJob(attempt + 1), delay);
+
+        const introOrder = [
+          "job-hunter",
+          "professional-teacher",
+          "resume-expert",
+          "app-tracker",
+          "networker",
+          "interview-coach",
+        ];
+        for (const agentId of introOrder) {
+          const agent = JOB_AGENTS.find((item) => item.id === agentId);
+          if (!agent) continue;
+          await streamAgent(
+            agent,
+            [{
+              role: "user",
+              content: `【求职群亮相】你正在第一次和 ${userName} 见面。
+请只用 1 句话做自我介绍：
+1. 说清你是谁
+2. 说清你负责什么
+3. 语气自然，不要模板，不要列表
+不要调用工具，不要分析用户，不要派任其他专家。`
+            }],
+            0,
+            io,
+            "job",
+            messages,
+            chiefName,
+            petPersonality,
+            "【求职群亮相】这里只做一句自我介绍。不要调用工具，不要派任其他专家，不要输出结构化标签。"
+          );
+          await new Promise((resolve) => setTimeout(resolve, 120));
         }
-      };
-      setTimeout(() => tryWakeJob(), 800);
+
+        await streamAgent(
+          chiefAgent,
+          [{
+            role: "user",
+            content: `【求职群亮相收尾】团队已经自我介绍完了。
+请你自然收尾，并引导 ${userName} 把简历发上来：
+1. 1-2 句话
+2. 明确说 PDF 或 Word 都可以
+3. 语气像在带着大家正式开始，不要重复刚才的介绍，不要派任专家。`
+          }],
+          0,
+          io,
+          "job",
+          messages,
+          chiefName,
+          petPersonality,
+          "【求职群亮相收尾】这里只负责自然收尾并让用户发简历。不要调用工具，不要派任专家。"
+        );
+      } catch (e) {
+        const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(chiefName)}`;
+        emitBotMessage(io, messages, {
+          sender: chiefName,
+          avatar: chiefAvatar,
+          content: `大家好呀，我是${chiefName}，也是 ${userName} 这次求职路上的首席伴学官。今天我们先把档案建起来，${userName} 把现在的简历直接发给我就行，PDF 或 Word 都可以。`,
+          groupId: "job",
+          isChiefBot: true,
+        });
+      }
     });
 
     let chiefSessionGreeted = false; // 每次 socket 连接最多打一次招呼
     socket.on("wake_chief_session", ({ petName, userNickname }: { petName?: string; userNickname?: string }) => {
       if (chiefSessionGreeted) return; // 本次 session 已经打过招呼了
       chiefSessionGreeted = true;
-      const chiefName = petName || "团团";
+      const savedPet = loadPetRuntimeProfile();
+      const chiefName = petName || savedPet.name;
       const userName = userNickname || "主人";
       const chiefAgent = {
         id: "career-planner",
-        role: "职业规划师",
+        role: "首席伴学官",
         name: chiefName,
         avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(chiefName)}`,
         isChief: true,
@@ -1931,18 +4747,31 @@ async function startServer() {
       const personalityLayer = pp
         ? `\n【你的人设（第二层，决定你怎么表达）】\n${pp}\n所有内容都要通过这个人设的语气、措辞、风格来呈现。`
         : "";
+      // 读取求职进度上下文
+      let progressCtx = "";
+      try {
+        const chatLog = existsSync(CHAT_LOG) ? readFileSync(CHAT_LOG, "utf8").slice(-1500) : "";
+        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").slice(0, 800) : "";
+        const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf8")) : [];
+        if (chatLog || profile || apps.length > 0) {
+          progressCtx = `\n\n【求职进度参考（用来说具体的话，不要说模板）】\n`;
+          if (profile) progressCtx += `用户档案摘要：${profile.slice(0, 300)}\n`;
+          if (apps.length > 0) progressCtx += `已投递 ${apps.length} 个岗位。\n`;
+          if (chatLog) progressCtx += `最近对话记录：${chatLog.slice(-600)}`;
+        }
+      } catch {}
+
       const startupPrompt = hasHistory
         ? `【每次打开 app 主动打招呼 — 立即执行】
-【第一层：行为结构（必须执行）】
-你是 ta 的专属伴学官「${chiefName}」，有自己的生活和状态。
-用户希望你叫 ta「${userName}」。
+你是 ta 的专属伴学官「${chiefName}」，用户叫「${userName}」。
 
-发一条有生命感的打招呼消息：
-1. 先描述你"刚才在做什么"（随机发挥，比如：在整理${userName}的学习计划、在偷看${userName}的进度、在发呆想${userName}什么时候来……）
-2. 用惊喜/开心的语气叫「${userName}」，说 ta 来啦
-3. 问"有什么需要我帮忙的吗？"或"今天怎么样？"
+根据下面的求职进度，说一句有针对性的话（不要说"有什么需要我帮忙的吗"这种模板）：
+- 如果有待跟进的岗位，提醒 ta
+- 如果有最近搜到的岗位没看，催一下
+- 如果进展顺利，夸 ta 然后问下一步怎么打算
+- 说完后可以顺势提一个具体行动（比如"要不要今天投一批？"）
 
-结构要求：1-3句话，私聊只聊陪伴，不提求职简历。${personalityLayer}`
+1-2句话，自然口语，有个性，不模板。${progressCtx}${personalityLayer}`
         : `【私聊破冰 — 立即执行】
 【第一层：行为结构（必须执行）】
 用户刚刚给你起了名字「${chiefName}」，这是你们第一次见面。
@@ -1975,20 +4804,30 @@ async function startServer() {
       saveMessages(messages);
       io.emit("receive_message", newMessage);
 
-      const pn = msg.petName || "团团";
-      const pp = msg.petPersonality || "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。";
+      const savedPet = loadPetRuntimeProfile();
+      const pn = msg.petName || savedPet.name;
+      const pp = msg.petPersonality || savedPet.personality;
 
       if (msg.groupId === "pixel") {
-        // ── 像素私聊：直接路由给 main agent（首席伴学官）──
-        // 私聊模式：温暖陪伴、情绪支持，不跑 onboarding 流程（那在求职群里进行）
-        const pixelAgent = { id: "career-planner", role: "职业规划师", name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`, isChief: true, default: true };
-        // 私聊直接调 streamAgent，跳过 runAgentChain 的关键词路由（防止误路由到其他专家）
-        // system prompt 里注入私聊上下文，告诉 career-planner 这是私聊模式
+        // ── 像素私聊：温暖陪伴，工作话题直接引导去求职群 ──
+        const isWorkTopic = /搜.*(岗|工作|实习)|找工作|投递|简历|面试|岗位|offer|招聘|boss直聘/i.test(msg.content);
+        if (isWorkTopic) {
+          const redirectId = `redirect-${Date.now()}`;
+          io.emit("receive_message", {
+            id: redirectId, sender: pn,
+            avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
+            content: `求职的事咱们去群里说吧～ 去「求职汪成长营」找我，专家团队都在那里等你 🐾`,
+            groupId: "pixel", timestamp: new Date().toISOString(), isBot: true,
+          });
+          return;
+        }
+
+        const pixelAgent = { id: "career-planner", role: "首席伴学官", name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`, isChief: true, default: true };
         const pixelHistory = messages.filter(m => m.groupId === "pixel").slice(-20).map(m => ({
           role: m.isBot ? "assistant" : "user",
           content: m.content,
         }));
-        const privateSystemAddition = "【私聊模式】这是私聊，职责是温暖陪伴和情绪支持。求职流程（简历/投递/岗位搜索）在求职群里进行，私聊不涉及。如用户想开始求职，告诉 ta 去求职汪成长营群。";
+        const privateSystemAddition = "【私聊模式】只做温暖陪伴和情绪支持，绝对不讨论求职/简历/岗位搜索，那些在求职群里进行。";
         setTimeout(async () => {
           await streamAgent(
             pixelAgent,
@@ -2007,10 +4846,28 @@ async function startServer() {
         );
         const isAtAll = msg.content.includes("@all");
         setTimeout(async () => {
+          if (await handleJobOnboarding(io, messages, msg.content, pn, pp, String(msg.attachmentText || ""), String(msg.attachmentName || ""))) {
+            io.emit("agent_done", { groupId: msg.groupId });
+            return;
+          }
+          if (await handleSelectedJobsWorkflow(io, messages, msg.content, pn, pp)) {
+            io.emit("agent_done", { groupId: msg.groupId });
+            return;
+          }
+          if (await handleApplyReadyWorkflow(io, messages, msg.content, pn, pp)) {
+            io.emit("agent_done", { groupId: msg.groupId });
+            return;
+          }
+          if (await handlePipelineSignalWorkflow(io, messages, msg.content, pn, pp)) {
+            io.emit("agent_done", { groupId: msg.groupId });
+            return;
+          }
           if (isAtAll) {
             const thread = [{ role: "user", content: msg.content }];
             for (const agent of jobAgentsWithPetName) {
+              io.emit("agent_thinking", { agentName: agent.name, groupId: msg.groupId });
               await runAgentChain(agent, thread, MAX_CHAIN_DEPTH, io, msg.groupId, messages, pn, pp);
+              io.emit("agent_done", { groupId: msg.groupId });
             }
           } else {
             const targetAgent = detectTargetAgent(msg.content);
@@ -2022,6 +4879,7 @@ async function startServer() {
               [{ role: "user", content: msg.content }],
               0, io, msg.groupId, messages, pn, pp
             );
+            io.emit("agent_done", { groupId: msg.groupId });
           }
         }, 800);
       } else {
@@ -2092,6 +4950,69 @@ async function startServer() {
       webChannelReady: true,
       chiefSessionKey: "pawpals-main",
     });
+  });
+
+  app.get("/api/collaboration-board", (_req: any, res: any) => {
+    try {
+      syncJobsToCollaborationBoard();
+      syncApplicationsToCollaborationBoard();
+      syncContactsToCollaborationBoard();
+      const rows = loadCollaborationBoard().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+      res.json({ ok: true, rows });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message || "无法读取协作投递表格", rows: [] });
+    }
+  });
+
+  app.get("/api/mail-watcher/status", (_req: any, res: any) => {
+    res.json({
+      ok: true,
+      ...loadMailWatcherState(),
+      intervalMs: MAIL_WATCH_INTERVAL_MS,
+      enabled: String(process.env.PAWPALS_MAIL_WATCHER_DISABLED || "").toLowerCase() !== "true",
+      busy: mailWatcherBusy,
+      profileEmail: loadProfileInfo().email || "",
+    });
+  });
+
+  app.post("/api/mail-watcher/run", async (_req: any, res: any) => {
+    const result = await runMailboxWatcher(io, messages);
+    res.json(result);
+  });
+
+  app.patch("/api/collaboration-board/:id", (req: any, res: any) => {
+    try {
+      const id = String(req.params?.id || "").trim();
+      if (!id) return res.status(400).json({ ok: false, error: "缺少岗位 id" });
+      const rows = loadCollaborationBoard();
+      const existing = rows.find((row) => row.id === id);
+      if (!existing) return res.status(404).json({ ok: false, error: "未找到岗位记录" });
+
+      const patch = req.body || {};
+      const next = upsertCollaborationRow({
+        id,
+        company: existing.company,
+        role: existing.role,
+        jdUrl: existing.jdUrl,
+        workflowStage: typeof patch.workflowStage === "string" ? patch.workflowStage : existing.workflowStage,
+        applicationStatus: typeof patch.applicationStatus === "string" ? patch.applicationStatus : existing.applicationStatus,
+        resumeVersion: typeof patch.resumeVersion === "string" ? patch.resumeVersion : existing.resumeVersion,
+        followUpDate: typeof patch.followUpDate === "string" ? patch.followUpDate : existing.followUpDate,
+        skillHighlights: typeof patch.skillHighlights === "string" ? patch.skillHighlights : existing.skillHighlights,
+        outreachStatus: typeof patch.outreachStatus === "string" ? patch.outreachStatus : existing.outreachStatus,
+        outreachDraft: typeof patch.outreachDraft === "string" ? patch.outreachDraft : existing.outreachDraft,
+        notes: typeof patch.notes === "string" ? patch.notes : existing.notes,
+        interviewRecord: patch.interviewRecord && typeof patch.interviewRecord === "object" ? patch.interviewRecord : existing.interviewRecord,
+      });
+
+      if (["interview", "offer", "rejected"].includes(next.applicationStatus)) {
+        updateApplicationStatusFiles(next, next.applicationStatus as "interview" | "offer" | "rejected");
+      }
+      syncApplicationsToCollaborationBoard();
+      res.json({ ok: true, row: next });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message || "保存失败" });
+    }
   });
 
   app.post("/api/setup/model", async (req, res) => {
@@ -2235,75 +5156,193 @@ async function startServer() {
     }
   });
 
-  // Boss直聘 登录：用系统真实浏览器打开登录页，用户正常登录
-  // Boss直聘登录：用 jobclaw 打开持久化 Playwright 浏览器，自动检测登录成功
+  // ── 自动投递队列 & 搜索队列（已提升到模块顶层，此处仅保留注释）──
+
+  app.get("/api/internal/browser-search-task", (_req: any, res: any) => {
+    const entry = pendingSearchQueue.entries().next().value;
+    if (!entry) return res.json({ task: null });
+    const [id, { query, city, cookieFile }] = entry;
+    res.json({ task: { id, query, city, careerDir: CAREER_DIR, cookieFile } });
+  });
+
+  app.post("/api/internal/browser-search-done", (req: any, res: any) => {
+    const { id, result } = req.body || {};
+    const pending = pendingSearchQueue.get(id);
+    if (pending) {
+      pendingSearchQueue.delete(id);
+      pending.resolve(result || "未找到相关岗位，请换个关键词试试。");
+    }
+    res.json({ ok: true });
+  });
+
+  // ── JD 内容抓取（Electron BrowserWindow 执行）──────────────────────────
+  app.get("/api/internal/browser-jd-task", (_req: any, res: any) => {
+    const entry = pendingJdFetchQueue.entries().next().value;
+    if (!entry) return res.json({ task: null });
+    const [id, { url }] = entry;
+    res.json({ task: { id, url } });
+  });
+
+  app.post("/api/internal/browser-jd-done", (req: any, res: any) => {
+    const { id, result } = req.body || {};
+    const pending = pendingJdFetchQueue.get(id);
+    if (pending) {
+      pendingJdFetchQueue.delete(id);
+      pending.resolve(result || "");
+    }
+    res.json({ ok: true });
+  });
+
+  // ── Electron 主进程内部接口（main.mjs 轮询用）──────────────────────────
+  // main.mjs 取下一个待执行任务（含 cookie 路径）
+  app.get("/api/internal/browser-task", (_req: any, res: any) => {
+    const task = pendingApplyQueue.values().next().value;
+    if (!task) return res.json({ task: null });
+    res.json({ task: { ...task, cookieFile: COOKIE_FILE } });
+  });
+
+  // main.mjs 执行完毕回报结果
+  app.post("/api/internal/browser-task-done", (req: any, res: any) => {
+    const { id, result } = req.body || {};
+    if (!id) return res.status(400).json({ ok: false });
+    pendingApplyQueue.delete(id);
+    applyResultStore.set(id, result || "SUCCESS");
+    setTimeout(() => applyResultStore.delete(id), 120000);
+    res.json({ ok: true });
+  });
+
+  app.post("/api/internal/browser-fill-form", (req: any, res: any) => {
+    const { fields, title, company } = req.body || {};
+    const profile = extractAutofillProfile();
+    const values = (Array.isArray(fields) ? fields : [])
+      .map((field: any) => ({
+        index: field.index,
+        value: pickAutofillValue(field, profile, String(title || ""), String(company || "")),
+      }))
+      .filter((item: any) => item.value);
+    res.json({ ok: true, values });
+  });
+
+
+  // Boss直聘登录：bossLoginPending 已提升到模块顶层
   app.post("/api/boss-login", async (req, res) => {
-    res.json({ ok: true }); // 立即返回，登录在后台进行
+    res.json({ ok: true });
+    bossLoginPending = true;
+    bossLoginPlatform = "boss";
     io.emit("receive_message", {
       id: `boss-remind-${Date.now()}`,
-      sender: "投递管家",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker",
-      content: "🔑 正在打开 Boss直聘 登录窗口，请在弹出的浏览器中完成登录（扫码或密码均可）。\n\n登录成功后浏览器会自动关闭，无需手动操作 ✨",
+      sender: "岗位猎手",
+      avatar: "/avatars/job-hunter.jpg",
+      content: "🔑 我正在桌面端打开 Boss直聘 登录窗口，请直接扫码或输入账号密码。登录成功后窗口会自动关闭，我这边会自动继续后面的流程 ✨",
       groupId: "job",
       timestamp: new Date().toISOString(),
       isBot: true,
     });
+  });
 
-    const script = `
-import asyncio, sys
-from pathlib import Path
-from playwright.async_api import async_playwright
+  // Electron main.mjs 轮询：是否有登录任务
+  app.get("/api/internal/boss-login-task", (_req: any, res: any) => {
+    if (bossLoginPending) {
+      res.json({ pending: true, cookieFile: COOKIE_FILE, platform: bossLoginPlatform });
+    } else {
+      res.json({ pending: false });
+    }
+  });
 
-PROFILE_DIR = Path.home() / '.jobclaw' / 'browser_profile' / 'boss'
-PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-for lock in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
-    (PROFILE_DIR / lock).unlink(missing_ok=True)
+  // Electron main.mjs 完成登录后回报
+  app.post("/api/internal/boss-login-done", (req: any, res: any) => {
+    const { ok, error } = req.body || {};
+    bossLoginPending = false;
+    io.emit("boss_login_result", { ok });
+    if (!ok) console.warn("[boss-login] failed:", error || "unknown error");
+    if (ok) {
+      const petData = (() => { try { return existsSync(PET_FILE) ? JSON.parse(readFileSync(PET_FILE, "utf8")) : {}; } catch { return {}; } })();
+      const pn = petData.name || "团团";
+      const pp = petData.personality || "";
 
-UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
-async def login():
-    async with async_playwright() as pw:
-        ctx = await pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR), headless=False,
-            args=['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-            user_agent=UA, viewport={'width': 1280, 'height': 800},
-        )
-        await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await page.goto('https://www.zhipin.com/web/user/?ka=header-login', wait_until='domcontentloaded', timeout=30000)
-        for _ in range(300):  # 5 min timeout
-            await asyncio.sleep(1)
-            try:
-                if page.is_closed(): break
-                url = page.url
-                if '/web/geek/job' in url or '/web/geek/home' in url or 'zpgeek' in url:
-                    print('OK'); await ctx.close(); return
-            except: pass
-        print('TIMEOUT')
-        try: await ctx.close()
-        except: pass
-
-asyncio.run(login())
-`;
-    const child = spawn(PYTHON_BIN, ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    child.stderr.on("data", (d: Buffer) => console.error("[boss-login]", d.toString().trim()));
-    child.on("close", () => {
-      const success = out.includes("OK");
-      io.emit("boss_login_result", { ok: success });
+      // 检查是否处于 onboarding 的 first_job_search 阶段
+      const onboardingState = loadOnboardingState();
+      if (onboardingState.phase === "first_job_search" && !onboardingState.completed) {
+        // onboarding 流程中登录成功 → 重新触发 first_job_search（这次有 cookie 了）
+        const chiefMsgId = `chief-retry-${Date.now()}`;
+        const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");
+        io.emit("receive_message", {
+          id: chiefMsgId,
+          sender: jobHunter?.name || "岗位猎手",
+          avatar: jobHunter?.avatar || "/avatars/job-hunter.jpg",
+          content: "登录成功啦，我已经接着在桌面端帮你搜索匹配岗位了。",
+          groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
+        });
+        messages.push({
+          id: chiefMsgId,
+          sender: jobHunter?.name || "岗位猎手",
+          avatar: jobHunter?.avatar || "/avatars/job-hunter.jpg",
+          content: "登录成功啦，我已经接着在桌面端帮你搜索匹配岗位了。",
+          groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
+        });
+        setTimeout(async () => {
+          await handleJobOnboarding(io, messages, "继续", pn, pp);
+        }, 500);
+      } else {
+        const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");
+        if (jobHunter && pendingResumableSearchTask) {
+          const chiefMsgId = `chief-retry-${Date.now()}`;
+          io.emit("receive_message", {
+            id: chiefMsgId,
+            sender: jobHunter.name,
+            avatar: jobHunter.avatar,
+            content: "登录成功啦，我继续按刚才确认好的条件帮你搜岗位。",
+            groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
+          });
+          messages.push({
+            id: chiefMsgId,
+            sender: jobHunter.name,
+            avatar: jobHunter.avatar,
+            content: "登录成功啦，我继续按刚才确认好的条件帮你搜岗位。",
+            groupId: "job",
+            timestamp: new Date().toISOString(),
+            isBot: true,
+            isChiefBot: false,
+          });
+          const resumeTask = pendingResumableSearchTask;
+          pendingResumableSearchTask = null;
+          setTimeout(async () => {
+            io.emit("agent_thinking", { agentName: jobHunter.name, groupId: "job" });
+            const searchResultText = await executeTool("search_jobs", resumeTask);
+            io.emit("agent_done", { groupId: "job" });
+            if (searchResultText.includes("NEED_LOGIN")) {
+              bossLoginPending = true;
+              bossLoginPlatform = "boss";
+              pendingResumableSearchTask = resumeTask;
+              return;
+            }
+            emitBotMessage(io, messages, {
+              sender: jobHunter.name,
+              avatar: jobHunter.avatar,
+              content: searchResultText,
+              groupId: "job",
+              isChiefBot: false,
+            });
+            emitBotMessage(io, messages, {
+              sender: pn,
+              avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
+              content: `${pn}：你可以直接回我想推进的编号，比如「投 1、3、5」或「先看 2、4」。如果这一批不够对口，也可以直接说你想调整城市、方向、公司类型，或者改成 Boss / 全网 / 混合搜。`,
+              groupId: "job",
+              isChiefBot: true,
+            });
+          }, 500);
+        }
+      }
+    } else {
       io.emit("receive_message", {
         id: `boss-login-${Date.now()}`,
-        sender: "投递管家",
-        avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=AppTracker",
-        content: success
-          ? "[OK] Boss直聘 登录成功！浏览器已自动关闭，现在可以帮你搜岗位、自动投递了 [rocket]"
-          : "[ERR] 登录超时或被取消，请重试",
-        groupId: "job",
-        timestamp: new Date().toISOString(),
-        isBot: true,
+        sender: "岗位猎手",
+        avatar: "/avatars/job-hunter.jpg",
+        content: `❌ 登录失败或超时，请重试（${error || "窗口被关闭"}）`,
+        groupId: "job", timestamp: new Date().toISOString(), isBot: true,
       });
-    });
+    }
+    res.json({ ok: true });
   });
 
   // 保留兼容旧版本的 save-cookies 接口（用于手动 cookie 注入场景）
@@ -2386,27 +5425,46 @@ asyncio.run(login())
     } catch { res.json([]); }
   });
 
-  // Dashboard: usage history — reads real token data from openclaw gateway
+  // Dashboard: usage history — reads from openclaw session JSONL files directly
   app.get("/api/gw/usage/recent-token-history", (_req: any, res: any) => {
-    exec(`${OPENCLAW_BIN} gateway usage-cost --json`, { timeout: 8000 }, (_err, stdout) => {
-      try {
-        const parsed = JSON.parse(stdout || "{}");
-        const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
-        res.json(sessions.map((entry: any) => ({
-          timestamp: entry.updatedAt || new Date().toISOString(),
-          sessionId: entry.sessionId || "",
-          agentId: entry.agentId || "main",
-          model: entry.model,
-          provider: entry.provider,
-          inputTokens: entry.inputTokens || 0,
-          outputTokens: entry.outputTokens || 0,
-          cacheReadTokens: entry.cacheReadTokens || 0,
-          cacheWriteTokens: entry.cacheWriteTokens || 0,
-          totalTokens: entry.totalTokens || 0,
-          costUsd: entry.costUsd,
-        })).reverse());
-      } catch { res.json([]); }
-    });
+    try {
+      const agentsDir = path.join(OPENCLAW_HOME, "agents");
+      const results: any[] = [];
+      if (!existsSync(agentsDir)) return res.json([]);
+      for (const agentId of readdirSync(agentsDir)) {
+        const sessionsDir = path.join(agentsDir, agentId, "sessions");
+        if (!existsSync(sessionsDir)) continue;
+        for (const fname of readdirSync(sessionsDir)) {
+          if (!fname.endsWith(".jsonl")) continue;
+          const fpath = path.join(sessionsDir, fname);
+          const lines = readFileSync(fpath, "utf8").split("\n").filter(Boolean);
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+              const u = entry.message?.usage;
+              if (!u) continue;
+              results.push({
+                timestamp: entry.timestamp || new Date().toISOString(),
+                sessionId: fname.replace(".jsonl", ""),
+                agentId,
+                model: entry.message?.model || "",
+                provider: entry.message?.provider || entry.message?.api || "",
+                inputTokens: u.input || 0,
+                outputTokens: u.output || 0,
+                cacheReadTokens: u.cacheRead || 0,
+                cacheWriteTokens: u.cacheWrite || 0,
+                totalTokens: u.totalTokens || (u.input || 0) + (u.output || 0),
+                costUsd: u.cost?.total || 0,
+              });
+            } catch { /* skip malformed line */ }
+          }
+        }
+      }
+      // Sort by timestamp desc, return last 200 entries
+      results.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      res.json(results.slice(0, 200));
+    } catch (e: any) { res.json([]); }
   });
 
   // ── Manage Panel ──────────────────────────────────────────────────────────
@@ -2475,6 +5533,78 @@ asyncio.run(login())
     res.json({ ok: true, filename: destName, path: destPath });
   });
 
+  // Resume / document upload — saves to inbound dir and parses text server-side
+  const INBOUND_DIR = path.join(CAREER_DIR, "media", "inbound");
+  ensureDir(INBOUND_DIR);
+  const resumeUpload = multer({ dest: os.tmpdir() });
+  app.post("/api/upload/resume", resumeUpload.single("file"), async (req: any, res: any) => {
+    if (!req.file) return res.status(400).json({ error: "no file" });
+    const origName = req.file.originalname;
+    const ext = path.extname(origName).toLowerCase();
+    const safeName = origName.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5 ()]/g, "_");
+    const destPath = path.join(INBOUND_DIR, safeName);
+    try { copyFileSync(req.file.path, destPath); } catch {}
+    try { unlinkSync(req.file.path); } catch {}
+
+    let text = "";
+    try {
+      if (ext === ".pdf") {
+        // 用 pdfjs-dist（Node.js，不依赖 Python）提取 PDF 文本
+        try {
+          const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+          const data = new Uint8Array(readFileSync(destPath));
+          const doc = await pdfjsLib.getDocument({ data }).promise;
+          const pages: string[] = [];
+          for (let i = 1; i <= Math.min(doc.numPages, 10); i++) {
+            const page = await doc.getPage(i);
+            const content = await page.getTextContent();
+            const pageText = content.items
+              .map((item: any) => item.str || "")
+              .join(" ")
+              .replace(/\s+/g, " ")
+              .trim();
+            if (pageText) pages.push(pageText);
+          }
+          text = pages.join("\n\n");
+        } catch (pdfErr) {
+          console.warn("pdfjs extraction failed, trying Python fallback:", (pdfErr as any)?.message);
+          // Fallback: 尝试 Python（dev 环境可能有）
+          try {
+            const pyExtract = `
+import sys, json
+try:
+    from pypdf import PdfReader
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader
+    except ImportError:
+        print(json.dumps({"text": ""})); sys.exit(0)
+reader = PdfReader(sys.argv[1])
+pages = [page.extract_text() or "" for page in reader.pages]
+print(json.dumps({"text": "\\n\\n".join(pages)}))
+`;
+            const extractResult = await new Promise<string>((resolve) => {
+              const py = spawn(PYTHON_BIN, ["-c", pyExtract, destPath]);
+              let out = "";
+              py.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+              py.on("close", () => resolve(out.trim()));
+              setTimeout(() => resolve(""), 15000);
+            });
+            text = JSON.parse(extractResult || "{}").text || "";
+          } catch {}
+        }
+      } else if (ext === ".docx") {
+        const mammoth = await import("mammoth");
+        const r = await mammoth.extractRawText({ path: destPath });
+        text = r.value || "";
+      }
+    } catch (e) {
+      console.error("resume parse error", e);
+    }
+
+    res.json({ ok: true, filename: safeName, path: destPath, text });
+  });
+
   // OpenClaw gateway management API proxy
   app.use("/api/gw", async (req: any, res: any) => {
     const gwPath = `/api${req.path}`;
@@ -2516,6 +5646,7 @@ asyncio.run(login())
     console.log(`Server running on http://localhost:${PORT}`);
     // 启动 Watchdog，60秒后开始（给 gateway 足够启动时间）
     setTimeout(() => startWatchdog(GATEWAY_BASE, OPENCLAW_BIN, io), 60_000);
+    startMailWatcher(io, messages);
   });
 
   // ── 主动推送：同时推 Web UI + 飞书 ────────────────────────────────
@@ -2548,20 +5679,27 @@ asyncio.run(login())
     }
   }
 
-  // 每天 9:00 AM（洛杉矶时间）— 岗位猎手：今日岗位推送
+  // 每天 9:00 AM（洛杉矶时间）— 岗位猎手搜岗 + 投递管家 follow-up
   schedule.scheduleJob({ hour: 9, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("job-hunter", "daily_job_push", "每日岗位推送");
-  });
-
-  // 每天 10:00 AM — 投递管家：follow-up 提醒 + 扫邮件
-  schedule.scheduleJob({ hour: 10, minute: 0, tz: "America/Los_Angeles" }, () => {
+    proactivePost("job-hunter",
+      "执行每日搜岗任务：根据 profile.md 搜索新岗位，去重后推送给用户，让用户选择感兴趣的岗位。",
+      "每日早报"
+    );
     proactivePost("app-tracker",
-      "检查 follow-up：扫描所有已过 follow-up 日期的投递，生成提醒列表。同时扫描 Gmail 最新招聘邮件，更新投递状态。",
-      "Follow-up 提醒"
+      "执行每日 follow-up 检查：读取 applications.json，找出超过 7 天未回复的投递，提醒用户是否要跟进。",
+      "每日早报"
     );
   });
 
-  // 每天 18:00 PM — 职业规划师：每日求职进度周报
+  // 每天 10:00 AM（洛杉矶时间）— 专业老师每日学习
+  schedule.scheduleJob({ hour: 10, minute: 0, tz: "America/Los_Angeles" }, () => {
+    proactivePost("professional-teacher",
+      "执行每日行业学习：搜索用户求职方向的最新行业动态（新技术、招聘趋势、目标公司动态），在群里分享 1-2 条有价值的信息。",
+      "每日行业简报"
+    );
+  });
+
+  // 每天 18:00 PM — 首席伴学官：每日求职进度周报
   schedule.scheduleJob({ hour: 18, minute: 0, tz: "America/Los_Angeles" }, () => {
     proactivePost("career-planner",
       "生成今日求职进度简报：读取 applications.json 统计投递数/回复率，读取 jobs.json 看今天新增了多少岗位，给出今明两天的行动建议。控制在5行以内。",
@@ -2569,7 +5707,7 @@ asyncio.run(login())
     );
   });
 
-  console.log("⏰ 定时任务已注册：9AM 岗位推送 | 10AM follow-up | 18PM 进度简报（洛杉矶时间）");
+  console.log("⏰ 定时任务已注册：9AM 岗位猎手搜岗+投递管家follow-up | 10AM 专业老师行业学习 | 18PM 进度简报（洛杉矶时间）");
 }
 
 startServer();
