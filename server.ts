@@ -924,7 +924,7 @@ async function generateSearchQueryAndCity(input: {
   const fallbackQueryBase =
     (input.fallbackRole || "").trim() ||
     (input.inferredRoles?.find(Boolean) || "").trim() ||
-    "产品经理";
+    "";
   const fallbackQuery = `${fallbackQueryBase}${/实习/.test(input.jobType || "") && !/实习/.test(fallbackQueryBase) ? " 实习" : ""}`.trim();
 
   let query = fallbackQuery;
@@ -955,7 +955,7 @@ async function generateSearchQueryAndCity(input: {
         }],
         max_tokens: 120,
       }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(20000),
     });
     const qData = await queryRes.json() as any;
     const qText = qData.choices?.[0]?.message?.content || "";
