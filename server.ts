@@ -3240,7 +3240,7 @@ async function handleJobOnboarding(
     state.currentStep = "target_role";
     const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
     saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     emitBotMessage(io, allMessages, {
       sender: petName,
@@ -3265,7 +3265,7 @@ async function handleJobOnboarding(
     io.emit("agent_done", { groupId: "job" });
     if (!parseResult.ok) {
       state.lastError = "简历基础解析超时或失败";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       emitBotMessage(io, allMessages, {
         sender: petName,
         avatar: chiefAvatar,
@@ -3276,7 +3276,7 @@ async function handleJobOnboarding(
       return true;
     }
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     // 简历解析后，让 career-planner agent 自然地开始第一个画像问题
     const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
@@ -3303,7 +3303,7 @@ async function handleJobOnboarding(
     if (reply) {
       // NEEDS_CLARIFICATION: agent 判断用户没提供新信息，不更新 slot
       if (reply.includes("NEEDS_CLARIFICATION")) {
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
         return true;
       }
 
@@ -3332,7 +3332,7 @@ async function handleJobOnboarding(
         state.currentStep = null;
         state.phase = "profile_confirm";
         persistProfileFromOnboarding(state);
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
 
         // 发一条 profile_card 类型的消息
         const cardMsg = {
@@ -3351,7 +3351,7 @@ async function handleJobOnboarding(
         io.emit("receive_message", cardMsg);
       } else {
         state.currentStep = nextStep;
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
       }
     }
     return true;
@@ -3374,7 +3374,7 @@ async function handleJobOnboarding(
   if (state.phase === "professional_positioning") {
     state.transitionInFlight = true;
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
     io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
@@ -3392,7 +3392,7 @@ async function handleJobOnboarding(
     state.transitionInFlight = false;
     if (!positioningResult.ok || !existsSync(SKILLS_GAP_FILE)) {
       state.lastError = "专业定位分析未成功写入 skills_gap.md";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       emitBotMessage(io, allMessages, {
         sender: petName,
         avatar: chiefAvatar,
@@ -3405,7 +3405,7 @@ async function handleJobOnboarding(
 
     state.phase = "resume_diagnosis";
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
     const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
     await streamAgent(
       chiefAgent,
@@ -3420,7 +3420,7 @@ async function handleJobOnboarding(
   if (state.phase === "resume_diagnosis") {
     state.transitionInFlight = true;
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     // 专业老师：从定位角度做首轮简历建议。
     // 简历专家已经在简历上传时做过基础解析，这一阶段先不再串行跑一遍，避免 onboarding 过慢。
@@ -3438,7 +3438,7 @@ async function handleJobOnboarding(
     state.phase = "resume_review";
     state.lastError = "";
     state.transitionInFlight = false;
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     const careerPlannerForReview = JOB_AGENTS.find(a => a.id === "career-planner")!;
     await streamAgent(
@@ -3458,7 +3458,7 @@ async function handleJobOnboarding(
     if (wantsToSearch) {
       state.phase = "search_strategy";
       state.lastError = "";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
       await streamAgent(
         chiefForHandoff,
@@ -3482,7 +3482,7 @@ async function handleJobOnboarding(
 
       state.phase = "search_strategy";
       state.lastError = "";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
       await streamAgent(
         chiefForHandoff,
@@ -3512,7 +3512,7 @@ async function handleJobOnboarding(
     if (!userMsg.trim()) {
       const defaults = getDefaultSearchStrategy(state);
       applySearchStrategyUpdate(state, defaults);
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       await streamAgent(
         careerPlannerForStrategy,
         [{ role: "user", content: "用户画像和简历优化建议都完成了，现在需要确认搜索策略再开始搜岗位。" }],
@@ -3546,10 +3546,10 @@ async function handleJobOnboarding(
         }
         state.phase = "first_job_search";
         state.lastError = "";
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
         scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
       } else {
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
       }
     }
     return true;
@@ -3558,7 +3558,7 @@ async function handleJobOnboarding(
   if (state.phase === "first_job_search") {
     state.transitionInFlight = true;
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
 
     // ── 从 profile.md 读取真实求职意向，构造搜索参数 ──────────────────
     const prefs = buildSearchPreferencesFromOnboarding(state);
@@ -3612,7 +3612,7 @@ async function handleJobOnboarding(
         cityText: prefs.cityText,
         channels: prefs.channels,
       };
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       emitBotMessage(io, allMessages, {
         sender: jobHunterAgent.name,
         avatar: jobHunterAgent.avatar,
@@ -3626,7 +3626,7 @@ async function handleJobOnboarding(
     // 搜索失败
     if (searchResultText.includes("BOSS_FAILED") || searchResultText.includes("搜索出错")) {
       state.lastError = "岗位首搜失败";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       emitBotMessage(io, allMessages, {
         sender: petName,
         avatar: chiefAvatar,
@@ -3675,7 +3675,7 @@ async function handleJobOnboarding(
 
     state.phase = "first_application";
     state.lastError = "";
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
     emitBotMessage(io, allMessages, {
       sender: petName,
       avatar: chiefAvatar,
@@ -3690,7 +3690,7 @@ async function handleJobOnboarding(
     // ── 用户先选岗位 → tailor → 确认投递 → 至少投出 1 个岗位后才完成 onboarding ──
     if (await handleSelectedJobsWorkflow(io, allMessages, userMsg, petName, petPersonality)) {
       state.lastError = "";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       return true;
     }
 
@@ -3712,7 +3712,7 @@ async function handleJobOnboarding(
         state.currentStep = null;
         state.lastError = "";
         state.transitionInFlight = false;
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
         const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
         await streamAgent(
           chiefAgent,
@@ -3722,7 +3722,7 @@ async function handleJobOnboarding(
         );
       } else {
         state.lastError = "已进入投递确认，但还没有成功写入首批投递记录";
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
       }
       return true;
     }
@@ -4841,7 +4841,7 @@ async function startServer() {
       }
       state.phase = "professional_positioning";
       persistProfileFromOnboarding(state);
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
 
       const petData = loadPetRuntimeProfile();
       const pn = petData?.name || "团团";
