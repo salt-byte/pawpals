@@ -847,7 +847,7 @@ type SearchResultRow = {
 // OnboardingState.phase governs the global build-up funnel through the first real application.
 // CollaborationRow.workflowStage governs each selected job throughout tailoring/application execution.
 // The handoff is explicit: once phase becomes "completed", per-job workflowStage becomes the primary long-running state machine.
-const AGENT_PHASE_TIMEOUT_MS = Math.max(15_000, Number(process.env.PAWPALS_AGENT_TIMEOUT_MS || 45_000));
+const AGENT_PHASE_TIMEOUT_MS = Math.max(15_000, Number(process.env.PAWPALS_AGENT_TIMEOUT_MS || 90_000));
 const AGENT_PHASE_RETRIES = Math.max(0, Number(process.env.PAWPALS_AGENT_RETRIES || 0));
 
 function buildBoardRowId(input: { company?: string; role?: string; jdUrl?: string }) {
@@ -3296,50 +3296,65 @@ async function handleJobOnboarding(
   }
 
   if (state.phase === "resume_collection") {
-    if (!hasResumeAttachment(userMsg)) {
-      const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
-      const { reply } = await streamAgent(
-        chiefAgent,
-        [{ role: "user", content: `用户刚发来消息：${userMsg || "（空消息）"}。当前仍处于建档第一步，请你自然地提醒用户先上传简历，不要暴露内部流程。要明确说明 PDF 或 Word 都可以，但语气要像真实聊天，不要像系统播报。` }],
-        depth,
-        io,
-        "job",
-        allMessages,
-        petName,
-        petPersonality
+    // 如果 resume_master.md 已有内容（之前上传过），直接跳过上传步骤
+    const existingResume = (() => {
+      try {
+        const content = readFileSync(RESUME_MASTER_FILE, "utf8").trim();
+        return content.length > 50 ? content : "";
+      } catch { return ""; }
+    })();
+
+    if (!hasResumeAttachment(userMsg) && !existingResume) {
+      // 确实没有简历，让 LLM 自然引导上传
+      const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      await streamAgent(
+        careerPlanner,
+        [{ role: "user", content: userMsg }],
+        0, io, "job", allMessages, petName, petPersonality,
+        buildOnboardingContext(state, petName)
       );
-      if (!reply || !reply.trim()) {
-        emitBotMessage(io, allMessages, {
-          sender: petName,
-          avatar: chiefAvatar,
-          content: `${petName}：先把你的简历发给我吧，PDF 或 Word 都可以，我先认识一下你～`,
-          groupId: "job",
-          isChiefBot: true,
-        });
-      }
       return true;
     }
 
     state.resumeUploaded = true;
     state.phase = "profile_collection";
     state.currentStep = "target_role";
-    const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
-    saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
+
+    // 如果是用旧简历（已存在），不需要重新解析
+    const resumeText = existingResume || (() => {
+      const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
+      saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
+      return resumePayload.rawText;
+    })();
     saveOnboardingState(state, io);
 
     emitBotMessage(io, allMessages, {
       sender: petName,
       avatar: chiefAvatar,
-      content: `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
+      content: existingResume
+        ? `${petName}：我看到之前的简历还在，直接用这份继续！`
+        : `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
       groupId: "job",
       isChiefBot: true,
     });
+
+    // 已有简历跳过解析，直接开始 profile 采集
+    if (existingResume) {
+      const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      await streamAgent(
+        careerPlanner,
+        [{ role: "user", content: `用户已有简历，简历内容已保存。现在请开始用户画像采集，自然地问第一个问题。` }],
+        0, io, "job", allMessages, petName, petPersonality,
+        buildOnboardingContext(state, petName)
+      );
+      return true;
+    }
 
     const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
     io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
     const parseResult = await runAgentChainWithTimeout(
       resumeExpert,
-      [{ role: "user", content: `【来自${petName}的任务】\n用户刚上传了简历，请先做一次基础解析，提炼背景亮点和待追问信息。当前简历文本如下：\n\n${resumePayload.rawText.slice(0, 6000)}` }],
+      [{ role: "user", content: `【来自${petName}的任务】\n用户刚上传了简历，请先做一次基础解析，提炼背景亮点和待追问信息。当前简历文本如下：\n\n${resumeText.slice(0, 6000)}` }],
       0,
       io,
       "job",
