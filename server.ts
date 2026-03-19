@@ -2904,6 +2904,8 @@ async function streamAgent(
     if (!isChief) {
       const agentDisplayName = (agent as any).role || agent.name;
       systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
+    } else if (groupId === "job") {
+      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 绝对不能自己使用浏览器、网页、browser 相关能力去搜岗\n- 绝对不能说“岗位猎手没上线”“我来帮你搜”“我直接帮你找”\n- 当用户要搜岗时，你只能负责：承接、确认、交接给岗位猎手，或说明正在等待岗位猎手结果\n- 如果岗位猎手暂时没返回，你只能说正在继续推进，不能自己顶上去搜`);
     }
 
     const boardInstruction = getStructuredBoardInstruction(agent.id);
@@ -3581,31 +3583,38 @@ async function handleJobOnboarding(
   }
 
   if (state.phase === "resume_review") {
-    // 用户和 agent 讨论简历建议，判断用户想改简历还是先搜岗
-    const wantsToSearch = /(先投|先搜|边投边改|先看岗位|先找|先搜岗|不改了|之后再|以后再|直接投|开始搜|开始吧|开始|搜岗|直接开始|不用改|跳过)/.test(userMsg);
-    const wantsToEdit = /(改简历|现在改|先改|帮我改|按建议改|开始优化|修改简历|改一下|改吧)/.test(userMsg);
+    // 交给 LLM 判断用户意图，输出结构化决策标签
+    const careerPlannerForReview = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    const { reply } = await streamAgent(
+      careerPlannerForReview,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 简历建议讨论】
+专业老师和简历专家已经给出了优化建议。用户正在决定下一步。
 
-    if (wantsToSearch) {
+你的任务：
+1. 自然回应用户的消息
+2. 如果用户想先搜岗位/边投边改/开始/跳过简历修改，在回复末尾写：RESUME_DECISION::search
+3. 如果用户想现在就改简历/按建议改，在回复末尾写：RESUME_DECISION::edit
+4. 如果用户还在讨论/追问/没做决定，不写任何标签，继续引导
+
+标签不会展示给用户。`
+    );
+
+    if (reply?.includes("RESUME_DECISION::search")) {
       state.phase = "search_strategy";
       state.lastError = "";
       saveOnboardingState(state, io);
-      const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
-      await streamAgent(
-        chiefForHandoff,
-        [{ role: "user", content: "用户决定先搜岗位、边投边改。请你先自然回应一句，再说明接下来会先帮用户确认搜索渠道和优先级。不要直接开始搜索。1-2句话就够。" }],
-        0, io, "job", allMessages, petName, petPersonality,
-        `【Onboarding 过渡消息】\n当前从简历建议讨论进入搜岗策略确认阶段。请先由首席伴学官自然接话，再交给岗位猎手。`
-      );
       scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
       return true;
     }
 
-    if (wantsToEdit) {
+    if (reply?.includes("RESUME_DECISION::edit")) {
       const resumeExpertForEdit = JOB_AGENTS.find(a => a.id === "resume-expert")!;
       io.emit("agent_thinking", { agentName: resumeExpertForEdit.name, groupId: "job" });
       await runAgentChainWithTimeout(
         resumeExpertForEdit,
-        [{ role: "user", content: `【来自${petName}的任务】\n用户认可了简历优化建议，请根据之前专业老师和你的建议，帮用户修改 resume_master.md。修改后把改动要点告诉用户。` }],
+        [{ role: "user", content: `【来自${petName}的任务】\n用户认可了简历优化建议，请根据之前的建议帮用户修改 resume_master.md。修改后把改动要点告诉用户。` }],
         0, io, "job", allMessages, petName, petPersonality
       );
       io.emit("agent_done", { groupId: "job" });
@@ -3613,25 +3622,11 @@ async function handleJobOnboarding(
       state.phase = "search_strategy";
       state.lastError = "";
       saveOnboardingState(state, io);
-      const chiefForHandoff = JOB_AGENTS.find(a => a.id === "career-planner")!;
-      await streamAgent(
-        chiefForHandoff,
-        [{ role: "user", content: "简历专家已经按建议修改完简历，用户接下来要进入搜岗阶段。请你先自然回应一句，再说明接下来会先帮用户确认搜索渠道和优先级。不要直接开始搜索。1-2句话就够。" }],
-        0, io, "job", allMessages, petName, petPersonality,
-        `【Onboarding 过渡消息】\n当前从简历修改完成进入搜岗策略确认阶段。请先由首席伴学官自然接话，再交给岗位猎手。`
-      );
       scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
       return true;
     }
 
-    // 用户还在讨论/追问，交给 career-planner 自然对话
-    const careerPlannerForChat = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      careerPlannerForChat,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 简历建议讨论】\n用户正在讨论简历优化建议。回应 ta 的想法，最终引导 ta 选择：现在改简历，还是先搜岗位边投边改。`
-    );
+    // LLM 没输出决策标签 — 用户还在讨论，保持当前 phase
     return true;
   }
 
