@@ -3117,6 +3117,26 @@ async function streamAgent(
     // 解析 PHASE_UPDATE / PROFILE_CONFIRM 标签
     await parseAndUpdatePhase(fullText, io, allMessages, petName);
 
+    // 兜底：如果首席回复里包含了画像总结但没输出 PROFILE_CONFIRM，代码层自动检测
+    if (isChief && groupId === "job" && !fullText.includes("PROFILE_CONFIRM")) {
+      const profileExists = (() => { try { return readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").trim().length > 50; } catch { return false; } })();
+      if (!profileExists) {
+        // 检测回复里是否包含画像关键信息（方向+城市+类型 至少出现2个）
+        let profileSignals = 0;
+        if (/方向|目标岗位|想找.*方向|AI.*产品|产品经理/i.test(fullText)) profileSignals++;
+        if (/城市|北京|上海|广州|深圳|base/i.test(fullText)) profileSignals++;
+        if (/实习|全职|暑期|校招|春招/i.test(fullText)) profileSignals++;
+        if (/大厂|创业|外企|公司偏好/i.test(fullText)) profileSignals++;
+        if (/记录|整理|画像|档案|信息.*收集/i.test(fullText)) profileSignals++;
+
+        if (profileSignals >= 3) {
+          console.log(`[profile_confirm] auto-triggered (${profileSignals} signals detected)`);
+          // 注入 PROFILE_CONFIRM 让 parseAndUpdatePhase 处理
+          await parseAndUpdatePhase("PROFILE_CONFIRM", io, allMessages, petName);
+        }
+      }
+    }
+
     // 清理结构化标签，不展示给用户
     fullText = fullText
       .replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "")
