@@ -3528,19 +3528,11 @@ async function handleJobOnboarding(
     );
     io.emit("agent_done", { groupId: "job" });
     state.transitionInFlight = false;
-    if (!positioningResult.ok || !existsSync(SKILLS_GAP_FILE)) {
-      state.lastError = "专业定位分析未成功写入 skills_gap.md";
-      saveOnboardingState(state, io);
-      emitBotMessage(io, allMessages, {
-        sender: petName,
-        avatar: chiefAvatar,
-        content: `${petName}：专业老师这一步还没完全落好，我先停在这里，避免后面串错。你回我"继续"我就重试定位分析；如果想改前面的信息，也可以直接说"返回上一步"或"改目标岗位"。`,
-        groupId: "job",
-        isChiefBot: true,
-      });
-      return true;
+    if (!positioningResult.ok) {
+      console.warn("[onboarding] professional_positioning agent timed out, continuing anyway");
     }
 
+    // 不管定位分析是否完全成功，都继续往下走（不卡住用户）
     state.phase = "resume_diagnosis";
     state.lastError = "";
     saveOnboardingState(state, io);
