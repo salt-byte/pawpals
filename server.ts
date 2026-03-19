@@ -5427,7 +5427,13 @@ async function startServer() {
     const ext = path.extname(origName).toLowerCase();
     const safeName = origName.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5 ()]/g, "_");
     const destPath = path.join(INBOUND_DIR, safeName);
-    try { copyFileSync(req.file.path, destPath); } catch {}
+    try {
+      copyFileSync(req.file.path, destPath);
+      console.log(`[upload] copied ${origName} → ${destPath} (${statSync(destPath).size} bytes)`);
+    } catch (cpErr) {
+      console.error(`[upload] copyFileSync failed for ${origName}:`, (cpErr as any)?.message);
+      return res.status(500).json({ error: "file copy failed" });
+    }
     try { unlinkSync(req.file.path); } catch {}
 
     let text = "";
@@ -5437,6 +5443,7 @@ async function startServer() {
         try {
           const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
           const data = new Uint8Array(readFileSync(destPath));
+          console.log(`[pdf] parsing ${safeName}, size=${data.length}`);
           const doc = await pdfjsLib.getDocument({ data }).promise;
           const pages: string[] = [];
           for (let i = 1; i <= Math.min(doc.numPages, 10); i++) {
@@ -5450,8 +5457,9 @@ async function startServer() {
             if (pageText) pages.push(pageText);
           }
           text = pages.join("\n\n");
+          console.log(`[pdf] pdfjs extracted ${text.length} chars from ${doc.numPages} pages`);
         } catch (pdfErr) {
-          console.warn("pdfjs extraction failed, trying Python fallback:", (pdfErr as any)?.message);
+          console.warn("[pdf] pdfjs extraction failed, trying Python fallback:", (pdfErr as any)?.message, (pdfErr as any)?.stack?.slice(0, 300));
           // Fallback: 尝试 Python（dev 环境可能有）
           try {
             const pyExtract = `
@@ -5469,13 +5477,20 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
 `;
             const extractResult = await new Promise<string>((resolve) => {
               const py = spawn(PYTHON_BIN, ["-c", pyExtract, destPath]);
-              let out = "";
+              let out = "", err = "";
               py.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-              py.on("close", () => resolve(out.trim()));
-              setTimeout(() => resolve(""), 15000);
+              py.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+              py.on("close", (code: number) => {
+                if (err) console.warn("[pdf] Python fallback stderr:", err.slice(0, 300));
+                console.log(`[pdf] Python fallback exit=${code}, out=${out.length} chars`);
+                resolve(out.trim());
+              });
+              setTimeout(() => { try { py.kill(); } catch {} resolve(""); }, 15000);
             });
             text = JSON.parse(extractResult || "{}").text || "";
-          } catch {}
+          } catch (pyErr) {
+            console.error("[pdf] Python fallback also failed:", (pyErr as any)?.message);
+          }
         }
       } else if (ext === ".docx") {
         const mammoth = await import("mammoth");
@@ -5483,9 +5498,10 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
         text = r.value || "";
       }
     } catch (e) {
-      console.error("resume parse error", e);
+      console.error("[upload] resume parse error:", e);
     }
 
+    console.log(`[upload] response: ok=true, filename=${safeName}, textLength=${text.length}`);
     res.json({ ok: true, filename: safeName, path: destPath, text });
   });
 

@@ -80,12 +80,28 @@ function startApplyPolling(serverUrl) {
       try {
         const r = await fetch(`http://127.0.0.1:${port}/api/internal/browser-task`,
           { signal: AbortSignal.timeout(2000) });
+        if (!r.ok) throw new Error(`browser-task returned ${r.status}`);
         const { task } = await r.json();
         if (task) {
+          console.log(`[PawPals] apply task received: ${task.id} → ${task.jobUrl}`);
           applyingNow = true;
-          await dispatchApply(task, port).finally(() => { applyingNow = false; });
+          try {
+            await dispatchApply(task, port);
+          } catch (applyErr) {
+            console.error("[PawPals] dispatchApply error:", applyErr?.message || applyErr);
+            // 回报错误给 server，避免任务永远卡在队列里
+            await fetch(`http://127.0.0.1:${port}/api/internal/browser-task-done`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: task.id, result: `ERROR:${applyErr?.message || "unknown"}` }),
+              signal: AbortSignal.timeout(5000),
+            }).catch(() => {});
+          } finally {
+            applyingNow = false;
+          }
         }
-      } catch {}
+      } catch (error) {
+        console.warn("[PawPals] apply polling failed:", error?.message || error);
+      }
     }
     // 登录任务（pending.platform 指定平台，默认 boss）
     if (!loginNow) {
