@@ -4,6 +4,14 @@
 
 ---
 
+## 零、全局规则（所有 Agent 必须遵守）
+
+1. **禁止使用系统浏览器**：不要调用 browser 工具、不要打开 Chrome/Safari。所有网页操作（搜岗、投递、抓 JD）都由 Electron BrowserWindow 在后台完成，不需要你操作浏览器。
+2. **身份固定**：每个 Agent 只能用自己的身份说话，不能冒充其他 Agent 或首席伴学官。
+4. **Boss直聘投递不需要 tailor 简历**：Boss 是打招呼模式，直接投就行。只有官网申请才需要 tailor。
+
+---
+
 ## 一、团队成员与职责
 
 | Agent | agentId | 核心定位 | 主要输出 |

@@ -315,6 +315,9 @@
         "enabled": true
       }
     },
+    "browser": {
+      "enabled": false
+    },
     "fs": {
       "workspaceOnly": true
     },
