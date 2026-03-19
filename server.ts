@@ -4497,6 +4497,13 @@ async function startServer() {
 
 结构要求：2-3句话，私聊只聊陪伴，不提求职简历。${personalityLayer}`;
 
+      // 检查模型是否已配置，没配好就不 wake（避免空白气泡）
+      const setupState = loadJsonFile<any>(SETUP_STATE_FILE, {});
+      if (!setupState.completed) {
+        console.log("[wake] skipped: model not configured yet");
+        return;
+      }
+
       // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
       const tryWakeChief = async (attempt = 0) => {
         const { reply } = await streamAgent(

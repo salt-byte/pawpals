@@ -2039,6 +2039,24 @@ export default function App() {
   }
 
   if (appStatus === 'onboarding') {
+    // 先检查模型是否已配置，没配好就跳到 main（会显示 setup overlay）
+    if (!setupState?.completed) {
+      return (
+        <div className="min-h-screen bg-pet-cream flex items-center justify-center p-4">
+          <div className="text-center">
+            <div className="text-6xl mb-4">🐾</div>
+            <h2 className="text-2xl font-bold text-pet-brown mb-2">欢迎来到 PawPals！</h2>
+            <p className="text-pet-brown/60 mb-6">先配置一下模型，然后创建你的专属伴学官～</p>
+            <button
+              onClick={() => setAppStatus('main')}
+              className="px-8 py-3 bg-pet-orange text-white rounded-2xl font-bold text-lg hover:scale-105 transition-transform"
+            >
+              开始配置 →
+            </button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-pet-cream flex items-center justify-center p-4">
         {renderPetProfileCard()}
