@@ -1476,6 +1476,13 @@ function getMessageResumePayload(msg: any) {
   };
 }
 
+function sanitizeProfileCardRoleScope(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/(北京|上海|广州|深圳|杭州|成都|remote|远程)/i.test(text)) return "";
+  return text;
+}
+
 function applyHeuristicOnboardingUpdate(state: OnboardingState, text: string): OnboardingSlotPatch {
   const trimmed = text.replace(/^> 回复[\s\S]*?\n\n/, "").trim();
   const patch: OnboardingSlotPatch = {};
@@ -3476,7 +3483,7 @@ async function handleJobOnboarding(
           isBot: true,
           isChiefBot: true,
           type: "profile_card",
-          profileData: { ...state.slots },
+          profileData: { ...state.slots, roleScope: sanitizeProfileCardRoleScope(state.slots.roleScope) },
         };
         allMessages.push(cardMsg);
         io.emit("receive_message", cardMsg);

@@ -171,7 +171,7 @@ function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardDat
     { key: 'jobType', label: '类型', emoji: '📋' },
     { key: 'timeRange', label: '时间', emoji: '📅' },
     { key: 'targetCity', label: '城市', emoji: '📍' },
-    { key: 'roleScope', label: '岗位范围', emoji: '🔍' },
+    { key: 'roleScope', label: '行业偏好', emoji: '🏷️' },
     { key: 'companyPreference', label: '公司偏好', emoji: '🏢' },
     { key: 'traits', label: '个人特质', emoji: '✨' },
   ];
@@ -2337,18 +2337,6 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex gap-3 md:gap-4 text-pet-brown/60 items-center pr-24 md:pr-32">
-{activeChat?.type === 'group' && (
-                        <button
-                          onClick={() => setShowMemberPanel(v => !v)}
-                          className={cn(
-                            "p-2 rounded-xl transition-colors",
-                            showMemberPanel ? "bg-pet-orange/15 text-pet-orange" : "text-pet-brown/50 hover:bg-pet-cream hover:text-pet-brown"
-                          )}
-                          title="查看群成员"
-                        >
-                          <Users size={18} />
-                        </button>
-                      )}
                     </div>
                   </header>
 
