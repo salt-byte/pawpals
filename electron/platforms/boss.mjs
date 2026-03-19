@@ -300,7 +300,13 @@ export async function apply(task, serverPort) {
             input = null;
             await sleep(500);
           }
-          if (!input) return 'NO_INPUT:' + document.title + '|' + document.URL;
+          if (!input) {
+            // 如果已经到了聊天页，说明沟通已发起（Boss可能自动发送了打招呼语）
+            if (document.URL.includes('/chat') || document.URL.includes('geek/new')) {
+              return 'SUCCESS';
+            }
+            return 'NO_INPUT:' + document.title + '|' + document.URL;
+          }
 
           // 输入招呼语
           input.focus();

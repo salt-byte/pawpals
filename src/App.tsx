@@ -646,7 +646,7 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
   const [showPetProfileWizard, setShowPetProfileWizard] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'pet' | 'study' | 'contacts' | 'manage' | 'square'>('pet');
+  const [activeTab, setActiveTab] = useState<'chat' | 'pet' | 'study' | 'contacts' | 'pipeline' | 'manage' | 'square'>('pet');
   const [squareSubTab, setSquareSubTab] = useState<'square' | 'hole'>('square');
   const [manageSubTab, setManageSubTab] = useState<'data' | 'files'>('data');
   const localizedGroups = GROUPS.map(g => ({
@@ -1142,9 +1142,9 @@ export default function App() {
     return () => { clearTimeout(t1); clearTimeout(t2); };
   }, [messages, activeChat]);
 
-  // Load dashboard data when switching to manage tab (data sub-tab)
+  // Load dashboard data when switching to pipeline/manage tabs
   useEffect(() => {
-    if (activeTab !== 'manage') return;
+    if (activeTab !== 'pipeline' && activeTab !== 'manage') return;
     let cancelled = false;
     const loadDash = async () => {
       setDashLoading(true);
@@ -2145,6 +2145,12 @@ export default function App() {
             label="广场"
           />
           <NavButton
+            active={activeTab === 'pipeline'}
+            onClick={() => setActiveTab('pipeline')}
+            icon={<Briefcase size={24} />}
+            label="流水线"
+          />
+          <NavButton
             active={activeTab === 'manage'}
             onClick={() => setActiveTab('manage')}
             icon={<FolderOpen size={24} />}
@@ -3094,6 +3100,94 @@ export default function App() {
               </div>
             )}
           </section>
+        ) : activeTab === 'pipeline' ? (
+          /* 求职流水线 */
+          <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
+            <header className="p-6 md:p-8 bg-white/50 pr-24 md:pr-40">
+              <div className="mb-4">
+                <h1 className="text-3xl md:text-4xl font-display font-bold text-pet-brown mb-1">求职流水线</h1>
+                <p className="text-sm text-pet-brown/60">协作中的岗位阶段、投递推进和跟进状态</p>
+              </div>
+            </header>
+
+            <div className="p-6 md:p-8 space-y-6">
+              {dashLoading && (
+                <div className="flex items-center justify-center gap-3 py-12 text-pet-brown/50">
+                  <div className="w-5 h-5 border-2 border-pet-orange/40 border-t-pet-orange rounded-full animate-spin" />
+                  <span className="text-sm">加载中…</span>
+                </div>
+              )}
+              {dashError && (
+                <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-600">
+                  <AlertCircle size={18} />
+                  {dashError}
+                </div>
+              )}
+              <div className="healing-card p-6 space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Briefcase size={18} className="text-pet-orange" />
+                    <h2 className="font-bold text-pet-brown">求职流水线</h2>
+                  </div>
+                  <div className="text-xs text-pet-brown/40">
+                    {dashBoardRows.length > 0 ? `${dashBoardRows.length} 个岗位正在跟踪` : '还没有岗位进入协作表'}
+                  </div>
+                </div>
+                {dashBoardRows.length === 0 && !dashLoading ? (
+                  <div className="rounded-2xl bg-pet-cream/60 px-4 py-5 text-sm text-pet-brown/45">
+                    还没有岗位进入协作表。完成 onboarding 并开始搜岗后，这里会显示每个岗位卡在什么阶段。
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
+                    {workflowColumns.map((column) => {
+                      const rows = dashBoardRows.filter((row: any) => row.workflowStage === column.key);
+                      return (
+                        <div key={column.key} className="rounded-[28px] bg-pet-cream/40 border border-pet-pink/15 p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={cn('rounded-full px-3 py-1 text-[11px] font-bold', column.color)}>{column.label}</span>
+                            <span className="text-[11px] font-mono text-pet-brown/35">{rows.length}</span>
+                          </div>
+                          <div className="space-y-3 min-h-[120px]">
+                            {rows.length === 0 ? (
+                              <div className="rounded-2xl border border-dashed border-pet-pink/20 px-3 py-4 text-xs text-pet-brown/25 text-center">
+                                暂无
+                              </div>
+                            ) : rows.map((row: any) => (
+                              <button
+                                key={row.id}
+                                onClick={() => setSelectedBoardRow(row)}
+                                className="w-full text-left rounded-2xl bg-white p-4 border border-pet-pink/10 space-y-2 hover:border-pet-orange/30 hover:bg-pet-orange/5 transition-colors"
+                              >
+                                <div className="text-sm font-bold text-pet-brown leading-5">{row.company || '未知公司'}</div>
+                                <div className="text-xs text-pet-brown/55 leading-5">{row.role || '未知岗位'}</div>
+                                <div className="flex flex-wrap gap-2 pt-1">
+                                  <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
+                                    {row.resumeVersion || '未出简历版'}
+                                  </span>
+                                  <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
+                                    {row.applicationStatus || 'pending'}
+                                  </span>
+                                </div>
+                                {row.skillHighlights && (
+                                  <div className="text-[11px] leading-5 text-pet-brown/55 line-clamp-3">
+                                    重点：{row.skillHighlights}
+                                  </div>
+                                )}
+                                <div className="flex items-center justify-between text-[10px] text-pet-brown/35 pt-1">
+                                  <span>联系人 {row.contacts?.length || 0}</span>
+                                  <span>{row.followUpDate || row.outreachStatus || '未排期'}</span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
         ) : activeTab === 'manage' ? (
           /* 管理（数据 + 文件） */
           <section className="flex-1 flex flex-col overflow-y-auto pb-24 md:pb-8">
@@ -3154,69 +3248,6 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                </div>
-                <div className="healing-card p-6 space-y-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Briefcase size={18} className="text-pet-orange" />
-                      <h2 className="font-bold text-pet-brown">求职流水线</h2>
-                    </div>
-                    <div className="text-xs text-pet-brown/40">
-                      {dashBoardRows.length > 0 ? `${dashBoardRows.length} 个岗位正在跟踪` : '还没有岗位进入协作表'}
-                    </div>
-                  </div>
-                  {dashBoardRows.length === 0 && !dashLoading ? (
-                    <div className="rounded-2xl bg-pet-cream/60 px-4 py-5 text-sm text-pet-brown/45">
-                      还没有岗位进入协作表。完成 onboarding 并开始搜岗后，这里会显示每个岗位卡在什么阶段。
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
-                      {workflowColumns.map((column) => {
-                        const rows = dashBoardRows.filter((row: any) => row.workflowStage === column.key);
-                        return (
-                          <div key={column.key} className="rounded-[28px] bg-pet-cream/40 border border-pet-pink/15 p-4 space-y-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={cn('rounded-full px-3 py-1 text-[11px] font-bold', column.color)}>{column.label}</span>
-                              <span className="text-[11px] font-mono text-pet-brown/35">{rows.length}</span>
-                            </div>
-                            <div className="space-y-3 min-h-[120px]">
-                              {rows.length === 0 ? (
-                                <div className="rounded-2xl border border-dashed border-pet-pink/20 px-3 py-4 text-xs text-pet-brown/25 text-center">
-                                  暂无
-                                </div>
-                              ) : rows.map((row: any) => (
-                                <button
-                                  key={row.id}
-                                  onClick={() => setSelectedBoardRow(row)}
-                                  className="w-full text-left rounded-2xl bg-white p-4 border border-pet-pink/10 space-y-2 hover:border-pet-orange/30 hover:bg-pet-orange/5 transition-colors"
-                                >
-                                  <div className="text-sm font-bold text-pet-brown leading-5">{row.company || '未知公司'}</div>
-                                  <div className="text-xs text-pet-brown/55 leading-5">{row.role || '未知岗位'}</div>
-                                  <div className="flex flex-wrap gap-2 pt-1">
-                                    <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
-                                      {row.resumeVersion || '未出简历版'}
-                                    </span>
-                                    <span className="rounded-full bg-pet-cream px-2.5 py-1 text-[10px] text-pet-brown/55">
-                                      {row.applicationStatus || 'pending'}
-                                    </span>
-                                  </div>
-                                  {row.skillHighlights && (
-                                    <div className="text-[11px] leading-5 text-pet-brown/55 line-clamp-3">
-                                      重点：{row.skillHighlights}
-                                    </div>
-                                  )}
-                                  <div className="flex items-center justify-between text-[10px] text-pet-brown/35 pt-1">
-                                    <span>联系人 {row.contacts?.length || 0}</span>
-                                    <span>{row.followUpDate || row.outreachStatus || '未排期'}</span>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <div className="healing-card p-6 space-y-4">
@@ -3464,6 +3495,12 @@ export default function App() {
           onClick={() => { setActiveTab('square'); setShowChatDetail(false); }}
           icon={<Globe size={20} />}
           label="广场"
+        />
+        <NavButton
+          active={activeTab === 'pipeline'}
+          onClick={() => { setActiveTab('pipeline'); setShowChatDetail(false); }}
+          icon={<Briefcase size={20} />}
+          label="流水线"
         />
         <NavButton
           active={activeTab === 'manage'}

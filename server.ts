@@ -941,13 +941,14 @@ async function generateSearchQueryAndCity(input: {
         model: "auto",
         messages: [{
           role: "system",
-          content: `你是招聘平台搜索关键词生成器。根据用户档案和当前意图，生成最精准的搜索词。
-返回 JSON：{"query":"搜索关键词（4-18字，必须贴近用户真实目标岗位，不要泛化成客服/运营/销售）","city":"城市名（北京/上海/广州/深圳/杭州/成都，默认北京）"}
+          content: `你是招聘平台搜索关键词生成器。根据用户档案和当前意图，生成精准的搜索词和筛选条件。
+返回 JSON：{"query":"搜索关键词（4-15字，只放岗位核心词，如 AI产品经理 实习）","city":"城市名（北京/上海/广州/深圳/杭州/成都，默认北京）","companyFilter":"公司筛选偏好（如 大厂/创业/外企/不限）"}
 规则：
-1. 优先使用用户明确目标方向，不要擅自改成不相关岗位
-2. 如果用户目标是 ToG、公共关系、出海、国际业务，就必须把这些关键词体现在 query 里
+1. query 只放岗位方向+类型，不要放公司偏好（大厂/创业等是筛选条件不是搜索词）
+2. 优先使用用户明确目标方向，不要泛化
 3. 如果是实习岗位，query 里保留"实习"
-4. 只返回 JSON，不要解释。`
+4. companyFilter 用于搜索后过滤结果
+5. 只返回 JSON，不要解释。`
         }, {
           role: "user",
           content: `用户档案：\n${(input.profileText || "（无档案）").slice(0, 1800)}\n\n当前意图：${input.userMessage || "开始搜索岗位"}\n\n显式目标方向：${input.fallbackRole || "无"}\n推断相关方向：${(input.inferredRoles || []).join(" / ") || "无"}\n求职类型：${input.jobType || "未说明"}\n目标城市：${input.targetCity || "未说明"}\n公司偏好：${input.companyPreference || "未说明"}`
