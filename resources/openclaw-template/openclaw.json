@@ -305,7 +305,7 @@
     ]
   },
   "tools": {
-    "profile": "full",
+    "profile": "default",
     "web": {
       "search": {
         "enabled": true,
