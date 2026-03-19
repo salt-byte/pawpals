@@ -351,6 +351,60 @@ if (fs.existsSync(configPath)) {
   } catch {}
 }
 
+// 同步全局 provider auth 到每个 agent 的 auth-profiles.json
+// 确保 gateway 执行任何 agent 时都能找到正确的 apiKey
+try {
+  const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const providers = cfg?.models?.providers || {};
+  const primaryModel = cfg?.agents?.defaults?.model?.primary || "";
+  const [selectedProvider] = primaryModel.split("/");
+  const agentsRoot = path.join(runtime.openClawHome, "agents");
+
+  if (fs.existsSync(agentsRoot)) {
+    // 收集所有有 apiKey 的 provider
+    const providersWithKeys = [];
+    for (const [name, p] of Object.entries(providers)) {
+      if (!p || typeof p !== "object") continue;
+      const key = name === "anthropic"
+        ? (cfg?.env?.vars?.ANTHROPIC_API_KEY || "")
+        : (p.apiKey || "");
+      if (key) providersWithKeys.push({ name, key, config: p });
+    }
+
+    if (providersWithKeys.length > 0) {
+      for (const agentId of fs.readdirSync(agentsRoot)) {
+        const agentDir = path.join(agentsRoot, agentId, "agent");
+        if (!fs.existsSync(agentDir)) continue;
+
+        const authPath = path.join(agentDir, "auth-profiles.json");
+        let auth = { version: 1, profiles: {}, usageStats: {} };
+        try { auth = JSON.parse(fs.readFileSync(authPath, "utf8")); } catch {}
+        auth.profiles ??= {};
+        auth.usageStats ??= {};
+        auth.lastGood ??= {};
+
+        const modelsPath = path.join(agentDir, "models.json");
+        let models = {};
+        try { models = JSON.parse(fs.readFileSync(modelsPath, "utf8")); } catch {}
+        models.providers ??= {};
+
+        for (const { name, key, config } of providersWithKeys) {
+          auth.profiles[`${name}:default`] = { type: "api_key", provider: name, key };
+          auth.usageStats[`${name}:default`] ??= { errorCount: 0 };
+          auth.lastGood[name] = `${name}:default`;
+          models.providers[name] = JSON.parse(JSON.stringify(config));
+        }
+
+        fs.writeFileSync(authPath, JSON.stringify(auth, null, 2) + "\n", "utf8");
+        fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n", "utf8");
+      }
+      appendDeploymentLog(`Synced ${providersWithKeys.map(p => p.name).join(", ")} auth to all agents`);
+    }
+  }
+} catch (e) {
+  console.warn("[bootstrap] provider sync warning:", e.message);
+}
+
 // 始终确保 workspace 子代理是最新的（openclaw.json 已存在时也要同步）
 if (sourceRoot) {
   const templateWorkspaces = path.join(sourceRoot, "workspace", "career", "workspaces");

@@ -75,6 +75,7 @@ ensureDir(COOKIE_DIR);
 const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
 const BACKUP_DIR = path.join(os.homedir(), "Documents", "PawPals备份");
 const BACKUP_META_FILE = path.join(APP_DATA_DIR, "backup-meta.json");
+const AGENTS_ROOT = path.join(OPENCLAW_HOME, "agents");
 
 // ── 全局队列（search_jobs / apply_job 工具 + Electron BrowserWindow 共享）──
 const pendingSearchQueue = new Map<string, {
@@ -533,6 +534,64 @@ function saveOpenClawConfig(config: any) {
   saveJsonFile(OPENCLAW_CONFIG_FILE, config);
 }
 
+function listRuntimeAgentIds(): string[] {
+  try {
+    return readdirSync(AGENTS_ROOT).filter((name) => statSync(path.join(AGENTS_ROOT, name)).isDirectory());
+  } catch {
+    return [];
+  }
+}
+
+function syncSelectedProviderToRuntimeAgents(config: any, selectedProvider: string) {
+  if (!selectedProvider) return;
+
+  const providerConfig = config?.models?.providers?.[selectedProvider];
+  if (!providerConfig || typeof providerConfig !== "object") return;
+
+  const providerApiKey =
+    selectedProvider === "anthropic"
+      ? String(config?.env?.vars?.ANTHROPIC_API_KEY || "").trim()
+      : String(providerConfig?.apiKey || config?.env?.vars?.OPENAI_API_KEY || "").trim();
+
+  for (const agentId of listRuntimeAgentIds()) {
+    const agentDir = path.join(AGENTS_ROOT, agentId, "agent");
+    const modelsPath = path.join(agentDir, "models.json");
+    const authProfilesPath = path.join(agentDir, "auth-profiles.json");
+    const sessionsPath = path.join(AGENTS_ROOT, agentId, "sessions", "sessions.json");
+
+    try {
+      if (existsSync(modelsPath)) {
+        const modelsConfig = loadJsonFile<any>(modelsPath, {});
+        modelsConfig.providers ??= {};
+        modelsConfig.providers[selectedProvider] = JSON.parse(JSON.stringify(providerConfig));
+        saveJsonFile(modelsPath, modelsConfig);
+      }
+    } catch {}
+
+    try {
+      const authConfig = loadJsonFile<any>(authProfilesPath, { version: 1, profiles: {}, usageStats: {} });
+      authConfig.version ??= 1;
+      authConfig.profiles ??= {};
+      authConfig.usageStats ??= {};
+      authConfig.profiles[`${selectedProvider}:default`] = {
+        type: "api_key",
+        provider: selectedProvider,
+        key: providerApiKey,
+      };
+      authConfig.usageStats[`${selectedProvider}:default`] ??= { errorCount: 0 };
+      authConfig.lastGood ??= {};
+      authConfig.lastGood[selectedProvider] = `${selectedProvider}:default`;
+      saveJsonFile(authProfilesPath, authConfig);
+    } catch {}
+
+    try {
+      if (existsSync(sessionsPath)) {
+        unlinkSync(sessionsPath);
+      }
+    } catch {}
+  }
+}
+
 function buildSetupState() {
   const config = loadOpenClawConfig();
   const setupState = loadJsonFile<Record<string, any>>(SETUP_STATE_FILE, {});
@@ -649,6 +708,7 @@ function saveSetupSelection(provider: string, model: string, options?: { baseUrl
   }
 
   saveOpenClawConfig(config);
+  syncSelectedProviderToRuntimeAgents(config, provider);
   saveJsonFile(SETUP_STATE_FILE, {
     ...loadJsonFile<Record<string, any>>(SETUP_STATE_FILE, {}),
     completed: true,
@@ -696,6 +756,7 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
   }
 
   saveOpenClawConfig(config);
+  syncSelectedProviderToRuntimeAgents(config, provider);
 }
 
 // ── OpenClaw Gateway 配置 ─────────────────────────────────────────────
