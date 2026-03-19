@@ -946,7 +946,7 @@ async function generateSearchQueryAndCity(input: {
 规则：
 1. 优先使用用户明确目标方向，不要擅自改成不相关岗位
 2. 如果用户目标是 ToG、公共关系、出海、国际业务，就必须把这些关键词体现在 query 里
-3. 如果是实习岗位，query 里保留“实习”
+3. 如果是实习岗位，query 里保留"实习"
 4. 只返回 JSON，不要解释。`
         }, {
           role: "user",
@@ -2905,7 +2905,7 @@ async function streamAgent(
       const agentDisplayName = (agent as any).role || agent.name;
       systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
     } else if (groupId === "job") {
-      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 绝对不能自己使用浏览器、网页、browser 相关能力去搜岗\n- 绝对不能说“岗位猎手没上线”“我来帮你搜”“我直接帮你找”\n- 当用户要搜岗时，你只能负责：承接、确认、交接给岗位猎手，或说明正在等待岗位猎手结果\n- 如果岗位猎手暂时没返回，你只能说正在继续推进，不能自己顶上去搜`);
+      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
     }
 
     const boardInstruction = getStructuredBoardInstruction(agent.id);
@@ -3069,8 +3069,19 @@ async function streamAgent(
     // 保留原始回复用于标签检测（SLOT_UPDATE / PHASE_COMPLETE / NEEDS_CLARIFICATION）
     const rawReply = fullText;
 
-    // 清理 onboarding 结构化标签，不展示给用户
-    fullText = fullText.replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "").replace(/PHASE_COMPLETE\n?/g, "").replace(/NEEDS_CLARIFICATION\n?/g, "").replace(/STRATEGY_UPDATE::\{[^}]*\}\n?/g, "").replace(/STRATEGY_CONFIRMED\n?/g, "").trim();
+    // 解析 PHASE_UPDATE 标签，更新进度条
+    parseAndUpdatePhase(fullText, io);
+
+    // 清理结构化标签，不展示给用户
+    fullText = fullText
+      .replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "")
+      .replace(/PHASE_UPDATE::\{[^}]*\}\n?/g, "")
+      .replace(/PHASE_COMPLETE\n?/g, "")
+      .replace(/NEEDS_CLARIFICATION\n?/g, "")
+      .replace(/STRATEGY_UPDATE::\{[^}]*\}\n?/g, "")
+      .replace(/STRATEGY_CONFIRMED\n?/g, "")
+      .replace(/RESUME_DECISION::\w+\n?/g, "")
+      .trim();
 
     // 流结束，更新内存中消息并通知前端完成
     const idx = allMessages.findIndex(m => m.id === msgId);
@@ -3268,6 +3279,11 @@ async function runAgentChain(
   }
 }
 
+
+// ── handleJobOnboarding: 降级为「记录器」──────────────────────────────
+// 不拦截消息、不做正则判断、不控制流转
+// 只从 LLM 回复中解析 PHASE_UPDATE:: 标签，更新 phase 供进度条读取
+// 最小 guard: 附件上传时保存简历文件
 async function handleJobOnboarding(
   io: Server,
   allMessages: any[],
@@ -3277,601 +3293,38 @@ async function handleJobOnboarding(
   attachmentText = "",
   attachmentName = ""
 ) {
-  const state = loadOnboardingState();
-  if (state.completed) return false;
-
-  const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
-  const nav = handleOnboardingNavigationCommand(state, userMsg, petName, io);
-  if (nav.handled) {
-    emitBotMessage(io, allMessages, {
-      sender: petName,
-      avatar: chiefAvatar,
-      content: nav.prompt || `${petName}：我们继续按当前步骤往下走。`,
-      groupId: "job",
-      isChiefBot: true,
-    });
-    return true;
-  }
-
-  if (state.transitionInFlight && userMsg.trim()) {
-    emitBotMessage(io, allMessages, {
-      sender: petName,
-      avatar: chiefAvatar,
-      content: `${petName}：我这边正在推进上一阶段，先别急，我处理完马上接着带你走。${state.lastError ? `\n上一次卡住点：${state.lastError}` : ""}`,
-      groupId: "job",
-      isChiefBot: true,
-    });
-    return true;
-  }
-
-  if (state.phase === "resume_collection") {
-    const existingResume = (() => {
-      try {
-        const content = readFileSync(RESUME_MASTER_FILE, "utf8").trim();
-        return content.length > 50 ? content : "";
-      } catch { return ""; }
-    })();
-
-    if (!hasResumeAttachment(userMsg)) {
-      if (existingResume) {
-        // 有旧简历：判断用户是想复用还是重新上传
-        const wantsReuse = /(用上|用之前|用刚才|就用这|继续用|不换|刚发了|刚刚发|已经发)/i.test(userMsg);
-        const wantsNew = /(重新|换一份|更新了|新简历|重新上传|再传一次)/i.test(userMsg);
-
-        if (wantsNew) {
-          // 用户明确要换简历 → 清空旧的，要求重新上传
-          try { writeFileSync(RESUME_MASTER_FILE, "", "utf8"); } catch {}
-          const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-          await streamAgent(
-            careerPlanner,
-            [{ role: "user", content: userMsg }],
-            0, io, "job", allMessages, petName, petPersonality,
-            `【Onboarding 上下文】\n用户想换一份新简历。请让 ta 重新上传 PDF 或 Word 文件。`
-          );
-          return true;
-        }
-
-        if (wantsReuse || !userMsg.trim()) {
-          // 用户想复用 或 空消息（自动推进）→ 用旧简历继续
-          state.resumeUploaded = true;
-          state.phase = "profile_collection";
-          state.currentStep = "target_role";
-          saveOnboardingState(state, io);
-          emitBotMessage(io, allMessages, {
-            sender: petName, avatar: chiefAvatar,
-            content: `${petName}：我看到之前的简历还在，直接用这份继续！`,
-            groupId: "job", isChiefBot: true,
-          });
-          const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-          await streamAgent(
-            careerPlanner,
-            [{ role: "user", content: `用户已有简历，现在请开始用户画像采集。` }],
-            0, io, "job", allMessages, petName, petPersonality,
-            buildOnboardingContext(state, petName)
-          );
-          return true;
-        }
-
-        // 其他情况：让 LLM 问用户要用旧简历还是上传新的
-        const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-        await streamAgent(
-          careerPlanner,
-          [{ role: "user", content: userMsg }],
-          0, io, "job", allMessages, petName, petPersonality,
-          `【Onboarding 上下文】\n用户之前上传过简历（已保存）。请问用户：要用之前那份简历继续，还是上传一份新的？`
-        );
-        return true;
-      }
-
-      // 没有旧简历，让 LLM 引导上传
-      const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-      await streamAgent(
-        careerPlanner,
-        [{ role: "user", content: userMsg }],
-        0, io, "job", allMessages, petName, petPersonality,
-        buildOnboardingContext(state, petName)
-      );
-      return true;
-    }
-
-    state.resumeUploaded = true;
-    state.phase = "profile_collection";
-    state.currentStep = "target_role";
+  // Guard 1: 如果用户上传了简历附件，保存到 resume_master.md + media/inbound
+  if (hasResumeAttachment(userMsg)) {
     const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
     saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
-    const resumeText = resumePayload.rawText;
-    saveOnboardingState(state, io);
-
-    emitBotMessage(io, allMessages, {
-      sender: petName,
-      avatar: chiefAvatar,
-      content: `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
-      groupId: "job",
-      isChiefBot: true,
-    });
-
-    const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
-    io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
-    const parseResult = await runAgentChainWithTimeout(
-      resumeExpert,
-      [{ role: "user", content: `【来自${petName}的任务】\n用户刚上传了简历，请先做一次基础解析，提炼背景亮点和待追问信息。当前简历文本如下：\n\n${resumeText.slice(0, 6000)}` }],
-      0,
-      io,
-      "job",
-      allMessages,
-      petName,
-      petPersonality
-    );
-    io.emit("agent_done", { groupId: "job" });
-    if (!parseResult.ok) {
-      state.lastError = "简历基础解析超时或失败";
-      saveOnboardingState(state, io);
-      emitBotMessage(io, allMessages, {
-        sender: petName,
-        avatar: chiefAvatar,
-        content: `${petName}：简历已经收到，但简历专家刚刚超时了。我已经把档案保住了，你可以直接继续回答下一步问题；如果想完全重来，就说"重新建档"。`,
-        groupId: "job",
-        isChiefBot: true,
-      });
-      return true;
-    }
-    state.lastError = "";
-    saveOnboardingState(state, io);
-
-    // 简历解析后，让 career-planner agent 自然地开始第一个画像问题
-    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      careerPlanner,
-      [{ role: "user", content: `用户刚上传了简历，简历专家已完成基础解析。现在请开始用户画像采集，自然地问第一个问题。` }],
-      0, io, "job", allMessages, petName, petPersonality,
-      buildOnboardingContext(state, petName)
-    );
-    return true;
   }
 
-  if (state.phase === "profile_collection") {
-    // 交给 career-planner agent 通过自然对话处理（意图判断由 LLM 自己做）
-    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    const { reply } = await streamAgent(
-      careerPlanner,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      buildOnboardingContext(state, petName)
-    );
-
-    // ── Step 3: 从 agent 回复中提取结构化信号 ────────────────────────
-    if (reply) {
-      // NEEDS_CLARIFICATION: agent 判断用户没提供新信息，不更新 slot
-      if (reply.includes("NEEDS_CLARIFICATION")) {
-        saveOnboardingState(state, io);
-        return true;
-      }
-
-      // SLOT_UPDATE:: 提取
-      const slotMatches = reply.match(/SLOT_UPDATE::(\{[^}]+\})/g);
-      if (slotMatches) {
-        for (const m of slotMatches) {
-          try {
-            const json = JSON.parse(m.replace("SLOT_UPDATE::", ""));
-            if (json.skills && typeof json.skills === "string") {
-              json.skills = normalizeSkills(json.skills);
-            }
-            applyOnboardingSlotPatch(state, json);
-          } catch {}
-        }
-      } else if (!reply.includes("NEEDS_CLARIFICATION")) {
-        // fallback: agent 没输出 SLOT_UPDATE 也没标记 NEEDS_CLARIFICATION，用 LLM 提取
-        const patch = await extractOnboardingSlotPatch(state, userMsg);
-        applyOnboardingSlotPatch(state, patch);
-      }
-
-      // ── Step 4: 检查完成度，决定是否推进 phase ─────────────────────
-      const nextStep = getNextOnboardingStep(state);
-      if (!nextStep || reply.includes("PHASE_COMPLETE")) {
-        // 所有信息收集完毕 → 发档案确认卡给用户确认/修改
-        state.currentStep = null;
-        state.phase = "profile_confirm";
-        persistProfileFromOnboarding(state);
-        saveOnboardingState(state, io);
-
-        // 发一条 profile_card 类型的消息
-        const cardMsg = {
-          id: `profile-card-${Date.now()}`,
-          sender: petName,
-          avatar: chiefAvatar,
-          content: `${petName}：信息都聊到了！帮你整理了一张档案卡，看看有没有需要改的地方～`,
-          groupId: "job",
-          timestamp: new Date().toISOString(),
-          isBot: true,
-          isChiefBot: true,
-          type: "profile_card",
-          profileData: { ...state.slots, roleScope: sanitizeProfileCardRoleScope(state.slots.roleScope) },
-        };
-        allMessages.push(cardMsg);
-        io.emit("receive_message", cardMsg);
-      } else {
-        state.currentStep = nextStep;
-        saveOnboardingState(state, io);
-      }
-    }
-    return true;
-  }
-
-  if (state.phase === "profile_confirm") {
-    // 等用户通过 profile_confirm socket 事件确认档案
-    // 用户在卡片上点确认后，前端 emit profile_confirm，server 处理后推进到 professional_positioning
-    // 如果用户发消息而不是点卡片，交给 career-planner 自然对话
-    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      careerPlanner,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 档案确认中】\n用户的档案卡已经展示给 ta 了。如果用户在讨论档案内容（想修改某项、有疑问），请帮 ta 解答。如果用户说"确认"、"没问题"、"可以"等，请告诉 ta 点击卡片上的确认按钮即可。`
-    );
-    return true;
-  }
-
-  if (state.phase === "professional_positioning") {
-    state.transitionInFlight = true;
-    state.lastError = "";
-    saveOnboardingState(state, io);
-
-    const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
-    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
-    const positioningResult = await runAgentChainWithTimeout(
-      professionalTeacher,
-      [{ role: "user", content: `【来自${petName}的任务】\n用户建档已完成。请基于 profile.md 做一次专业定位分析，输出强匹配、差异化优势、技能差距和时间线建议，并把结果写入 skills_gap.md。` }],
-      0,
-      io,
-      "job",
-      allMessages,
-      petName,
-      petPersonality
-    );
-    io.emit("agent_done", { groupId: "job" });
-    state.transitionInFlight = false;
-    if (!positioningResult.ok) {
-      console.warn("[onboarding] professional_positioning agent timed out, continuing anyway");
-    }
-
-    // 不管定位分析是否完全成功，都继续往下走（不卡住用户）
-    state.phase = "resume_diagnosis";
-    state.lastError = "";
-    saveOnboardingState(state, io);
-    const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      chiefAgent,
-      [{ role: "user", content: "专业老师已经完成定位分析。请自然地承接一句，告诉用户接下来会进入简历建议阶段，不要像系统播报。" }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 过渡消息】\n当前阶段即将从专业定位进入简历建议。像首席伴学官一样自然承接，不要重复专业老师刚才说过的内容。`
-    );
-    scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
-    return true;
-  }
-
-  if (state.phase === "resume_diagnosis") {
-    state.transitionInFlight = true;
-    state.lastError = "";
-    saveOnboardingState(state, io);
-
-    // 专业老师：从定位角度做首轮简历建议。
-    // 简历专家已经在简历上传时做过基础解析，这一阶段先不再串行跑一遍，避免 onboarding 过慢。
-    const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
-    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
-    await runAgentChainWithTimeout(
-      professionalTeacher,
-      [{ role: "user", content: `【来自${petName}的任务】\n请结合 profile.md 和 skills_gap.md，从专业定位的角度看用户的简历（resume_master.md），指出哪些经历可以更好地包装、哪些技能应该突出、哪些内容建议删减或调整顺序。给出具体的修改建议，不要自己改简历。` }],
-      0, io, "job", allMessages, petName, petPersonality
-    );
-    io.emit("agent_done", { groupId: "job" });
-    state.transitionInFlight = false;
-
-    // 建议出完了，切到 resume_review 让用户和 agent 讨论
-    state.phase = "resume_review";
-    state.lastError = "";
-    state.transitionInFlight = false;
-    saveOnboardingState(state, io);
-
-    const careerPlannerForReview = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      careerPlannerForReview,
-      [{ role: "user", content: "专业老师已经基于定位给出首轮简历建议了，简历专家也已经做过基础解析。请帮用户总结核心建议，然后问用户想现在就改简历还是先搜岗位边投边改。" }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 简历建议讨论】\n专业老师刚刚基于定位给出了首轮简历建议，简历专家在更早前已经做过基础解析。请用你自己的话总结当前最重要的优化要点，然后问用户：\n1. 现在就按建议改简历（你会让简历专家帮 ta 改）\n2. 先搜岗位、边投边改（直接进入搜岗阶段）\n语气自然，像朋友在聊天。`
-    );
-    return true;
-  }
-
-  if (state.phase === "resume_review") {
-    // 交给 LLM 判断用户意图，输出结构化决策标签
-    const careerPlannerForReview = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    const { reply } = await streamAgent(
-      careerPlannerForReview,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 简历建议讨论】
-专业老师和简历专家已经给出了优化建议。用户正在决定下一步。
-
-你的任务：
-1. 自然回应用户的消息
-2. 如果用户想先搜岗位/边投边改/开始/跳过简历修改，在回复末尾写：RESUME_DECISION::search
-3. 如果用户想现在就改简历/按建议改，在回复末尾写：RESUME_DECISION::edit
-4. 如果用户还在讨论/追问/没做决定，不写任何标签，继续引导
-
-标签不会展示给用户。`
-    );
-
-    if (reply?.includes("RESUME_DECISION::search")) {
-      state.phase = "search_strategy";
-      state.lastError = "";
-      saveOnboardingState(state, io);
-      scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
-      return true;
-    }
-
-    if (reply?.includes("RESUME_DECISION::edit")) {
-      const resumeExpertForEdit = JOB_AGENTS.find(a => a.id === "resume-expert")!;
-      io.emit("agent_thinking", { agentName: resumeExpertForEdit.name, groupId: "job" });
-      await runAgentChainWithTimeout(
-        resumeExpertForEdit,
-        [{ role: "user", content: `【来自${petName}的任务】\n用户认可了简历优化建议，请根据之前的建议帮用户修改 resume_master.md。修改后把改动要点告诉用户。` }],
-        0, io, "job", allMessages, petName, petPersonality
-      );
-      io.emit("agent_done", { groupId: "job" });
-
-      state.phase = "search_strategy";
-      state.lastError = "";
-      saveOnboardingState(state, io);
-      scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
-      return true;
-    }
-
-    // LLM 没输出决策标签 — 用户还在讨论，保持当前 phase
-    return true;
-  }
-
-  if (state.phase === "search_strategy") {
-    // 用 career-planner 来确认策略（不用 job-hunter，因为 job-hunter 会触发 search_jobs 工具）
-    const careerPlannerForStrategy = JOB_AGENTS.find(a => a.id === "career-planner")!;
-
-    if (!userMsg.trim()) {
-      const defaults = getDefaultSearchStrategy(state);
-      applySearchStrategyUpdate(state, defaults);
-      saveOnboardingState(state, io);
-      await streamAgent(
-        careerPlannerForStrategy,
-        [{ role: "user", content: "用户画像和简历优化建议都完成了，现在需要确认搜索策略再开始搜岗位。" }],
-        0, io, "job", allMessages, petName, petPersonality,
-        `【Onboarding 上下文 — 搜索策略确认】\n当前默认策略：渠道=${state.searchStrategy.channels.join(" / ") || defaults.channels.join(" / ")}；优先级=${state.searchStrategy.priorities.join(" > ") || defaults.priorities.join(" > ")}。\n请用自然对话和用户确认：\n1. 这轮先搜哪个渠道？Boss直聘 / 全网 / 混合搜\n2. 优先关注什么？地点、公司背景、还是岗位匹配度\n\n结构化回写协议：\n- 收到新策略时，在回复末尾另起一行写：STRATEGY_UPDATE::{"channels":["boss","web"],"priorities":["location","company"]}\n- 当策略已经可以开搜时，再额外附加一行：STRATEGY_CONFIRMED\n- 如果用户说"你决定/都可以"，你可以直接给默认策略并确认`
-      );
-      return true;
-    }
-
-    const { reply } = await streamAgent(
-      careerPlannerForStrategy,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 搜索策略确认】\n已收集的搜索策略：渠道=${state.searchStrategy.channels.join(" / ") || "未确认"}；优先级=${state.searchStrategy.priorities.join(" > ") || "未确认"}。\n继续自然确认搜索策略，并按协议输出 STRATEGY_UPDATE / STRATEGY_CONFIRMED。`
-    );
-
-    if (reply) {
-      const matches = reply.match(/STRATEGY_UPDATE::(\{[^}]+\})/g);
-      if (matches) {
-        for (const item of matches) {
-          try {
-            applySearchStrategyUpdate(state, JSON.parse(item.replace("STRATEGY_UPDATE::", "")));
-          } catch {}
-        }
-      } else {
-        applySearchStrategyUpdate(state, extractSearchStrategyHeuristic(userMsg, state));
-      }
-      if (reply.includes("STRATEGY_CONFIRMED") || state.searchStrategy.confirmed) {
-        if (!state.searchStrategy.channels.length) {
-          applySearchStrategyUpdate(state, getDefaultSearchStrategy(state));
-        }
-        state.phase = "first_job_search";
-        state.lastError = "";
-        saveOnboardingState(state, io);
-        scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
-      } else {
-        saveOnboardingState(state, io);
-      }
-    }
-    return true;
-  }
-
-  if (state.phase === "first_job_search") {
-    state.transitionInFlight = true;
-    state.lastError = "";
-    saveOnboardingState(state, io);
-
-    // ── 从 profile.md 读取真实求职意向，构造搜索参数 ──────────────────
-    const prefs = buildSearchPreferencesFromOnboarding(state);
-    let profileText = "";
-    try { profileText = readFileSync(PROFILE_FILE, "utf8"); } catch {}
-    const searchIntentText = `开始首轮搜岗。渠道：${prefs.channels.join(" / ")}；优先级：${prefs.priorities.join(" > ")}；目标方向：${prefs.explicitRole || prefs.inferredPrimaryRole || prefs.query}；公司偏好：${prefs.companyPreference || "未说明"}。`;
-    const queryResult = await generateSearchQueryAndCity({
-      profileText,
-      userMessage: searchIntentText,
-      fallbackRole: prefs.explicitRole || prefs.inferredPrimaryRole || prefs.query,
-      inferredRoles: [
-        prefs.explicitRole,
-        prefs.inferredPrimaryRole,
-        ...(state.slots.inferredRoles || []),
-      ].filter(Boolean),
-      jobType: state.slots.jobType,
-      targetCity: prefs.cityText,
-      companyPreference: prefs.companyPreference,
-    });
-    const query = queryResult.query;
-    const cityCode = queryResult.cityCode;
-
-    const jobHunterAgent = JOB_AGENTS.find(a => a.id === "job-hunter")!;
-
-    // ── 已登录，直接调用 search_jobs 执行真实搜索 ─────────────────────
-    emitBotMessage(io, allMessages, {
-      sender: jobHunterAgent.name,
-      avatar: jobHunterAgent.avatar,
-      content: `🔍 正在按「${prefs.channels.join(" + ")}」搜索「${query}」｜目标方向：${prefs.explicitRole || prefs.inferredPrimaryRole || query}｜城市优先：${prefs.orderedCities.join(" > ") || queryResult.city || prefs.primaryCity}${prefs.companyPreference ? `｜公司偏好：${prefs.companyPreference}` : ""}${prefs.priorities.length ? `｜优先级：${prefs.priorities.join(" > ")}` : ""}`,
-      groupId: "job",
-      isChiefBot: false,
-    });
-    io.emit("agent_thinking", { agentName: jobHunterAgent.name, groupId: "job" });
-
-    const searchResultText = await executeTool("search_jobs", {
-      query,
-      location: cityCode,
-      cityText: prefs.cityText,
-      channels: prefs.channels,
-    });
-    io.emit("agent_done", { groupId: "job" });
-    state.transitionInFlight = false;
-
-    // 搜索结果需要登录 → 弹登录窗
-    if (searchResultText.includes("NEED_LOGIN")) {
-      bossLoginPending = true;
-      bossLoginPlatform = "boss";
-      pendingResumableSearchTask = {
-        query,
-        location: cityCode,
-        cityText: prefs.cityText,
-        channels: prefs.channels,
-      };
-      saveOnboardingState(state, io);
-      emitBotMessage(io, allMessages, {
-        sender: jobHunterAgent.name,
-        avatar: jobHunterAgent.avatar,
-        content: `${petName}：Boss直聘 登录状态过期了，我已经重新帮你打开桌面登录窗口 🔑 你登完之后窗口会自动关闭，我会直接继续搜索。`,
-        groupId: "job",
-        isChiefBot: false,
-      });
-      return true;
-    }
-
-    // 搜索失败
-    if (searchResultText.includes("BOSS_FAILED") || searchResultText.includes("搜索出错")) {
-      state.lastError = "岗位首搜失败";
-      saveOnboardingState(state, io);
-      emitBotMessage(io, allMessages, {
-        sender: petName,
-        avatar: chiefAvatar,
-        content: `${petName}：搜索暂时没成功，可能是网络问题。你回我"继续"我就重试首搜。`,
-        groupId: "job",
-        isChiefBot: true,
-      });
-      return true;
-    }
-
-    // ── 搜索成功后按档案偏好重排结果 ──────────────────────────────────
-    let finalSearchText = searchResultText;
-    const structuredRows = loadLastSearchResults();
-    if (structuredRows.length > 0) {
-      const reranked = rerankSearchRows(structuredRows, {
-        orderedCities: prefs.orderedCities,
-        companyPreference: prefs.companyPreference,
-      }).slice(0, 15);
-      saveLastSearchResults(reranked);
-      finalSearchText = renderSearchMarkdownTable(reranked);
-    }
-
-    // ── 搜索成功，直接把真实结果发出来 ─────────────────────────────────
-    emitBotMessage(io, allMessages, {
-      sender: jobHunterAgent.name,
-      avatar: jobHunterAgent.avatar,
-      content: finalSearchText,
-      groupId: "job",
-      isChiefBot: false,
-    });
-    syncJobsToCollaborationBoard();
-    const searchBoardRows = loadCollaborationBoard()
-      .filter((row) => row.workflowStage === "new")
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-      .slice(0, 15);
-    const searchBoardText = renderCollaborationBoardChatTable(searchBoardRows, "这一轮搜岗已进入协作表");
-    if (searchBoardText) {
-      emitBotMessage(io, allMessages, {
-        sender: petName,
-        avatar: chiefAvatar,
-        content: searchBoardText,
-        groupId: "job",
-        isChiefBot: true,
-      });
-    }
-
-    state.phase = "first_application";
-    state.lastError = "";
-    saveOnboardingState(state, io);
-    emitBotMessage(io, allMessages, {
-      sender: petName,
-      avatar: chiefAvatar,
-      content: `${petName}：你可以直接回我想推进的编号，比如「投 1、3、5」或「先看 2、4」。如果这一批不够对口，也可以直接说你想调整城市、方向、公司类型，或者改成 Boss / 全网 / 混合搜。`,
-      groupId: "job",
-      isChiefBot: true,
-    });
-    return true;
-  }
-
-  if (state.phase === "first_application") {
-    // ── 用户先选岗位 → tailor → 确认投递 → 至少投出 1 个岗位后才完成 onboarding ──
-    if (await handleSelectedJobsWorkflow(io, allMessages, userMsg, petName, petPersonality)) {
-      state.lastError = "";
-      saveOnboardingState(state, io);
-      return true;
-    }
-
-    const beforeApplyIds = new Set(
-      loadCollaborationBoard()
-        .filter((row) => row.workflowStage === "applied" || ["contact_started", "submitted"].includes(row.applicationStatus))
-        .map((row) => row.id)
-    );
-
-    if (await handleApplyReadyWorkflow(io, allMessages, userMsg, petName, petPersonality)) {
-      const afterApplyRows = loadCollaborationBoard().filter(
-        (row) => row.workflowStage === "applied" || ["contact_started", "submitted"].includes(row.applicationStatus)
-      );
-      const newlyApplied = afterApplyRows.filter((row) => !beforeApplyIds.has(row.id));
-
-      if (newlyApplied.length > 0) {
-        state.phase = "completed";
-        state.completed = true;
-        state.currentStep = null;
-        state.lastError = "";
-        state.transitionInFlight = false;
-        saveOnboardingState(state, io);
-        const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
-        await streamAgent(
-          chiefAgent,
-          [{ role: "user", content: `用户的第一批真实投递已经发生，Onboarding 现在正式完成。请自然地庆祝一下，并告诉用户接下来你会继续盯进度、follow-up、新岗位和面试。` }],
-          0, io, "job", allMessages, petName, petPersonality,
-          `【Onboarding 收尾消息】\n第一批岗位已真实投递。请像首席伴学官一样自然收尾，不要像系统播报。`
-        );
-      } else {
-        state.lastError = "已进入投递确认，但还没有成功写入首批投递记录";
-        saveOnboardingState(state, io);
-      }
-      return true;
-    }
-
-    // 用户没有选岗位，可能在聊别的 → 交给 career-planner 自然对话
-    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-    await streamAgent(
-      careerPlanner,
-      [{ role: "user", content: userMsg }],
-      0, io, "job", allMessages, petName, petPersonality,
-      `【Onboarding 上下文 — 首次投递选择】\n岗位搜索结果已展示给用户。请引导用户选择想投递的岗位（告诉你编号即可），或者了解用户的顾虑。如果用户想换方向重新搜，也可以帮 ta 调整。`
-    );
-    return true;
-  }
-
-  emitBotMessage(io, allMessages, {
-    sender: petName,
-    avatar: chiefAvatar,
-    content: `${petName}：我们先把 onboarding 这一步走完哈，我会带着你一步步来，不会让流程乱掉的。`,
-    groupId: "job",
-    isChiefBot: true,
-  });
-  return true;
+  // 不拦截 — 所有消息都交给 runAgentChain 处理
+  return false;
 }
+
+// ── 从 agent 回复中解析 PHASE_UPDATE 并更新进度条 ─────────────────────
+function parseAndUpdatePhase(reply: string, io: Server) {
+  const match = reply.match(/PHASE_UPDATE::\{"phase":"([^"]+)"\}/);
+  if (!match) return;
+
+  const newPhase = match[1];
+  const validPhases = [
+    "resume_collection", "profile_collection", "profile_confirm",
+    "professional_positioning", "resume_diagnosis", "resume_review",
+    "search_strategy", "first_job_search", "first_application", "completed"
+  ];
+  if (!validPhases.includes(newPhase)) return;
+
+  const state = loadOnboardingState();
+  if (state.phase === newPhase) return; // 没变化
+
+  state.phase = newPhase as any;
+  if (newPhase === "completed") state.completed = true;
+  saveOnboardingState(state, io);
+  console.log(`[phase] updated to ${newPhase}`);
+}
+
 
 async function handleSelectedJobsWorkflow(
   io: Server,
@@ -4972,14 +4425,15 @@ async function startServer() {
       const pn = petData?.name || "团团";
       const pp = petData?.personality || "";
 
-      emitBotMessage(io, messages, {
-        sender: pn,
-        avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
-        content: `${pn}：档案确认完毕！接下来我让专业老师帮你做个深度定位分析～`,
-        groupId: "job",
-        isChiefBot: true,
-      });
-      scheduleOnboardingAdvance(io, messages, pn, pp);
+      // 档案确认后，让首席自然继续推进（不用状态机调度）
+      const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      setTimeout(async () => {
+        await runAgentChain(
+          { ...careerPlanner, name: pn },
+          [{ role: "user", content: "用户已确认档案。请继续按 SOUL.md 推进下一步（专业定位分析）。" }],
+          0, io, "job", messages, pn, pp
+        );
+      }, 500);
     });
 
     socket.on("send_message", (msg) => {
@@ -5474,8 +4928,10 @@ async function startServer() {
           content: "登录成功啦，我已经接着在桌面端帮你搜索匹配岗位了。",
           groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
         });
+        // 登录成功后让首席继续推进
         setTimeout(async () => {
-          await handleJobOnboarding(io, messages, "继续", pn, pp);
+          const cp = JOB_AGENTS.find(a => a.id === "career-planner")!;
+          await runAgentChain({ ...cp, name: pn }, [{ role: "user", content: "Boss直聘登录成功了，请继续帮用户搜索岗位。" }], 0, io, "job", messages, pn, pp);
         }, 500);
       } else {
         const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");

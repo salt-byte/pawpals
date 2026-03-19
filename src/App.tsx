@@ -749,6 +749,7 @@ export default function App() {
   const [selectedCompanyProvider, setSelectedCompanyProvider] = useState(MODEL_COMPANIES[0].provider);
   const [selectedSetupModel, setSelectedSetupModel] = useState(MODEL_COMPANIES[0].models[0].model);
   const [setupApiKey, setSetupApiKey] = useState('');
+  const [setupBaseUrl, setSetupBaseUrl] = useState('');
   const [customProviderKey, setCustomProviderKey] = useState('custom-openai');
   const [customModelName, setCustomModelName] = useState('');
   const [customBaseUrl, setCustomBaseUrl] = useState('');
@@ -3714,25 +3715,41 @@ export default function App() {
                       </div>
 
                       {!selectedCompany.custom && (
-                        <div className="mt-5 flex flex-wrap gap-2">
-                          {selectedCompany.models.map((item) => (
-                            <button
-                              key={`${selectedCompany.provider}-step2-${item.model}`}
-                              type="button"
-                              onClick={() => {
-                                setSelectedSetupModel(item.model);
-                                setSetupMessage(null);
-                              }}
-                              className={cn(
-                                'rounded-full px-4 py-3 text-sm font-semibold transition-all',
-                                selectedSetupModel === item.model
-                                  ? 'bg-pet-orange text-white'
-                                  : 'bg-pet-cream text-pet-brown/65 hover:bg-pet-orange/10',
-                              )}
-                            >
-                              {item.label}
-                            </button>
-                          ))}
+                        <div className="mt-5">
+                          <div className="flex flex-wrap gap-2">
+                            {selectedCompany.models.map((item) => (
+                              <button
+                                key={`${selectedCompany.provider}-step2-${item.model}`}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedSetupModel(item.model);
+                                  setSetupMessage(null);
+                                }}
+                                className={cn(
+                                  'rounded-full px-4 py-3 text-sm font-semibold transition-all',
+                                  selectedSetupModel === item.model
+                                    ? 'bg-pet-orange text-white'
+                                    : 'bg-pet-cream text-pet-brown/65 hover:bg-pet-orange/10',
+                                )}
+                              >
+                                {item.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="mt-4">
+                            <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">
+                              Base URL
+                            </label>
+                            <input
+                              value={setupBaseUrl}
+                              onChange={(e) => setSetupBaseUrl(e.target.value)}
+                              placeholder={selectedCompany.defaultBaseUrl || '输入该 provider 的 API Base URL'}
+                              className="w-full rounded-[24px] bg-pet-cream px-5 py-4 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
+                            />
+                            <p className="mt-2 text-xs text-pet-brown/45">
+                              默认地址已经帮你填好；如果你用的是代理、镜像或企业网关，可以改成自己的 URL。
+                            </p>
+                          </div>
                         </div>
                       )}
 
@@ -3751,12 +3768,18 @@ export default function App() {
                             className="w-full rounded-[24px] bg-pet-cream px-5 py-4 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
                           />
                           <div className="md:col-span-2">
+                            <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">
+                              Base URL
+                            </label>
                             <input
                               value={customBaseUrl}
                               onChange={(e) => setCustomBaseUrl(e.target.value)}
-                              placeholder="base URL，例如 https://openrouter.ai/api/v1"
+                              placeholder="例如 https://openrouter.ai/api/v1"
                               className="w-full rounded-[24px] bg-pet-cream px-5 py-4 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
                             />
+                            <p className="mt-2 text-xs text-pet-brown/45">
+                              不同 provider 的接口地址不同；不会改的话，就照默认或官方文档里的地址填写。
+                            </p>
                           </div>
                         </div>
                       )}
@@ -4014,9 +4037,11 @@ export default function App() {
                       placeholder="模型名，例如 gpt-4.1"
                       className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30" />
                     <div className="md:col-span-2">
+                      <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">Base URL</label>
                       <input value={switchBaseUrl} onChange={e => setSwitchBaseUrl(e.target.value)}
-                        placeholder="base URL，例如 https://openrouter.ai/api/v1"
+                        placeholder="例如 https://openrouter.ai/api/v1"
                         className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30" />
+                      <p className="mt-2 text-xs text-pet-brown/45">不同 provider 的接口地址不同；不会改的话，直接用系统给你的默认值即可。</p>
                     </div>
                   </div>
                 );
@@ -4037,6 +4062,18 @@ export default function App() {
                         </button>
                       ))}
                     </div>
+                    <div className="mt-4">
+                      <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">Base URL</label>
+                      <input
+                        value={switchBaseUrl}
+                        onChange={e => setSwitchBaseUrl(e.target.value)}
+                        placeholder={company.defaultBaseUrl || '输入该 provider 的 API Base URL'}
+                        className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
+                      />
+                      <p className="mt-2 text-xs text-pet-brown/45">
+                        默认已帮你填好常见地址；如果你用的是代理、镜像或企业网关，可以改成自己的 URL。
+                      </p>
+                    </div>
                   </div>
                 );
               })()}
@@ -4052,19 +4089,6 @@ export default function App() {
                   className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
                 />
               </div>
-
-              {/* Base URL（所有厂商都可自定义） */}
-              {!MODEL_COMPANIES.find(c => c.provider === switchProvider)?.custom && (
-                <div className="mb-5">
-                  <label className="block text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40 mb-3">Base URL（留空用默认）</label>
-                  <input
-                    value={switchBaseUrl}
-                    onChange={e => setSwitchBaseUrl(e.target.value)}
-                    placeholder={MODEL_COMPANIES.find(c => c.provider === switchProvider)?.defaultBaseUrl || '留空则使用官方默认地址'}
-                    className="w-full rounded-[24px] bg-pet-cream px-5 py-3 text-sm text-pet-brown border-none focus:ring-2 focus:ring-pet-orange/30"
-                  />
-                </div>
-              )}
 
               {switchMessage && (
                 <div className={cn(

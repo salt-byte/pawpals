@@ -208,6 +208,115 @@ function resetVolatileCareerState(reason) {
   appendDeploymentLog(`Reset volatile career state (${reason})`);
 }
 
+function scrubRuntimeConfigSecrets() {
+  const configPath = path.join(runtime.openClawHome, "openclaw.json");
+  if (!fs.existsSync(configPath)) return;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    scrubSecrets(cfg);
+    removeInvalidProviders(cfg);
+    fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  } catch (e) {
+    console.warn("[bootstrap] scrubRuntimeConfigSecrets warning:", e.message);
+  }
+}
+
+function scrubRuntimeEnvSecrets() {
+  const envPath = path.join(runtime.openClawHome, ".env");
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const cleaned = fs.readFileSync(envPath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => {
+        const idx = line.indexOf("=");
+        if (idx === -1) return line;
+        const key = line.slice(0, idx);
+        if (/key|token|secret|password/i.test(key)) return `${key}=`;
+        return line;
+      })
+      .join("\n");
+    fs.writeFileSync(envPath, cleaned ? `${cleaned}\n` : "", "utf8");
+  } catch (e) {
+    console.warn("[bootstrap] scrubRuntimeEnvSecrets warning:", e.message);
+  }
+}
+
+function scrubRuntimeAgentSecrets() {
+  const agentsRoot = path.join(runtime.openClawHome, "agents");
+  if (!fs.existsSync(agentsRoot)) return;
+
+  for (const agentId of fs.readdirSync(agentsRoot)) {
+    const agentDir = path.join(agentsRoot, agentId, "agent");
+    if (!fs.existsSync(agentDir)) continue;
+
+    const authPath = path.join(agentDir, "auth-profiles.json");
+    if (fs.existsSync(authPath)) {
+      try {
+        const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
+        auth.profiles = {};
+        auth.usageStats = {};
+        auth.lastGood = {};
+        fs.writeFileSync(authPath, `${JSON.stringify(auth, null, 2)}\n`, "utf8");
+      } catch (e) {
+        console.warn(`[bootstrap] scrub auth warning (${agentId}):`, e.message);
+      }
+    }
+
+    const modelsPath = path.join(agentDir, "models.json");
+    if (fs.existsSync(modelsPath)) {
+      try {
+        const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
+        if (models?.providers && typeof models.providers === "object") {
+          for (const provider of Object.values(models.providers)) {
+            if (provider && typeof provider === "object" && "apiKey" in provider) {
+              provider.apiKey = "";
+            }
+          }
+        }
+        fs.writeFileSync(modelsPath, `${JSON.stringify(models, null, 2)}\n`, "utf8");
+      } catch (e) {
+        console.warn(`[bootstrap] scrub models warning (${agentId}):`, e.message);
+      }
+    }
+
+    const sessionsPath = path.join(path.dirname(agentDir), "sessions", "sessions.json");
+    if (fs.existsSync(sessionsPath)) {
+      fs.rmSync(sessionsPath, { force: true });
+    }
+  }
+}
+
+function resetNewUserRuntimeState(reason) {
+  resetVolatileCareerState(reason);
+
+  const filesToDelete = [
+    path.join(runtime.pawPalsHome, "pet.json"),
+    path.join(runtime.pawPalsHome, "first-run-complete"),
+    path.join(runtime.pawPalsHome, "setup-state.json"),
+  ];
+  const dirsToDelete = [
+    path.join(runtime.openClawHome, "identity"),
+    path.join(runtime.openClawHome, "workspace", "memory"),
+  ];
+
+  for (const file of filesToDelete) {
+    if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+    }
+  }
+
+  for (const dir of dirsToDelete) {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  scrubRuntimeConfigSecrets();
+  scrubRuntimeEnvSecrets();
+  scrubRuntimeAgentSecrets();
+  appendDeploymentLog(`Reset runtime as fresh user (${reason}); cleared model selection, keys, pet, and identity`);
+}
+
 function syncRuntimeBuildMarker() {
   const markerPath = path.join(runtime.pawPalsHome, "runtime-build-signature.json");
   const nextSignature = computeRuntimeBuildSignature();
@@ -220,7 +329,7 @@ function syncRuntimeBuildMarker() {
   }
 
   if (previousSignature && previousSignature !== nextSignature) {
-    resetVolatileCareerState("build signature changed");
+    resetNewUserRuntimeState("build signature changed");
   }
 
   fs.writeFileSync(
@@ -271,6 +380,7 @@ ensureDir(runtime.pawPalsHome);
 ensureDir(runtime.openClawHome);
 ensureDir(runtime.cookieDir);
 markDeploymentStep("prepare-directories", `Prepared PawPals home at ${runtime.pawPalsHome}`);
+syncRuntimeBuildMarker();
 
 // 始终从 template 初始化/更新，保证 providers、agents 等配置完整
 // 如果运行时已有 config，merge 用户已配的 apiKey
@@ -439,7 +549,6 @@ if (sourceRoot) {
 removeObsoleteRuntimeArtifacts(runtime.openClawHome);
 
 ensureCareerFiles();
-syncRuntimeBuildMarker();
 appendDeploymentLog(`Ensured PawPals workspace at ${runtime.workspaceRoot}`);
 
 const summary = {
