@@ -2905,7 +2905,7 @@ async function streamAgent(
       const agentDisplayName = (agent as any).role || agent.name;
       systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
     } else if (groupId === "job") {
-      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
+      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
     }
 
     const boardInstruction = getStructuredBoardInstruction(agent.id);

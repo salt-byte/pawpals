@@ -1606,6 +1606,18 @@ export default function App() {
       const escaped = msg.sender.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       next = next.replace(new RegExp(`^${escaped}[：:]\\s*`), '');
     }
+    // 清理内部结构化标签（不展示给用户）
+    next = next
+      .replace(/BOARD_UPDATE::\{[^}]*\}\n?/g, '')
+      .replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, '')
+      .replace(/PHASE_UPDATE::\{[^}]*\}\n?/g, '')
+      .replace(/PHASE_COMPLETE\n?/g, '')
+      .replace(/NEEDS_CLARIFICATION\n?/g, '')
+      .replace(/STRATEGY_UPDATE::\{[^}]*\}\n?/g, '')
+      .replace(/STRATEGY_CONFIRMED\n?/g, '')
+      .replace(/RESUME_DECISION::\w+\n?/g, '')
+      .replace(/APPLY_JOB::\{[^}]*\}\n?/g, '')
+      .trim();
     return next;
   };
 
