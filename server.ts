@@ -2830,6 +2830,14 @@ async function streamAgent(
       let profileText = "";
       try { profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8"); } catch {}
 
+      // 如果 profile.md 是空的，从最近聊天记录里补充上下文
+      if (!profileText.trim() || profileText.trim().length < 30) {
+        try {
+          const chatLog = readFileSync(path.join(CAREER_DIR, "chat_log.md"), "utf8");
+          profileText = "【从聊天记录提取的用户信息】\n" + chatLog.slice(-2000);
+        } catch {}
+      }
+
       const roleMatch = profileText.match(/目标岗位[：:]\s*(.+)/) || profileText.match(/方向[：:]\s*(.+)/);
       const typeMatch = profileText.match(/类型[：:]\s*(.+)/);
       const cityMatch = profileText.match(/城市[：:]\s*(.+)/);
