@@ -2718,7 +2718,7 @@ async function streamAgent(
   const displayName = isChief ? petName : (agent as any).role || agent.name;
   const displayAvatar = isChief
     ? `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`
-    : `https://api.dicebear.com/7.x/adventurer/svg?seed=${agent.id}`;
+    : ((agent as any).avatar || `/avatars/${agent.id}.jpg`);
 
   // 先发一条空消息占位，后续 stream_chunk 往里追加
   const placeholder = {
