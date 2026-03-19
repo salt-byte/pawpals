@@ -1305,14 +1305,15 @@ function saveOnboardingState(state: OnboardingState, io?: Server) {
 function handleOnboardingNavigationCommand(
   state: OnboardingState,
   userMsg: string,
-  petName: string
+  petName: string,
+  io?: Server
 ): { handled: boolean; prompt?: string } {
   const text = userMsg.trim();
   if (!text) return { handled: false };
 
   if (/(重新建档|重新开始|全部重来|从头开始|reset)/i.test(text)) {
     const fresh = createDefaultOnboardingState();
-    saveOnboardingState(fresh);
+    saveOnboardingState(fresh, io);
     return {
       handled: true,
       prompt: `${petName}：好的，我们从头重新建档。先把你的简历重新发我一下，我按新的信息来整理。`,
@@ -1326,7 +1327,7 @@ function handleOnboardingNavigationCommand(
     state.lastError = "";
     state.currentStep = "target_role";
     clearOnboardingStepValue(state, "target_role");
-    saveOnboardingState(state);
+    saveOnboardingState(state, io);
     return {
       handled: true,
       prompt: `${petName}：可以，我们先把目标岗位重新确认一下。你现在最想找什么方向的工作？比如 AI 产品经理、开发工程师、数据分析师。`,
@@ -1343,13 +1344,13 @@ function handleOnboardingNavigationCommand(
       if (prev) {
         clearOnboardingStepValue(state, prev);
         state.currentStep = prev;
-        saveOnboardingState(state);
+        saveOnboardingState(state, io);
         return { handled: true, prompt: `${petName}：好的，我们回到上一步，你再跟我说说这个部分。` };
       }
       state.phase = "resume_collection";
       state.currentStep = "target_role";
       state.resumeUploaded = false;
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       return {
         handled: true,
         prompt: `${petName}：我们先退回到简历这一步。把最新简历重新发我一下，我按新的版本继续。`,
@@ -1359,7 +1360,7 @@ function handleOnboardingNavigationCommand(
     if (state.phase === "professional_positioning" || state.phase === "resume_diagnosis" || state.phase === "resume_review" || state.phase === "search_strategy" || state.phase === "first_job_search" || state.phase === "first_application" || state.phase === "completed") {
       state.phase = "profile_collection";
       state.currentStep = "skills";
-      saveOnboardingState(state);
+      saveOnboardingState(state, io);
       return {
         handled: true,
         prompt: `${petName}：可以，我们先回到档案确认的最后一步。你也可以直接告诉我想改哪一项信息，我会重新整理。`,
@@ -3200,7 +3201,7 @@ async function handleJobOnboarding(
   if (state.completed) return false;
 
   const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
-  const nav = handleOnboardingNavigationCommand(state, userMsg, petName);
+  const nav = handleOnboardingNavigationCommand(state, userMsg, petName, io);
   if (nav.handled) {
     emitBotMessage(io, allMessages, {
       sender: petName,
