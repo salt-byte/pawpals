@@ -41,6 +41,21 @@ export interface Message {
   isBot?: boolean;
   isChiefBot?: boolean;
   isLoading?: boolean;
+  type?: 'text' | 'profile_card';
+  profileData?: ProfileCardData;
+}
+
+export interface ProfileCardData {
+  targetRole: string;
+  market: string;
+  jobType: string;
+  timeRange: string;
+  targetCity: string;
+  roleScope: string;
+  companyPreference: string;
+  traits: string;
+  skills: string[];
+  inferredRoles: string[];
 }
 
 export interface Post {

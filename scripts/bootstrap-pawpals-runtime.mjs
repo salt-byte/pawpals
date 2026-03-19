@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { resolveAppPaths } from "./app-paths.mjs";
 import { appendDeploymentLog, markDeploymentStep } from "./deployment-state.mjs";
 import { resolveRuntimePaths } from "./runtime-paths.mjs";
@@ -96,6 +97,30 @@ function scrubSecrets(config) {
   return config;
 }
 
+function removeInvalidProviders(config) {
+  if (!config?.models?.providers || typeof config.models.providers !== "object") return config;
+
+  const invalidProviders = [];
+  for (const [providerName, provider] of Object.entries(config.models.providers)) {
+    if (!provider || typeof provider !== "object") continue;
+    const baseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
+    const api = typeof provider.api === "string" ? provider.api.trim() : "";
+    if (api === "openai-completions" && !baseUrl) {
+      invalidProviders.push(providerName);
+    }
+  }
+
+  for (const providerName of invalidProviders) {
+    delete config.models.providers[providerName];
+  }
+
+  if (invalidProviders.length > 0) {
+    appendDeploymentLog(`Removed invalid providers from runtime config: ${invalidProviders.join(", ")}`);
+  }
+
+  return config;
+}
+
 function ensureCareerFiles() {
   const files = {
     "applications.json": "[]\n",
@@ -112,6 +137,97 @@ function ensureCareerFiles() {
       fs.writeFileSync(file, initialContent, "utf8");
     }
   }
+}
+
+function collectSignatureEntries(root, base = root, entries = []) {
+  if (!root || !fs.existsSync(root)) return entries;
+  const stat = fs.statSync(root);
+  if (stat.isFile()) {
+    entries.push(`${path.relative(base, root)}:${stat.size}:${Math.floor(stat.mtimeMs)}`);
+    return entries;
+  }
+  const children = fs.readdirSync(root).sort((a, b) => a.localeCompare(b));
+  for (const child of children) {
+    collectSignatureEntries(path.join(root, child), base, entries);
+  }
+  return entries;
+}
+
+function computeRuntimeBuildSignature() {
+  const hash = crypto.createHash("sha256");
+  const packageJsonPath = path.join(resolveAppPaths().repoRoot, "package.json");
+  const roots = [
+    packageJsonPath,
+    path.join(resolveAppPaths().repoRoot, "server.ts"),
+    path.join(resolveAppPaths().repoRoot, "server"),
+    path.join(resolveAppPaths().repoRoot, "electron"),
+    templateDir,
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    const base = fs.existsSync(root) && fs.statSync(root).isDirectory() ? root : path.dirname(root);
+    for (const entry of collectSignatureEntries(root, base)) {
+      hash.update(entry);
+      hash.update("\n");
+    }
+  }
+
+  return hash.digest("hex");
+}
+
+function resetVolatileCareerState(reason) {
+  const filesToDelete = [
+    path.join(runtime.workspaceRoot, "collaboration_board.json"),
+    path.join(runtime.workspaceRoot, "last_search_results.json"),
+    path.join(runtime.workspaceRoot, "onboarding_state.json"),
+    path.join(runtime.workspaceRoot, "profile.md"),
+    path.join(runtime.workspaceRoot, "resume_master.md"),
+    path.join(runtime.workspaceRoot, "skills_gap.md"),
+    path.join(runtime.pawPalsHome, "mail-watcher-state.json"),
+  ];
+  const filesToReinitialize = [
+    path.join(runtime.workspaceRoot, "applications.json"),
+    path.join(runtime.workspaceRoot, "contacts.json"),
+    path.join(runtime.workspaceRoot, "jobs.json"),
+    path.join(runtime.workspaceRoot, "pawpals_messages.json"),
+    path.join(runtime.workspaceRoot, "chat_log.md"),
+  ];
+
+  for (const file of filesToDelete) {
+    if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+    }
+  }
+
+  for (const file of filesToReinitialize) {
+    const ext = path.extname(file);
+    const empty = ext === ".json" ? "[]\n" : "";
+    fs.writeFileSync(file, empty, "utf8");
+  }
+
+  appendDeploymentLog(`Reset volatile career state (${reason})`);
+}
+
+function syncRuntimeBuildMarker() {
+  const markerPath = path.join(runtime.pawPalsHome, "runtime-build-signature.json");
+  const nextSignature = computeRuntimeBuildSignature();
+  let previousSignature = "";
+
+  if (fs.existsSync(markerPath)) {
+    try {
+      previousSignature = JSON.parse(fs.readFileSync(markerPath, "utf8"))?.signature || "";
+    } catch {}
+  }
+
+  if (previousSignature && previousSignature !== nextSignature) {
+    resetVolatileCareerState("build signature changed");
+  }
+
+  fs.writeFileSync(
+    markerPath,
+    `${JSON.stringify({ signature: nextSignature, updatedAt: new Date().toISOString() }, null, 2)}\n`,
+    "utf8",
+  );
 }
 
 function removeObsoleteRuntimeArtifacts(openClawHome) {
@@ -213,6 +329,7 @@ if (!sourceRoot) {
     }
 
     if (!copySecrets) scrubSecrets(rewritten);
+    removeInvalidProviders(rewritten);
     fs.writeFileSync(runtimeConfigPath, `${JSON.stringify(rewritten, null, 2)}\n`, "utf8");
     appendDeploymentLog("Rewrote OpenClaw config (template base + merged user keys)");
   }
@@ -227,11 +344,10 @@ if (fs.existsSync(configPath)) {
     cfg.gateway.http ??= {};
     cfg.gateway.http.endpoints ??= {};
     cfg.gateway.http.endpoints.chatCompletions ??= {};
-    if (!cfg.gateway.http.endpoints.chatCompletions.enabled) {
-      cfg.gateway.http.endpoints.chatCompletions.enabled = true;
-      fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
-      appendDeploymentLog("Enabled HTTP chatCompletions endpoint in openclaw.json");
-    }
+    removeInvalidProviders(cfg);
+    cfg.gateway.http.endpoints.chatCompletions.enabled = true;
+    fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+    appendDeploymentLog("Normalized runtime openclaw.json");
   } catch {}
 }
 
@@ -252,6 +368,7 @@ if (sourceRoot) {
 removeObsoleteRuntimeArtifacts(runtime.openClawHome);
 
 ensureCareerFiles();
+syncRuntimeBuildMarker();
 appendDeploymentLog(`Ensured PawPals workspace at ${runtime.workspaceRoot}`);
 
 const summary = {

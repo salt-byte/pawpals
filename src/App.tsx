@@ -77,7 +77,8 @@ import {
   StudySession, 
   TreeHolePost,
   Notification,
-  UserProfile
+  UserProfile,
+  ProfileCardData,
 } from './types';
 
 function cn(...inputs: ClassValue[]) {
@@ -112,6 +113,136 @@ const TOOL_ICON: Record<string, string> = {
   read_file: "📁",
   write_file: "✏️",
 };
+
+const ONBOARDING_STEPS_UI = [
+  { id: 'resume_collection', label: '建档', emoji: '📄', phases: ['resume_collection', 'profile_collection', 'profile_confirm'] },
+  { id: 'professional_positioning', label: '定位', emoji: '🧭', phases: ['professional_positioning'] },
+  { id: 'resume_diagnosis', label: '简历', emoji: '📝', phases: ['resume_diagnosis', 'resume_review'] },
+  { id: 'search_strategy', label: '搜岗', emoji: '🔍', phases: ['search_strategy', 'first_job_search'] },
+  { id: 'first_application', label: '投递', emoji: '🚀', phases: ['first_application'] },
+];
+
+function OnboardingProgressBar({ currentPhase, completed }: { currentPhase: string; completed: boolean }) {
+  if (completed) return null;
+
+  const currentStepIdx = ONBOARDING_STEPS_UI.findIndex(step => step.phases.includes(currentPhase));
+
+  return (
+    <div className="px-4 py-2 bg-gradient-to-r from-amber-50/80 to-orange-50/80 border-b border-pet-orange/10 flex items-center justify-center gap-1">
+      {ONBOARDING_STEPS_UI.map((step, i) => {
+        const isActive = i === currentStepIdx;
+        const isDone = i < currentStepIdx;
+        return (
+          <React.Fragment key={step.id}>
+            {i > 0 && (
+              <div className={cn("w-4 md:w-8 h-px", isDone ? "bg-pet-orange/40" : "bg-pet-brown/10")} />
+            )}
+            <div className={cn(
+              "flex items-center gap-0.5 px-1.5 md:px-2 py-0.5 rounded-full text-[10px] md:text-xs transition-all",
+              isActive ? "bg-pet-orange/15 text-pet-orange font-bold scale-105" :
+              isDone ? "text-pet-orange/60" : "text-pet-brown/30"
+            )}>
+              <span>{isDone ? '✓' : step.emoji}</span>
+              <span className="hidden sm:inline">{step.label}</span>
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardData; petName: string; onConfirm: (d: ProfileCardData) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState(data);
+  const [confirmed, setConfirmed] = useState(false);
+
+  if (confirmed) {
+    return (
+      <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-2xl p-4 border border-green-200">
+        <div className="text-center text-green-700 font-medium">✅ 档案已确认</div>
+      </div>
+    );
+  }
+
+  const fields: { key: keyof ProfileCardData; label: string; emoji: string }[] = [
+    { key: 'targetRole', label: '目标方向', emoji: '🎯' },
+    { key: 'market', label: '市场', emoji: '🌍' },
+    { key: 'jobType', label: '类型', emoji: '📋' },
+    { key: 'timeRange', label: '时间', emoji: '📅' },
+    { key: 'targetCity', label: '城市', emoji: '📍' },
+    { key: 'roleScope', label: '岗位范围', emoji: '🔍' },
+    { key: 'companyPreference', label: '公司偏好', emoji: '🏢' },
+    { key: 'traits', label: '个人特质', emoji: '✨' },
+  ];
+
+  return (
+    <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-2xl p-4 border border-pet-orange/20 max-w-sm">
+      <div className="text-sm font-bold text-pet-brown mb-3 flex items-center gap-1.5">
+        🐾 {petName || '伴学官'}帮你整理的档案
+      </div>
+      <div className="space-y-2">
+        {fields.map(({ key, label, emoji }) => (
+          <div key={key} className="flex items-start gap-2">
+            <span className="text-xs mt-0.5">{emoji}</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-[10px] text-pet-brown/50 block">{label}</span>
+              {editing ? (
+                <input
+                  className="w-full text-xs bg-white rounded-lg px-2 py-1 border border-pet-orange/20 text-pet-brown outline-none focus:border-pet-orange/50"
+                  value={String(form[key] || '')}
+                  onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+                />
+              ) : (
+                <span className="text-xs text-pet-brown font-medium">{String(data[key] || '未填写')}</span>
+              )}
+            </div>
+          </div>
+        ))}
+        <div className="flex items-start gap-2">
+          <span className="text-xs mt-0.5">🛠️</span>
+          <div className="flex-1">
+            <span className="text-[10px] text-pet-brown/50 block">技能</span>
+            {editing ? (
+              <input
+                className="w-full text-xs bg-white rounded-lg px-2 py-1 border border-pet-orange/20 text-pet-brown outline-none focus:border-pet-orange/50"
+                value={form.skills?.join('、') || ''}
+                onChange={(e) => setForm({ ...form, skills: e.target.value.split(/[,，、]/).map(s => s.trim()).filter(Boolean) })}
+              />
+            ) : (
+              <span className="text-xs text-pet-brown font-medium">{data.skills?.join('、') || '未填写'}</span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-2 mt-3">
+        {editing ? (
+          <>
+            <button
+              onClick={() => { setEditing(false); }}
+              className="flex-1 text-xs py-1.5 rounded-xl bg-white text-pet-brown border border-pet-brown/10"
+            >取消</button>
+            <button
+              onClick={() => { setConfirmed(true); onConfirm(form); }}
+              className="flex-1 text-xs py-1.5 rounded-xl bg-pet-orange text-white font-medium"
+            >确认保存</button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => { setForm(data); setEditing(true); }}
+              className="flex-1 text-xs py-1.5 rounded-xl bg-white text-pet-brown border border-pet-brown/10"
+            >修改</button>
+            <button
+              onClick={() => { setConfirmed(true); onConfirm(data); }}
+              className="flex-1 text-xs py-1.5 rounded-xl bg-pet-orange text-white font-medium"
+            >确认无误 ✓</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ToolActivityCard({ activity }: { activity: ToolActivityEvent }) {
   const perm = TOOL_PERMISSION_CONFIG[activity.permission];
@@ -560,6 +691,8 @@ export default function App() {
     { id: '1', type: 'achievement', title: '达成成就', content: '恭喜！你已累计自习超过 100 分钟！', timestamp: new Date().toISOString(), read: false },
     { id: '2', type: 'system', title: '首席官上线', content: '你的首席伴学官已就位，快去设置它的人格吧！', timestamp: new Date().toISOString(), read: true },
   ]);
+  const [onboardingPhase, setOnboardingPhase] = useState<string>('resume_collection');
+  const [onboardingCompleted, setOnboardingCompleted] = useState(false);
   const [showPetSettings, setShowPetSettings] = useState(false);
   const [showUserSettings, setShowUserSettings] = useState(false);
   const [showModelSwitch, setShowModelSwitch] = useState(false);
@@ -754,6 +887,17 @@ export default function App() {
     socketRef.current.on('update_study_room', (users: StudySession[]) => setStudyRoomUsers(users));
     socketRef.current.on('update_tree_hole', (ps: TreeHolePost[]) => setTreeHolePosts(ps));
     socketRef.current.on('new_tree_hole', (post: TreeHolePost) => setTreeHolePosts(prev => [post, ...prev]));
+
+    socketRef.current.on('onboarding_phase', ({ phase, completed }: { phase: string; completed: boolean }) => {
+      setOnboardingPhase(phase);
+      setOnboardingCompleted(completed);
+    });
+
+    // Fetch initial onboarding status
+    fetch('/api/onboarding/status').then(r => r.json()).then(data => {
+      setOnboardingPhase(data.phase || 'resume_collection');
+      setOnboardingCompleted(data.completed || false);
+    }).catch(() => {});
 
     socketRef.current.on('receive_message', (msg: Message) => {
       messagesRef.current = [...messagesRef.current, msg];
@@ -2208,7 +2352,12 @@ export default function App() {
                     </div>
                   </header>
 
-                  <div 
+                  {/* Onboarding 进度条 — 仅在求职群且未完成时显示 */}
+                  {activeChat?.id === 'job' && !onboardingCompleted && (
+                    <OnboardingProgressBar currentPhase={onboardingPhase} completed={onboardingCompleted} />
+                  )}
+
+                  <div
                     ref={scrollRef}
                     className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6"
                   >
@@ -2279,6 +2428,17 @@ export default function App() {
                                 <span className="w-2 h-2 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'150ms'}}/>
                                 <span className="w-2 h-2 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'300ms'}}/>
                               </span>
+                            ) : msg.type === 'profile_card' && msg.profileData ? (
+                              <ProfileConfirmCard
+                                data={msg.profileData}
+                                petName={getSavedPetProfile()?.name || ''}
+                                onConfirm={(updatedData) => {
+                                  socketRef.current?.emit('profile_confirm', updatedData);
+                                  setMessages(prev => prev.map(m =>
+                                    m.id === msg.id ? { ...m, type: 'text', content: `✅ 档案已确认！\n- 方向：${updatedData.targetRole}\n- 市场：${updatedData.market}\n- 城市：${updatedData.targetCity}\n- 类型：${updatedData.jobType}` } : m
+                                  ));
+                                }}
+                              />
                             ) : (
                               attachmentMatch ? (
                                 <div className="flex items-center gap-2 rounded-xl border border-current/10 px-3 py-2">

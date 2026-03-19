@@ -1296,8 +1296,10 @@ function loadOnboardingState(): OnboardingState {
   return createDefaultOnboardingState();
 }
 
-function saveOnboardingState(state: OnboardingState) {
+function saveOnboardingState(state: OnboardingState, io?: Server) {
   try { writeFileSync(ONBOARDING_STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+  // 通知前端更新进度条
+  if (io) io.emit("onboarding_phase", { phase: state.phase, completed: state.completed });
 }
 
 function handleOnboardingNavigationCommand(
@@ -3326,16 +3328,46 @@ async function handleJobOnboarding(
       // ── Step 4: 检查完成度，决定是否推进 phase ─────────────────────
       const nextStep = getNextOnboardingStep(state);
       if (!nextStep || reply.includes("PHASE_COMPLETE")) {
+        // 所有信息收集完毕 → 发档案确认卡给用户确认/修改
         state.currentStep = null;
-        state.phase = "professional_positioning";
+        state.phase = "profile_confirm";
         persistProfileFromOnboarding(state);
         saveOnboardingState(state);
-        scheduleOnboardingAdvance(io, allMessages, petName, petPersonality);
+
+        // 发一条 profile_card 类型的消息
+        const cardMsg = {
+          id: `profile-card-${Date.now()}`,
+          sender: petName,
+          avatar: chiefAvatar,
+          content: `${petName}：信息都聊到了！帮你整理了一张档案卡，看看有没有需要改的地方～`,
+          groupId: "job",
+          timestamp: new Date().toISOString(),
+          isBot: true,
+          isChiefBot: true,
+          type: "profile_card",
+          profileData: { ...state.slots },
+        };
+        allMessages.push(cardMsg);
+        io.emit("receive_message", cardMsg);
       } else {
         state.currentStep = nextStep;
         saveOnboardingState(state);
       }
     }
+    return true;
+  }
+
+  if (state.phase === "profile_confirm") {
+    // 等用户通过 profile_confirm socket 事件确认档案
+    // 用户在卡片上点确认后，前端 emit profile_confirm，server 处理后推进到 professional_positioning
+    // 如果用户发消息而不是点卡片，交给 career-planner 自然对话
+    const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+    await streamAgent(
+      careerPlanner,
+      [{ role: "user", content: userMsg }],
+      0, io, "job", allMessages, petName, petPersonality,
+      `【Onboarding 上下文 — 档案确认中】\n用户的档案卡已经展示给 ta 了。如果用户在讨论档案内容（想修改某项、有疑问），请帮 ta 解答。如果用户说"确认"、"没问题"、"可以"等，请告诉 ta 点击卡片上的确认按钮即可。`
+    );
     return true;
   }
 
@@ -4798,6 +4830,33 @@ async function startServer() {
       setTimeout(() => tryWakeChief(), 250);
     });
 
+    // 档案确认卡：用户点击确认后
+    socket.on("profile_confirm", (profileData: any) => {
+      const state = loadOnboardingState();
+      if (state.phase !== "profile_confirm") return;
+
+      // 用确认后的数据更新 slots
+      if (profileData) {
+        applyOnboardingSlotPatch(state, profileData);
+      }
+      state.phase = "professional_positioning";
+      persistProfileFromOnboarding(state);
+      saveOnboardingState(state);
+
+      const petData = loadPetRuntimeProfile();
+      const pn = petData?.name || "团团";
+      const pp = petData?.personality || "";
+
+      emitBotMessage(io, messages, {
+        sender: pn,
+        avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
+        content: `${pn}：档案确认完毕！接下来我让专业老师帮你做个深度定位分析～`,
+        groupId: "job",
+        isChiefBot: true,
+      });
+      scheduleOnboardingAdvance(io, messages, pn, pp);
+    });
+
     socket.on("send_message", (msg) => {
       const newMessage = { ...msg, id: Date.now().toString(), timestamp: new Date().toISOString() };
       messages.push(newMessage);
@@ -4919,6 +4978,16 @@ async function startServer() {
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
+  });
+
+  app.get("/api/onboarding/status", (_req, res) => {
+    const state = loadOnboardingState();
+    res.json({
+      phase: state.phase,
+      completed: state.completed,
+      slots: state.slots,
+      searchStrategy: state.searchStrategy,
+    });
   });
 
   app.get("/api/setup", (req, res) => {

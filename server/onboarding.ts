@@ -9,7 +9,7 @@ export type OnboardingStep =
   | "skills";
 
 export type OnboardingState = {
-  phase: "resume_collection" | "profile_collection" | "professional_positioning" | "resume_diagnosis" | "resume_review" | "search_strategy" | "first_job_search" | "first_application" | "completed";
+  phase: "resume_collection" | "profile_collection" | "profile_confirm" | "professional_positioning" | "resume_diagnosis" | "resume_review" | "search_strategy" | "first_job_search" | "first_application" | "completed";
   currentStep: OnboardingStep | null;
   completed: boolean;
   resumeUploaded: boolean;
