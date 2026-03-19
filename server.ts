@@ -2830,6 +2830,30 @@ async function streamAgent(
       }
     }
 
+    // 专业老师/简历专家：如果消息里提到具体岗位，自动抓取 JD 正文
+    if ((agent.id === "professional-teacher" || agent.id === "resume-expert") &&
+        /JD|拆解|分析|定位|定制|tailor/i.test(lastUserMsg)) {
+      // 从协作表或搜索结果找 URL
+      const board = loadCollaborationBoard();
+      const searchResults = loadLastSearchResults();
+      const allRows = [...board, ...searchResults.map(r => ({ company: r.company, role: r.role, jdUrl: r.jdUrl }))];
+
+      // 匹配消息里提到的公司/岗位
+      const matchedRow = allRows.find((row: any) =>
+        row.jdUrl && ((row.company && lastUserMsg.includes(row.company)) || (row.role && lastUserMsg.includes(row.role)))
+      ) || allRows.find((row: any) => row.jdUrl); // fallback: 第一个有 URL 的
+
+      if (matchedRow?.jdUrl) {
+        emitToolActivity("fetch_jd", "抓取 JD 详情", "network", `${matchedRow.company} - ${matchedRow.role}`);
+        const jdContent = await fetchJdContent(matchedRow.jdUrl);
+        if (jdContent && jdContent.length > 50) {
+          toolInjections.push(`【JD 正文 - ${matchedRow.company} ${matchedRow.role}】\n${jdContent.slice(0, 3000)}`);
+        } else {
+          toolInjections.push(`【JD 抓取提示】未能抓取到 ${matchedRow.company} 的 JD 正文，请基于岗位名称和公司信息做分析。`);
+        }
+      }
+    }
+
     // search_jobs：关键词触发，用 LLM 从 profile + 用户消息生成搜索关键词
     if (allowedToolNames.includes("search_jobs") &&
         /boss|搜|找工作|岗位|实习|intern|job|职位|帮我搜|重新搜/i.test(userMsgNoMention)) {
