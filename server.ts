@@ -759,6 +759,16 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
   syncSelectedProviderToRuntimeAgents(config, provider);
 }
 
+function hydrateRuntimeAgentsFromSelectedModel() {
+  const config = loadOpenClawConfig();
+  const primaryModel = String(config?.agents?.defaults?.model?.primary || "").trim();
+  const [selectedProvider = ""] = primaryModel.split("/");
+  if (!selectedProvider) return;
+  syncSelectedProviderToRuntimeAgents(config, selectedProvider);
+}
+
+hydrateRuntimeAgentsFromSelectedModel();
+
 // ── OpenClaw Gateway 配置 ─────────────────────────────────────────────
 // 从 openclaw.json 读取 gateway token（在 OPENCLAW_CONFIG_FILE 定义之后）
 function readGatewayToken(): string {
@@ -3287,13 +3297,26 @@ async function handleJobOnboarding(
 
   if (state.phase === "resume_collection") {
     if (!hasResumeAttachment(userMsg)) {
-      emitBotMessage(io, allMessages, {
-        sender: petName,
-        avatar: chiefAvatar,
-        content: `${petName}：咱们先把建档这一步走完哈～先把你的简历发给我吧，PDF 或 Word 都可以，我先认识一下你 🐾`,
-        groupId: "job",
-        isChiefBot: true,
-      });
+      const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      const { reply } = await streamAgent(
+        chiefAgent,
+        [{ role: "user", content: `用户刚发来消息：${userMsg || "（空消息）"}。当前仍处于建档第一步，请你自然地提醒用户先上传简历，不要暴露内部流程。要明确说明 PDF 或 Word 都可以，但语气要像真实聊天，不要像系统播报。` }],
+        depth,
+        io,
+        "job",
+        allMessages,
+        petName,
+        petPersonality
+      );
+      if (!reply || !reply.trim()) {
+        emitBotMessage(io, allMessages, {
+          sender: petName,
+          avatar: chiefAvatar,
+          content: `${petName}：先把你的简历发给我吧，PDF 或 Word 都可以，我先认识一下你～`,
+          groupId: "job",
+          isChiefBot: true,
+        });
+      }
       return true;
     }
 

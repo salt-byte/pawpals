@@ -346,6 +346,23 @@ if (fs.existsSync(configPath)) {
     cfg.gateway.http.endpoints.chatCompletions ??= {};
     removeInvalidProviders(cfg);
     cfg.gateway.http.endpoints.chatCompletions.enabled = true;
+
+    // 确保 agents.defaults.model.primary 跟随用户选择的模型
+    // 读 setup-state.json 获取用户上次选的 provider/model
+    const setupStatePath = path.join(runtime.pawPalsHome, "setup-state.json");
+    if (fs.existsSync(setupStatePath)) {
+      try {
+        const setupState = JSON.parse(fs.readFileSync(setupStatePath, "utf8"));
+        if (setupState.selectedProvider && setupState.selectedModel) {
+          cfg.agents ??= {};
+          cfg.agents.defaults ??= {};
+          cfg.agents.defaults.model ??= {};
+          cfg.agents.defaults.model.primary = `${setupState.selectedProvider}/${setupState.selectedModel}`;
+          appendDeploymentLog(`Set default model to ${cfg.agents.defaults.model.primary} from setup-state`);
+        }
+      } catch {}
+    }
+
     fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
     appendDeploymentLog("Normalized runtime openclaw.json");
   } catch {}
