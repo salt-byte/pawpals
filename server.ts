@@ -955,7 +955,7 @@ async function generateSearchQueryAndCity(input: {
         }],
         max_tokens: 120,
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(30000),
     });
     const qData = await queryRes.json() as any;
     const qText = qData.choices?.[0]?.message?.content || "";
