@@ -2856,10 +2856,9 @@ async function streamAgent(
       toolInjections.push(`【搜索结果】\n${result}`);
     }
 
-    // apply_job (Step 3): 检查是否有待确认的投递命令（来自 AI 结构化指令）
-    // AI 回复中嵌入 APPLY_JOB::{"url":"...","company":"...","title":"..."} 格式的指令
-    // 用户说"确认"时从 pendingApplyCommands 取出并执行
+    // apply_job: 投递管家收到投递任务时，自动从协作表查 URL 并执行
     if (allowedToolNames.includes("apply_job")) {
+      // 方式 1: AI 回复中的 APPLY_JOB:: 指令 + 用户确认
       const sessionKey = agent.id;
       const pending = pendingApplyCommands.get(sessionKey);
       const userConfirmedApply = /^(确认|投递|投|好的|是的|ok|yes|apply)$/i.test(lastUserMsg.trim());
@@ -2873,6 +2872,38 @@ async function streamAgent(
         toolInjections.push(`【投递结果】\n${result}`);
         pendingApplyCommands.delete(sessionKey);
         calledApply = true;
+      }
+
+      // 方式 2: 消息里包含投递意图（首席 @投递管家 说"帮我投"），从协作表查 URL
+      if (!calledApply && /投递|投这|帮.*投|请.*投|apply/i.test(lastUserMsg)) {
+        const board = loadCollaborationBoard();
+        // 从消息里匹配公司名或岗位名
+        const matchedRow = board.find((row: any) => {
+          return row.jdUrl && (
+            (row.company && lastUserMsg.includes(row.company)) ||
+            (row.role && lastUserMsg.includes(row.role))
+          );
+        }) || board.find((row: any) => row.jdUrl && row.workflowStage === "selected");
+        // 如果没匹配到具体岗位，用最近搜索结果的第一个
+        const searchResults = loadLastSearchResults();
+        const targetRow = matchedRow || (searchResults.length > 0 ? {
+          company: searchResults[0].company,
+          role: searchResults[0].role,
+          jdUrl: searchResults[0].jdUrl,
+        } : null);
+
+        if (targetRow?.jdUrl) {
+          emitToolActivity("apply_job", "自动投递岗位", "boss", targetRow.jdUrl);
+          const result = await executeTool("apply_job", {
+            job_url: targetRow.jdUrl,
+            company: targetRow.company || "",
+            title: targetRow.role || "",
+          });
+          toolInjections.push(`【投递结果】\n${result}`);
+          calledApply = true;
+        } else {
+          toolInjections.push("【投递提示】未在协作表中找到该岗位的投递链接，请先让岗位猎手搜索岗位。");
+        }
       }
     }
 
