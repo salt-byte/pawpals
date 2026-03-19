@@ -3070,7 +3070,7 @@ async function streamAgent(
     const rawReply = fullText;
 
     // 解析 PHASE_UPDATE / PROFILE_CONFIRM 标签
-    parseAndUpdatePhase(fullText, io, allMessages, petName);
+    await parseAndUpdatePhase(fullText, io, allMessages, petName);
 
     // 清理结构化标签，不展示给用户
     fullText = fullText
@@ -3304,7 +3304,7 @@ async function handleJobOnboarding(
 }
 
 // ── 从 agent 回复中解析 PHASE_UPDATE 并更新进度条 ─────────────────────
-function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[], petName?: string) {
+async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[], petName?: string) {
   // PHASE_UPDATE:: — 更新进度条
   const match = reply.match(/PHASE_UPDATE::\{"phase":"([^"]+)"\}/);
   if (match) {
@@ -3325,32 +3325,52 @@ function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[], pet
     }
   }
 
-  // PROFILE_CONFIRM:: — LLM 认为画像收集完毕，弹出确认卡
+  // PROFILE_CONFIRM:: — LLM 认为画像收集完毕，用 LLM 从聊天记录提取画像并写入 profile.md
   if (reply.includes("PROFILE_CONFIRM") && allMessages) {
     const state = loadOnboardingState();
     const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName || "团团")}`;
 
-    // 从 profile.md 读取当前画像数据
-    let profileData: any = { ...state.slots };
+    // 从最近聊天记录中用 LLM 提取画像
+    let profileData: any = {};
     try {
-      const profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8");
-      const extract = (key: string) => {
-        const m = profileText.match(new RegExp(`${key}[：:]\\s*(.+)`));
-        return m?.[1]?.trim() || "";
-      };
-      profileData = {
-        targetRole: extract("方向") || state.slots?.targetRole || "",
-        market: extract("市场") || state.slots?.market || "",
-        jobType: extract("类型") || state.slots?.jobType || "",
-        timeRange: extract("时间") || state.slots?.timeRange || "",
-        targetCity: extract("城市") || state.slots?.targetCity || "",
-        roleScope: extract("范围") || state.slots?.roleScope || "",
-        companyPreference: extract("公司偏好") || state.slots?.companyPreference || "",
-        traits: extract("个人特质") || state.slots?.traits || "",
-        skills: (extract("技能") || "").split(/[,，、]/).map((s: string) => s.trim()).filter(Boolean),
-        inferredRoles: state.slots?.inferredRoles || [],
-      };
-    } catch {}
+      const recentChat = allMessages
+        .filter((m: any) => m.groupId === "job")
+        .slice(-20)
+        .map((m: any) => `${m.sender}: ${(m.content || "").slice(0, 300)}`)
+        .join("\n");
+
+      const extractRes = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${getGatewayToken()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "auto",
+          messages: [{
+            role: "system",
+            content: `从对话记录中提取用户求职画像。返回 JSON：{"targetRole":"目标岗位","market":"国内/海外","jobType":"实习/全职","timeRange":"时间","targetCity":"城市","roleScope":"范围","companyPreference":"公司偏好","traits":"个人特质","skills":["技能1","技能2"]}。只返回 JSON。`
+          }, {
+            role: "user",
+            content: recentChat
+          }],
+          max_tokens: 300,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const extractData = await extractRes.json() as any;
+      const extractText = extractData.choices?.[0]?.message?.content || "";
+      const jsonMatch = extractText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) profileData = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.warn("[profile_confirm] LLM extraction failed:", (e as any)?.message);
+    }
+
+    // 写入 profile.md
+    if (profileData.targetRole) {
+      const profileMd = `# 用户档案\n\n方向: ${profileData.targetRole || ""}\n类型: ${profileData.jobType || ""}\n市场: ${profileData.market || ""}\n时间: ${profileData.timeRange || ""}\n城市: ${profileData.targetCity || ""}\n范围: ${profileData.roleScope || ""}\n公司偏好: ${profileData.companyPreference || ""}\n个人特质: ${profileData.traits || ""}\n\n## 技能\n${(profileData.skills || []).map((s: string) => `- ${s}`).join("\n")}\n`;
+      try {
+        writeFileSync(path.join(CAREER_DIR, "profile.md"), profileMd, "utf8");
+        console.log("[profile_confirm] wrote profile.md");
+      } catch {}
+    }
 
     const cardMsg = {
       id: `profile-card-${Date.now()}`,
