@@ -3427,6 +3427,40 @@ async function handleJobOnboarding(
     saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
   }
 
+  // Guard 2: 如果 profile.md 是空的但聊天里已有足够信息，自动写入
+  const profileContent = (() => { try { return readFileSync(PROFILE_FILE, "utf8").trim(); } catch { return ""; } })();
+  if (profileContent.length < 50 && allMessages.filter((m: any) => m.groupId === "job").length > 5) {
+    try {
+      const recentChat = allMessages
+        .filter((m: any) => m.groupId === "job")
+        .slice(-15)
+        .map((m: any) => `${m.sender}: ${(m.content || "").slice(0, 200)}`)
+        .join("\n");
+
+      const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${getGatewayToken()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "auto",
+          messages: [{
+            role: "system",
+            content: `从对话记录中提取用户求职档案。返回纯文本 markdown 格式：\n# 用户档案\n\n方向: xxx\n类型: xxx\n市场: xxx\n时间: xxx\n城市: xxx\n范围: xxx\n公司偏好: xxx\n个人特质: xxx\n\n## 技能\n- xxx\n\n如果某个字段聊天中没提到就写"未说明"。`
+          }, { role: "user", content: recentChat }],
+          max_tokens: 400,
+        }),
+        signal: AbortSignal.timeout(12000),
+      });
+      const data = await res.json() as any;
+      const text = data.choices?.[0]?.message?.content || "";
+      if (text.includes("方向") && text.length > 50) {
+        writeFileSync(PROFILE_FILE, text, "utf8");
+        console.log("[auto-profile] wrote profile.md from chat history");
+      }
+    } catch (e) {
+      console.warn("[auto-profile] failed:", (e as any)?.message);
+    }
+  }
+
   // 不拦截 — 所有消息都交给 runAgentChain 处理
   return false;
 }
