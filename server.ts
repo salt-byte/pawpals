@@ -3582,7 +3582,7 @@ async function handleJobOnboarding(
 
   if (state.phase === "resume_review") {
     // 用户和 agent 讨论简历建议，判断用户想改简历还是先搜岗
-    const wantsToSearch = /(先投|先搜|边投边改|先看岗位|先找|先搜岗|不改了|之后再|以后再|直接投|开始搜)/.test(userMsg);
+    const wantsToSearch = /(先投|先搜|边投边改|先看岗位|先找|先搜岗|不改了|之后再|以后再|直接投|开始搜|开始吧|开始|搜岗|直接开始|不用改|跳过)/.test(userMsg);
     const wantsToEdit = /(改简历|现在改|先改|帮我改|按建议改|开始优化|修改简历|改一下|改吧)/.test(userMsg);
 
     if (wantsToSearch) {
