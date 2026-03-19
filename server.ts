@@ -1355,14 +1355,20 @@ function loadOnboardingState(): OnboardingState {
       };
     }
   } catch {}
+  // 只有 profile.md 有实质内容时才认为 onboarding 已完成
   if (existsSync(PROFILE_FILE)) {
-    return {
-      ...createDefaultOnboardingState(),
-      phase: "completed",
-      currentStep: null,
-      completed: true,
-      resumeUploaded: existsSync(RESUME_MASTER_FILE),
-    };
+    try {
+      const content = readFileSync(PROFILE_FILE, "utf8").trim();
+      if (content.length > 50) {
+        return {
+          ...createDefaultOnboardingState(),
+          phase: "completed",
+          currentStep: null,
+          completed: true,
+          resumeUploaded: existsSync(RESUME_MASTER_FILE),
+        };
+      }
+    } catch {}
   }
   return createDefaultOnboardingState();
 }
