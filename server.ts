@@ -3296,7 +3296,6 @@ async function handleJobOnboarding(
   }
 
   if (state.phase === "resume_collection") {
-    // 如果 resume_master.md 已有内容（之前上传过），直接跳过上传步骤
     const existingResume = (() => {
       try {
         const content = readFileSync(RESUME_MASTER_FILE, "utf8").trim();
@@ -3304,8 +3303,58 @@ async function handleJobOnboarding(
       } catch { return ""; }
     })();
 
-    if (!hasResumeAttachment(userMsg) && !existingResume) {
-      // 确实没有简历，让 LLM 自然引导上传
+    if (!hasResumeAttachment(userMsg)) {
+      if (existingResume) {
+        // 有旧简历：判断用户是想复用还是重新上传
+        const wantsReuse = /(用上|用之前|用刚才|就用这|继续用|不换|刚发了|刚刚发|已经发)/i.test(userMsg);
+        const wantsNew = /(重新|换一份|更新了|新简历|重新上传|再传一次)/i.test(userMsg);
+
+        if (wantsNew) {
+          // 用户明确要换简历 → 清空旧的，要求重新上传
+          try { writeFileSync(RESUME_MASTER_FILE, "", "utf8"); } catch {}
+          const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+          await streamAgent(
+            careerPlanner,
+            [{ role: "user", content: userMsg }],
+            0, io, "job", allMessages, petName, petPersonality,
+            `【Onboarding 上下文】\n用户想换一份新简历。请让 ta 重新上传 PDF 或 Word 文件。`
+          );
+          return true;
+        }
+
+        if (wantsReuse || !userMsg.trim()) {
+          // 用户想复用 或 空消息（自动推进）→ 用旧简历继续
+          state.resumeUploaded = true;
+          state.phase = "profile_collection";
+          state.currentStep = "target_role";
+          saveOnboardingState(state, io);
+          emitBotMessage(io, allMessages, {
+            sender: petName, avatar: chiefAvatar,
+            content: `${petName}：我看到之前的简历还在，直接用这份继续！`,
+            groupId: "job", isChiefBot: true,
+          });
+          const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+          await streamAgent(
+            careerPlanner,
+            [{ role: "user", content: `用户已有简历，现在请开始用户画像采集。` }],
+            0, io, "job", allMessages, petName, petPersonality,
+            buildOnboardingContext(state, petName)
+          );
+          return true;
+        }
+
+        // 其他情况：让 LLM 问用户要用旧简历还是上传新的
+        const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+        await streamAgent(
+          careerPlanner,
+          [{ role: "user", content: userMsg }],
+          0, io, "job", allMessages, petName, petPersonality,
+          `【Onboarding 上下文】\n用户之前上传过简历（已保存）。请问用户：要用之前那份简历继续，还是上传一份新的？`
+        );
+        return true;
+      }
+
+      // 没有旧简历，让 LLM 引导上传
       const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
       await streamAgent(
         careerPlanner,
@@ -3319,36 +3368,18 @@ async function handleJobOnboarding(
     state.resumeUploaded = true;
     state.phase = "profile_collection";
     state.currentStep = "target_role";
-
-    // 如果是用旧简历（已存在），不需要重新解析
-    const resumeText = existingResume || (() => {
-      const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
-      saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
-      return resumePayload.rawText;
-    })();
+    const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
+    saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
+    const resumeText = resumePayload.rawText;
     saveOnboardingState(state, io);
 
     emitBotMessage(io, allMessages, {
       sender: petName,
       avatar: chiefAvatar,
-      content: existingResume
-        ? `${petName}：我看到之前的简历还在，直接用这份继续！`
-        : `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
+      content: `${petName}：收到简历啦！我先让简历专家帮你做个基础解析～`,
       groupId: "job",
       isChiefBot: true,
     });
-
-    // 已有简历跳过解析，直接开始 profile 采集
-    if (existingResume) {
-      const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
-      await streamAgent(
-        careerPlanner,
-        [{ role: "user", content: `用户已有简历，简历内容已保存。现在请开始用户画像采集，自然地问第一个问题。` }],
-        0, io, "job", allMessages, petName, petPersonality,
-        buildOnboardingContext(state, petName)
-      );
-      return true;
-    }
 
     const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
     io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
