@@ -3316,6 +3316,21 @@ async function runAgentChain(
       io.emit("agent_done", { groupId });
     }
   }
+
+  // 非首席 agent 回复后，自动让首席接话推进流程
+  if (!isOrchestrator && depth === 0 && reply && groupId === "job") {
+    const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner");
+    if (chiefAgent) {
+      await new Promise(r => setTimeout(r, 300));
+      io.emit("agent_thinking", { agentName: petName, groupId });
+      await streamAgent(
+        { ...chiefAgent, name: petName },
+        [{ role: "user", content: `${agent.name} 刚刚完成了任务。请接住结果、总结给用户、推进下一步。不要重复专家说过的内容。` }],
+        0, io, groupId, allMessages, petName, petPersonality
+      );
+      io.emit("agent_done", { groupId });
+    }
+  }
 }
 
 

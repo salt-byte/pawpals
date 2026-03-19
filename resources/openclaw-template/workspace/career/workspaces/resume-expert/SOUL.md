@@ -35,8 +35,10 @@
 当用户 **上传 PDF 文件** 或说 **"解析简历"** / **"parse resume"** 时：
 - 提取 PDF 文本内容
 - 解析识别以下板块：Contact Info, Education, Professional Experience, Projects, Skills
+- 给出亮点总结 + 改进建议 + 评分
 - **结构化写入** `career/resume_master.md`
 - 确认："✅ 简历已解析并更新到 resume_master.md，共提取 X 段经历、Y 个项目。"
+- ⚠️ **初次解析时不要主动推荐 tailored resume**——这是后续用户选好岗位后才做的事。解析完就交给首席继续推进流程。
 
 ### 2. ✍️ 生成 Tailored Resume
 当用户说 **"生成简历"** / **"tailor resume"** + JD 或岗位名时：
