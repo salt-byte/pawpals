@@ -1,5 +1,6 @@
 /** HTTP client for the locally running PawPals server. */
-export const SERVER_BASE = 'http://localhost:3010';
+// The desktop/web server defaults to port 3000 (PAWPALS_PORT can override it).
+export const SERVER_BASE = 'http://localhost:3000';
 
 export function createSessionClient({ fetchImpl, base = SERVER_BASE } = {}) {
   const doFetch = fetchImpl ?? globalThis.fetch;

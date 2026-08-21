@@ -3,7 +3,7 @@ import { createSessionClient, SERVER_BASE } from './session-client.js';
 
 describe('local session client', () => {
   it('uses the documented local service endpoint and handles health errors', async () => {
-    expect(SERVER_BASE).toBe('http://localhost:3010');
+    expect(SERVER_BASE).toBe('http://localhost:3000');
     const live = createSessionClient({ fetchImpl: vi.fn().mockResolvedValue({ ok: true }) });
     expect(await live.ping()).toBe(true);
     const offline = createSessionClient({ fetchImpl: vi.fn().mockRejectedValue(new Error('offline')) });

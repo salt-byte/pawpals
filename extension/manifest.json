@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "陪你求职的 AI 伴学团队。悬浮宠物 + 岗位页助手。",
   "permissions": ["storage", "sidePanel", "scripting", "tabs"],
-  "host_permissions": ["http://localhost:3010/*", "https://www.zhipin.com/*"],
+  "host_permissions": ["http://localhost:3000/*", "https://www.zhipin.com/*"],
   "background": { "service_worker": "background/service-worker.js", "type": "module" },
   "action": { "default_title": "PawPals" },
   "side_panel": { "default_path": "sidepanel/panel.html" },
