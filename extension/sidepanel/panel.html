@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PawPals</title>
+    <style>
+      body { margin: 0; padding: 14px; color: #5c3d2e; background: #fff8f0; font: 13px/1.55 -apple-system, "PingFang SC", sans-serif; }
+      h1 { margin: 0 0 12px; font-size: 15px; } button { padding: 8px 12px; border: 0; border-radius: 6px; color: #fff; background: #ff8c42; cursor: pointer; }
+      button.ghost { border: 1px solid #eaddd0; color: #5c3d2e; background: transparent; } label { display: block; margin-top: 8px; font-size: 12px; opacity: .78; }
+      select, input { box-sizing: border-box; width: 100%; margin-top: 3px; padding: 6px; border: 1px solid #eaddd0; border-radius: 6px; background: #fff; font: inherit; }
+      #elements { min-height: 32px; max-height: 260px; margin-top: 10px; padding: 7px; overflow-y: auto; border: 1px solid #eaddd0; border-radius: 6px; background: #fff; white-space: pre-wrap; font: 11px/1.55 ui-monospace, Menlo, monospace; }
+      #result { min-height: 18px; margin-top: 10px; padding: 7px; border-radius: 6px; font-size: 12px; } .ok { background: #e8f6e8; } .bad { background: #fbeaea; }
+    </style>
+  </head>
+  <body>
+    <h1>PawPals — 手动调试面板</h1>
+    <button id="perceive">感知当前页面</button>
+    <div id="elements">（尚未感知）</div>
+    <hr>
+    <label>动作 <select id="action"><option value="click">click</option><option value="type">type</option><option value="scroll">scroll</option><option value="navigate">navigate</option></select></label>
+    <label>元素编号（click / type）<input id="index" type="number" placeholder="0"></label>
+    <label>文本（type）<input id="text" placeholder="AI产品经理"></label>
+    <label>滚动距离（scroll）<input id="dy" type="number" placeholder="400"></label>
+    <label>网址（navigate）<input id="url" placeholder="https://www.zhipin.com/"></label>
+    <p><button id="execute" class="ghost">执行</button></p>
+    <div id="result" aria-live="polite"></div>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

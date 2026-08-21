@@ -1,0 +1,22 @@
+#pawpals-pet {
+  all: initial;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 2147483647;
+  display: block;
+  width: 56px;
+  height: 56px;
+  border: 0;
+  border-radius: 50%;
+  background: #ff8c42;
+  color: #fff;
+  font: 26px/56px -apple-system, "PingFang SC", sans-serif;
+  text-align: center;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(92, 61, 46, .3);
+  transition: transform .2s ease;
+}
+#pawpals-pet:hover { transform: scale(1.08); }
+#pawpals-pet[data-state="offline"] { background: #b8a99c; }
+#pawpals-pet[data-state="alert"] { background: #e05a47; }
