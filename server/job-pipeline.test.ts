@@ -31,8 +31,20 @@ describe("companySlug", () => {
     expect(companySlug("")).toBe("company");
   });
 
-  it("已知缺陷：纯中文公司名也退化为 company，导致简历版本号无法区分岗位", () => {
-    expect(companySlug("字节跳动")).toBe("company");
+  it("中文公司名保留原字符", () => {
+    expect(companySlug("字节跳动")).toBe("字节跳动");
+  });
+
+  it("不同的中文公司名不会撞成同一个版本号", () => {
+    expect(companySlug("字节跳动")).not.toBe(companySlug("阿里巴巴"));
+  });
+
+  it("中英混合按空格断成连字符", () => {
+    expect(companySlug("字节跳动 ByteDance")).toBe("字节跳动-bytedance");
+  });
+
+  it("中文全角标点当分隔符，不进版本号", () => {
+    expect(companySlug("字节跳动（中国）")).toBe("字节跳动-中国");
   });
 });
 
@@ -53,6 +65,11 @@ describe("协作表格载荷", () => {
 
   it("resumeUpdatePayload 的版本号带上公司标识", () => {
     expect(JSON.parse(resumeUpdatePayload(row)).resumeVersion).toBe("v2.1-anthropic");
+  });
+
+  it("中文公司的版本号也带得上公司标识", () => {
+    const cnRow = { ...row, company: "字节跳动" };
+    expect(JSON.parse(resumeUpdatePayload(cnRow)).resumeVersion).toBe("v2.1-字节跳动");
   });
 
   it("载荷是紧凑单行 JSON——BOARD_UPDATE 协议按行扫描，换行会解析失败", () => {

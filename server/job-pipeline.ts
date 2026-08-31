@@ -27,14 +27,15 @@ const JD_CONTENT_LIMIT = 3000;
 /**
  * 公司名转成可放进简历版本号的标识。
  *
- * 已知缺陷：只保留 a-z0-9，所以纯中文公司名会全部退化成 "company"，
- * 导致「字节跳动」和「阿里巴巴」的简历版本号都是 v2.1-company，
- * 无法区分岗位。修这个会改变已有数据里的版本号，需要单独决定。
+ * 保留任意语种的字母与数字（\p{L}\p{N}），只把标点和空白折成连字符，
+ * 所以中文公司名保持原样：「字节跳动」→ 字节跳动，不再和「阿里巴巴」
+ * 一起退化成 company。版本号只用于展示（协作表格、聊天播报、可编辑输入框），
+ * 不做文件名或索引键，因此不需要限制在 ASCII。
  */
 export function companySlug(company: string): string {
   return String(company || "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/g, "") || "company";
 }
 
