@@ -1,0 +1,40 @@
+{
+  "suite": "interview",
+  "n": 2,
+  "summary": {
+    "avg_score": 1,
+    "pass_rate": 1,
+    "passed": 2,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "itv001",
+      "feedback_preview": "**评分：3/10**\n\n**Strengths:**\n*   “看 DAU 和留存”：抓住了业务增长的核心终极指标，体现了结果导向意识。\n\n**Weaknesses:**\n*   **维度太单一**：AI产品需关注特有技术指标。\n    *   *改法*：增加“模型侧指标”，如首字响应延迟、语义准确率、幻觉率。\n*   **缺乏过程指标**：用户“用得多”不代表“用得好”。\n    *   *改",
+      "review": {
+        "rubric": {
+          "I1": 1,
+          "I2": 1,
+          "I3": 1,
+          "I4": 1
+        },
+        "score": 1,
+        "passed": true
+      }
+    },
+    {
+      "id": "itv002",
+      "feedback_preview": "**Score: 7.5/10**\n\n**Strengths:**\n1. “把 bad case 分类”：展现了AI PM必备的Case-driven意识。\n2. “搭了一个 10 维度评估表”：体现了量化分析的专业度与实习深度。\n\n**Weaknesses:**\n*   **归因维度略显零散：** 建议按“输入（意图/Prompt）- 中间（RAG/模型逻辑）- 输出（UI/反馈）”全链路拆解。",
+      "review": {
+        "rubric": {
+          "I1": 1,
+          "I2": 1,
+          "I3": 1,
+          "I4": 1
+        },
+        "score": 1,
+        "passed": true
+      }
+    }
+  ]
+}

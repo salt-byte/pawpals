@@ -1,0 +1,30 @@
+{"id":"r001","userMsg":"@简历专家 帮我看看这份简历","expected":"resume-expert","reason":"显式 @"}
+{"id":"r002","userMsg":"@面试教练 我想模拟一下产品经理面试","expected":"interview-coach","reason":"显式 @"}
+{"id":"r003","userMsg":"@岗位猎手 帮我搜下北京的 AI PM 实习","expected":"job-hunter","reason":"显式 @"}
+{"id":"r004","userMsg":"@投递管家 我刚投了字节那个","expected":"app-tracker","reason":"显式 @"}
+{"id":"r005","userMsg":"@人脉顾问 帮我找下小红书 PM 的联系人","expected":"networker","reason":"显式 @"}
+{"id":"r006","userMsg":"@专业老师 我这个背景适合做 AI PM 吗","expected":"professional-teacher","reason":"显式 @"}
+{"id":"r007","userMsg":"我累了今天","expected":"career-planner","reason":"情绪类，首席接住"}
+{"id":"r008","userMsg":"今天有什么进展吗","expected":"career-planner","reason":"全局询问，首席统筹"}
+{"id":"r009","userMsg":"帮我搜一下 AI 产品经理的实习","expected":"career-planner","reason":"无 @，由首席决策派给 job-hunter"}
+{"id":"r010","userMsg":"我的简历需要改一下","expected":"career-planner","reason":"无 @，由首席派给 resume-expert"}
+{"id":"r011","userMsg":"我想练面试","expected":"career-planner","reason":"无 @，首席派 interview-coach"}
+{"id":"r012","userMsg":"我刚收到字节的面试邀请！","expected":"career-planner","reason":"庆祝场景，首席必须先恭喜再调度"}
+{"id":"r013","userMsg":"我已经投了 5 家了一个回复都没有","expected":"career-planner","reason":"焦虑场景，首席兜底"}
+{"id":"r014","userMsg":"上次小红书那个面试我答得不太好","expected":"career-planner","reason":"反思场景，首席先共情"}
+{"id":"r015","userMsg":"这个 JD 你看下我能不能投","expected":"career-planner","reason":"无 @，首席派 professional-teacher 做 JD 分析"}
+{"id":"r016","userMsg":"回复 简历专家：那一段你帮我改具体点","expected":"resume-expert","reason":"引用回复格式"}
+{"id":"r017","userMsg":"回复 面试教练：再来一道","expected":"interview-coach","reason":"引用回复格式"}
+{"id":"r018","userMsg":"我刚看到一个岗位想投，链接是 boss.zhipin.com/xxx","expected":"career-planner","reason":"无 @，首席分配"}
+{"id":"r019","userMsg":"我是计算机专业的，想做产品","expected":"career-planner","reason":"自我介绍，首席接住做引导"}
+{"id":"r020","userMsg":"@JD分析师 这个 JD 看下","expected":"professional-teacher","reason":"alias 测试：JD分析师 → professional-teacher"}
+{"id":"r021","userMsg":"@技能分析师 我现在缺什么","expected":"professional-teacher","reason":"alias 测试"}
+{"id":"r022","userMsg":"今天有点焦虑想找你聊聊","expected":"career-planner","reason":"情绪陪伴"}
+{"id":"r023","userMsg":"hi","expected":"career-planner","reason":"打招呼"}
+{"id":"r024","userMsg":"@团团 在吗","expected":"career-planner","reason":"显式 @ 首席（团团是 pet name）"}
+{"id":"r025","userMsg":"再帮我找几个产品经理岗位","expected":"career-planner","reason":"重复搜岗，首席决策"}
+{"id":"r026","userMsg":"上周面试反馈过来了","expected":"career-planner","reason":"反馈场景"}
+{"id":"r027","userMsg":"我想看看现在投递的状态","expected":"career-planner","reason":"无 @，首席分给 app-tracker"}
+{"id":"r028","userMsg":"@app-tracker 给我看下投递列表","expected":"app-tracker","reason":"显式 @ 英文 id"}
+{"id":"r029","userMsg":"帮我同时搜下岗位和改下简历","expected":"career-planner","reason":"多领域并行，触发 orchestrate"}
+{"id":"r030","userMsg":"啊啊啊好烦","expected":"career-planner","reason":"纯情绪"}

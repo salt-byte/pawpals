@@ -1,0 +1,38 @@
+{
+  "suite": "resume",
+  "n": 2,
+  "summary": {
+    "avg_score": 0,
+    "pass_rate": 0,
+    "passed": 0,
+    "failed": 2
+  },
+  "results": [
+    {
+      "id": "resume001",
+      "advice_preview": "针对字节跳动-豆包的岗位需求，建议将你的双硕士背景转化为“数据驱动型 AI PM”定位。以下是可直接复制到简历中的改写文本，重点强化了 JD 要求的**数据分析**与 **LLM 实战**：\n\n### 核心项目经历（以 0-1 项目为例）\n**XX 智能对话助手（LLM 驱动） | 项目负责人 | 202X.XX - 202X.XX**\n*   **0-1 产品定义与迭代**：负责对话产品的功能迭",
+      "review": {
+        "passed": false,
+        "score": 0,
+        "rubric": {},
+        "issues": [
+          "judge JSON 解析失败"
+        ],
+        "raw_preview": "```json\n{\n  \"passed\": true,\n  \"score\": 1.0,\n  \"rubric\": {\n    \""
+      }
+    },
+    {
+      "id": "resume002",
+      "advice_preview": "可以投。虽然 JD 要求 3 年经验，但小红书非常看重**“内容体感”**和**“社区理解”**，这正是你 BFA 背景的优势。针对你缺乏技术和数据经验的薄弱项，请按以下话术改写简历：\n\n### 1. 针对“数据分析能力”改写（将定性研究定量化）\n**原描述：** 参与用户调研，收集用户反馈。\n**改写为：** ",
+      "review": {
+        "passed": false,
+        "score": 0,
+        "rubric": {},
+        "issues": [
+          "judge JSON 解析失败"
+        ],
+        "raw_preview": "```json\n{\n  \"passed\": false,\n  \"score\": 0.5,\n  \"rubric\": {\n    \"R"
+      }
+    }
+  ]
+}

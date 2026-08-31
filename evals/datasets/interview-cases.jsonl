@@ -1,0 +1,5 @@
+{"id":"itv001","role":"AI 产品经理实习生 @ 字节豆包","question":"你怎么衡量一个对话产品的好坏？","answer":"我会看 DAU 和留存，用户用得多就说明好。"}
+{"id":"itv002","role":"AI 产品经理实习生 @ 字节豆包","question":"如果用户对回答不满意，你怎么定位是模型问题还是产品问题？","answer":"我会先看 case，把 bad case 分类，然后看是 prompt 不够好、模型能力不够、还是 UI 引导有问题。具体我会在智谱实习的时候做过类似的：我搭了一个 10 维度评估表，把 bad case 按维度归类，然后和算法同学对齐哪几维要先优化。"}
+{"id":"itv003","role":"内容 PM @ 小红书","question":"你怎么从 0 设计一个新的内容流？","answer":"我会先做用户研究然后写 PRD。"}
+{"id":"itv004","role":"AI Evaluation Lead @ Anthropic","question":"How would you design an eval harness for a new agentic capability?","answer":"I'd start by collecting failure cases from production traces, cluster them into categories, then write a rubric for each category. The judge can be LLM-as-judge with a calibration set scored by humans. I did something similar at Noumena where I built a 10-metric eval framework — the key learning was that rubric specificity matters more than judge model size."}
+{"id":"itv005","role":"增长 PM @ MiniMax","question":"上一份实习你做的最自豪的事？","answer":"我做了一个多模态角色产品的 0-1，然后用户挺多的。"}

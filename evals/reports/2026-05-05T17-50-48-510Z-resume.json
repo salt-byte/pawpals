@@ -1,0 +1,25 @@
+{
+  "suite": "resume",
+  "n": 1,
+  "summary": {
+    "avg_score": 0,
+    "pass_rate": 0,
+    "passed": 0,
+    "failed": 1
+  },
+  "results": [
+    {
+      "id": "resume001",
+      "advice_preview": "针对字节跳动-豆包的 AI PM 岗位，建议通过强化“数据驱动”优势来弥补“大厂经验不足”，将 DS 背景转化为 AI 产品感知力。\n\n请直接将以下内容合入简历：\n\n**【自我评价 / 核心优势】**\n*   **深厚数据背景与 AI 洞察**：清华 & USC 数据科学背景，具备极强的**数据驱动**思维。深度拆解豆包、ChatGPT 等 **LLM 产品**底层逻辑，能从 Prompt 工程及",
+      "review": {
+        "passed": false,
+        "score": 0,
+        "rubric": {},
+        "issues": [
+          "judge JSON 解析失败"
+        ],
+        "raw_preview": "```json\n{\n  \"passed\": true,\n  \"score\": 0.75,\n  \"rubric"
+      }
+    }
+  ]
+}
