@@ -8,6 +8,7 @@ import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, r
 import { OfficialApplicationQueue } from "./server/official-application-queue.ts";
 import { resolveRoute } from "./server/routing.ts";
 import { buildFileInjections } from "./server/agent-context.ts";
+import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -1691,16 +1692,19 @@ function saveMessages(msgs: any[]) {
   try { writeFileSync(MESSAGES_FILE, JSON.stringify(msgs, null, 2)); } catch {}
 }
 
-function appendChatLog(agent: { name: string }, userMsg: string, replySnippet: string) {
+function appendChatLog(agent: { id: string; name: string }, userMsg: string, replySnippet: string) {
   try {
     const now = new Date().toLocaleDateString("zh-CN", {
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
     }).replace(/\//g, "-");
-    const snippet = replySnippet.replace(/\n+/g, " ").slice(0, 80);
-    const userSnippet = userMsg.replace(/\n+/g, " ").slice(0, 40);
-    const entry = `\n## ${now} | 🌐 PawPals → ${agent.name}\n用户说：「${userSnippet}」。回复摘要：${snippet}…\n`;
-    appendFileSync(CHAT_LOG, entry, "utf-8");
+    appendFileSync(CHAT_LOG, formatLogEntry({
+      at: now,
+      agentName: agent.name,
+      agentId: agent.id,
+      userMsg,
+      reply: replySnippet,
+    }), "utf-8");
   } catch {}
 }
 
@@ -2141,14 +2145,12 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md", label: "用户档案" },
       { path: "jobs.json",  label: "岗位库" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_jobs"],
   },
   "app-tracker": {
     files: [
       { path: "profile.md", label: "用户档案" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_applications", "get_followups"],
   },
@@ -2156,7 +2158,6 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md",    label: "用户档案" },
       { path: "skills_gap.md", label: "技能分析" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2165,7 +2166,6 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
       { path: "profile.md",       label: "用户档案" },
       { path: "resume_master.md", label: "原始简历" },
       { path: "skills_gap.md",    label: "技能分析" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2173,7 +2173,6 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md",   label: "用户档案" },
       { path: "contacts.json", label: "联系人库" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2181,7 +2180,6 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "resume_master.md", label: "原始简历" },
       { path: "skills_gap.md",    label: "技能分析" },
-      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2796,6 +2794,20 @@ async function streamAgent(
         }
       })
     );
+
+    // 协作日志分两段注入：自己的历史 + 队友动态。
+    // 笼统取末尾 N 行的话，自己的记录会被队友挤掉——专家花了上下文却读不到
+    // 自己上次做了什么。career-planner 例外，它按 AGENT_CONTEXT_CONFIG 整段读。
+    if (agent.id !== "career-planner") {
+      try {
+        toolInjections.push(
+          ...renderAgentLog(readFileSync(CHAT_LOG, "utf8"), agent.id, {
+            ownEntries: 3,
+            teamEntries: 5,
+          })
+        );
+      } catch { /* 日志尚未生成 */ }
+    }
 
     // 自动执行工具（read_applications / get_followups / read_jobs）
     for (const toolName of agentCtx.tools ?? []) {
