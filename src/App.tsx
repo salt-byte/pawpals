@@ -752,7 +752,6 @@ export default function App() {
   const [setupMessage, setSetupMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [setupValidating, setSetupValidating] = useState(false);
   const [bootLogs, setBootLogs] = useState<string[]>([]);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [toolActivities, setToolActivities] = useState<ToolActivityEvent[]>([]);
   const [agentThinking, setAgentThinking] = useState<{ agentName: string; groupId: string } | null>(null);
 
@@ -1013,8 +1012,7 @@ export default function App() {
 
   const loadRuntimeStatus = async () => {
     const response = await fetch('/api/runtime/status');
-    const data: RuntimeStatus = await response.json();
-    setRuntimeStatus(data);
+    const data: { appDataDir: string } = await response.json();
     setBootLogs([
       `$ pawpals bootstrap --channel web-ui`,
       `[runtime] ready`,

@@ -2746,7 +2746,7 @@ async function streamAgent(
   const emitToolActivity = (
     tool: string,
     description: string,
-    permission: "workspace" | "network" | "boss",
+    permission: "workspace" | "network" | "boss" | "official-site",
     detail?: string
   ) => {
     io.emit("tool_activity", {
