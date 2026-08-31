@@ -13,7 +13,8 @@ import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
 import { pickAutofillValue } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
-import { jdAnalysisPrompt, tailorPrompt, canEnterApplyReady, boardInstruction } from "./server/job-pipeline.ts";
+import { boardInstruction } from "./server/job-pipeline.ts";
+import { runTailorPipeline, type TailorDeps } from "./server/tailor-pipeline.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -3547,63 +3548,52 @@ async function handleSelectedJobsWorkflow(
     });
   }
 
-  const professionalTeacher = JOB_AGENTS.find(a => a.id === "professional-teacher")!;
-  const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
+  const jobAgentById = (id: string) => JOB_AGENTS.find((a) => a.id === id)!;
 
-  for (const row of selectedRows) {
-    upsertCollaborationRow({
-      company: row.company,
-      role: row.role,
-      jdUrl: row.jdUrl,
-      workflowStage: "tailoring",
-    });
-
-    // 先通过 Electron BrowserWindow 抓取 JD 正文
-    let jdContent = "";
-    if (row.jdUrl) {
+  // 顺序与分工在 server/tailor-pipeline.ts 的 TAILOR_BEATS 里；这里只把
+  // 驱动器要用的副作用接上——发消息、抓 JD、跑 agent、读写协作表格。
+  const tailorDeps: TailorDeps = {
+    setStage: (row, stage) =>
+      upsertCollaborationRow({
+        company: row.company,
+        role: row.role,
+        jdUrl: row.jdUrl,
+        workflowStage: stage,
+      }),
+    fetchJdContent,
+    announce: (agentId, text) => {
+      const agent = jobAgentById(agentId);
       emitBotMessage(io, allMessages, {
-        sender: professionalTeacher.name,
-        avatar: professionalTeacher.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${professionalTeacher.id}`,
-        content: `正在抓取 ${row.company} - ${row.role} 的 JD 详情...`,
+        sender: agent.name,
+        avatar: agent.avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${agent.id}`,
+        content: text,
         groupId: "job",
         isChiefBot: false,
       });
-      jdContent = await fetchJdContent(row.jdUrl);
-    }
+    },
+    runBeat: async (agentId, prompt) => {
+      const agent = jobAgentById(agentId);
+      io.emit("agent_thinking", { agentName: agent.name, groupId: "job" });
+      await runAgentChain(
+        agent,
+        [{ role: "user", content: prompt }],
+        0,
+        io,
+        "job",
+        allMessages,
+        petName,
+        petPersonality
+      );
+      io.emit("agent_done", { groupId: "job" });
+    },
+    readRow: (row) =>
+      loadCollaborationBoard().find(
+        (item) => item.id === buildBoardRowId({ company: row.company, role: row.role, jdUrl: row.jdUrl })
+      ),
+  };
 
-    io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
-    await runAgentChain(
-      professionalTeacher,
-      [{ role: "user", content: jdAnalysisPrompt({ row, petName, jdContent }) }],
-      0,
-      io,
-      "job",
-      allMessages,
-      petName,
-      petPersonality
-    );
-    io.emit("agent_done", { groupId: "job" });
-
-    io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
-    await runAgentChain(
-      resumeExpert,
-      [{ role: "user", content: tailorPrompt({ row, petName }) }],
-      0,
-      io,
-      "job",
-      allMessages,
-      petName,
-      petPersonality
-    );
-    io.emit("agent_done", { groupId: "job" });
-
-    const latest = loadCollaborationBoard().find((item) => item.id === buildBoardRowId({ company: row.company, role: row.role, jdUrl: row.jdUrl }));
-    upsertCollaborationRow({
-      company: row.company,
-      role: row.role,
-      jdUrl: row.jdUrl,
-      workflowStage: canEnterApplyReady(latest) ? "apply_ready" : "tailoring",
-    });
+  for (const row of selectedRows) {
+    await runTailorPipeline(row, petName, tailorDeps);
   }
 
   const tailoredRows = loadCollaborationBoard().filter((row) =>
