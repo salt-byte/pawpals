@@ -7,6 +7,7 @@ import path from "path";
 import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
 import { OfficialApplicationQueue } from "./server/official-application-queue.ts";
 import { resolveRoute } from "./server/routing.ts";
+import { buildFileInjections } from "./server/agent-context.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -2140,12 +2141,14 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md", label: "用户档案" },
       { path: "jobs.json",  label: "岗位库" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_jobs"],
   },
   "app-tracker": {
     files: [
       { path: "profile.md", label: "用户档案" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_applications", "get_followups"],
   },
@@ -2153,6 +2156,7 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md",    label: "用户档案" },
       { path: "skills_gap.md", label: "技能分析" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2161,6 +2165,7 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
       { path: "profile.md",       label: "用户档案" },
       { path: "resume_master.md", label: "原始简历" },
       { path: "skills_gap.md",    label: "技能分析" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2168,6 +2173,7 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "profile.md",   label: "用户档案" },
       { path: "contacts.json", label: "联系人库" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2175,6 +2181,7 @@ const AGENT_CONTEXT_CONFIG: Record<string, {
     files: [
       { path: "resume_master.md", label: "原始简历" },
       { path: "skills_gap.md",    label: "技能分析" },
+      { path: "chat_log.md", label: "团队最近动态", lines: 24 },
     ],
     tools: ["read_collaboration_board"],
   },
@@ -2780,19 +2787,15 @@ async function streamAgent(
     const agentCtx = AGENT_CONTEXT_CONFIG[agent.id] ?? {};
 
     // 自动注入文件（profile.md / skills_gap.md / chat_log 等）
-    for (const fileConf of agentCtx.files ?? []) {
-      try {
-        const filePath = path.join(CAREER_DIR, fileConf.path);
-        let content = readFileSync(filePath, "utf8");
-        if (fileConf.lines) {
-          // 只取末尾 N 行（chat_log 等只需要最近记录）
-          content = content.split("\n").slice(-fileConf.lines).join("\n");
+    toolInjections.push(
+      ...buildFileInjections(agentCtx.files, (relPath) => {
+        try {
+          return readFileSync(path.join(CAREER_DIR, relPath), "utf8");
+        } catch {
+          return null;
         }
-        if (content.trim()) {
-          toolInjections.push(`【${fileConf.label}】\n${content.trim()}`);
-        }
-      } catch { /* 文件不存在则跳过 */ }
-    }
+      })
+    );
 
     // 自动执行工具（read_applications / get_followups / read_jobs）
     for (const toolName of agentCtx.tools ?? []) {
