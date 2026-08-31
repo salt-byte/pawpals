@@ -7,6 +7,7 @@ import {
   jdAnalysisPrompt,
   tailorPrompt,
   canEnterApplyReady,
+  boardInstruction,
 } from "./job-pipeline.ts";
 
 const row = {
@@ -132,5 +133,28 @@ describe("canEnterApplyReady", () => {
 
   it("只有空白字符不算填了", () => {
     expect(canEnterApplyReady({ skillHighlights: "   ", resumeVersion: "v2.1-x" })).toBe(false);
+  });
+});
+
+describe("boardInstruction", () => {
+  it("简历专家的版本号示例用中文公司名——用英文示例会诱导 AI 把中文公司转成拼音", () => {
+    expect(boardInstruction("resume-expert")).toContain("v2.1-字节跳动");
+  });
+
+  it("四个有回写职责的角色都拿到指令", () => {
+    for (const id of ["professional-teacher", "resume-expert", "networker", "interview-coach"]) {
+      expect(boardInstruction(id)).toContain("BOARD_UPDATE::");
+    }
+  });
+
+  it("没有回写职责的角色拿到空串——团团不写表格", () => {
+    expect(boardInstruction("tuantuan")).toBe("");
+    expect(boardInstruction("")).toBe("");
+  });
+
+  it("指令本身是单行的，不会把换行示范给 AI", () => {
+    for (const id of ["professional-teacher", "resume-expert", "networker", "interview-coach"]) {
+      expect(boardInstruction(id)).not.toContain("\n");
+    }
   });
 });

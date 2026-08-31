@@ -127,3 +127,29 @@ export function tailorPrompt(input: { row: JobRow; petName: string }): string {
 export function canEnterApplyReady(row: BoardRowLike): boolean {
   return Boolean(row?.skillHighlights?.trim() && row?.resumeVersion?.trim());
 }
+
+/**
+ * 各角色的 BOARD_UPDATE 回写协议。原先叫 getStructuredBoardInstruction，
+ * 私有在 server.ts 里，没法单测——服务端入口一 import 就会把服务起起来。
+ *
+ * 简历专家那条的版本号示例特意用中文公司名：示例是 AI 最强的模仿对象，
+ * 给 v2.1-anthropic 会诱导它把「字节跳动」写成拼音，跟 companySlug 算出来
+ * 的 v2.1-字节跳动 对不上。
+ *
+ * 返回空串表示这个角色没有回写职责（团团只做路由，不写表格）。
+ */
+export function boardInstruction(agentId: string): string {
+  if (agentId === "professional-teacher") {
+    return "【协作表格指令】当你明确分析某个具体岗位/JD时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"jdUrl\":\"链接可留空\",\"skillHighlights\":\"一句话写清要强调的技能点\",\"notes\":\"可选\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
+  }
+  if (agentId === "resume-expert") {
+    return "【协作表格指令】当你完成某个具体岗位的简历诊断或定制时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"resumeVersion\":\"如 v2.1-字节跳动，公司名用原文，中文不要转拼音\",\"notes\":\"评分或改动摘要\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
+  }
+  if (agentId === "networker") {
+    return "【协作表格指令】当你找到联系人或生成冷邮件时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"contacts\":[{\"name\":\"联系人\",\"title\":\"职位\",\"channel\":\"LinkedIn或邮箱\",\"value\":\"链接或邮箱\"}],\"outreachDraft\":\"邮件正文可简写\",\"outreachStatus\":\"draft\"}。必须是一行紧凑 JSON。";
+  }
+  if (agentId === "interview-coach") {
+    return "【协作表格指令】当你完成某岗位面试点评时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"interviewRecord\":{\"score\":7.5,\"strengths\":[\"点1\"],\"weaknesses\":[\"点2\"],\"notes\":\"简评\"}}。必须是一行紧凑 JSON。";
+  }
+  return "";
+}

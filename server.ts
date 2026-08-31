@@ -13,7 +13,7 @@ import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
 import { pickAutofillValue } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
-import { jdAnalysisPrompt, tailorPrompt, canEnterApplyReady } from "./server/job-pipeline.ts";
+import { jdAnalysisPrompt, tailorPrompt, canEnterApplyReady, boardInstruction } from "./server/job-pipeline.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -1590,21 +1590,6 @@ function renderCollaborationBoardChatTable(rows: CollaborationRow[], title = "�
   return lines.join("\n");
 }
 
-function getStructuredBoardInstruction(agentId: string) {
-  if (agentId === "professional-teacher") {
-    return "【协作表格指令】当你明确分析某个具体岗位/JD时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"jdUrl\":\"链接可留空\",\"skillHighlights\":\"一句话写清要强调的技能点\",\"notes\":\"可选\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
-  }
-  if (agentId === "resume-expert") {
-    return "【协作表格指令】当你完成某个具体岗位的简历诊断或定制时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"resumeVersion\":\"如 v2.1-anthropic\",\"notes\":\"评分或改动摘要\"}。必须是一行紧凑 JSON，不要换行。用户看不到这行。";
-  }
-  if (agentId === "networker") {
-    return "【协作表格指令】当你找到联系人或生成冷邮件时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"contacts\":[{\"name\":\"联系人\",\"title\":\"职位\",\"channel\":\"LinkedIn或邮箱\",\"value\":\"链接或邮箱\"}],\"outreachDraft\":\"邮件正文可简写\",\"outreachStatus\":\"draft\"}。必须是一行紧凑 JSON。";
-  }
-  if (agentId === "interview-coach") {
-    return "【协作表格指令】当你完成某岗位面试点评时，在回复最后单独追加一行 BOARD_UPDATE::{\"company\":\"公司名\",\"role\":\"岗位名\",\"interviewRecord\":{\"score\":7.5,\"strengths\":[\"点1\"],\"weaknesses\":[\"点2\"],\"notes\":\"简评\"}}。必须是一行紧凑 JSON。";
-  }
-  return "";
-}
 
 // ── 多 Agent 工作区文件加载 ─────────────────────────────────────
 // 每个 Agent 的 SOUL.md 存储在 career/workspaces/<agentId>/SOUL.md
@@ -2922,8 +2907,8 @@ async function streamAgent(
       systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【投递流程 — Boss直聘 vs 官网（必须严格遵守）】\nBoss直聘的岗位：绝对不要分析JD、不要tailor简历、不要让专业老师拆解、不要让简历专家定制。用户说"投"就立刻让投递管家直接投，一秒都不要耽误。\n官网投递的岗位：需要先 tailor 简历，再投递。\n判断方法：如果投递链接包含 zhipin.com 就是 Boss直聘，直接投。\n违反这条规则 = 浪费用户时间，严禁。\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【档案确认协议】\n当你认为用户画像采集完毕（目标方向、城市、实习类型、公司偏好等都聊到了），在回复末尾写：PROFILE_CONFIRM\n系统会自动弹出一张可编辑的档案确认卡让用户查看和修改。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（填写档案）、professional_positioning（定位分析）、resume_diagnosis（简历诊断）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。\n\n【长期记忆协议】\n当用户表达了明确的偏好、限制或重要个人信息时，在回复末尾写：\nMEMORY_UPDATE::{"key":"偏好名称","value":"具体内容"}\n例如：用户说"我不想去上海" → MEMORY_UPDATE::{"key":"城市排除","value":"不去上海"}\n用户说"我更偏好大厂" → MEMORY_UPDATE::{"key":"公司偏好","value":"优先大厂"}\n只在用户明确表达时才写，不要猜测。这些标签不会展示给用户。`);
     }
 
-    const boardInstruction = getStructuredBoardInstruction(agent.id);
-    if (boardInstruction) systemParts.push(boardInstruction);
+    const boardRule = boardInstruction(agent.id);
+    if (boardRule) systemParts.push(boardRule);
     if (extraSystemPrompt) systemParts.push(extraSystemPrompt);
     // 岗位猎手：特殊结果直接发出不走 LLM
     if (agent.id === "job-hunter" && toolInjections.length > 0) {
