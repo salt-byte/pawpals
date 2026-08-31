@@ -36,9 +36,12 @@ async function execute(task) {
     return { ok: true, provider, url: location.href, title: document.title, fields, warnings, hasSubmit: Boolean(findSubmitControl(document)) };
   }
   if (task.kind === 'fill') {
-    const filled = fillApplicationFields(document, task.payload?.values || []);
+    const { filled, skipped } = fillApplicationFields(document, task.payload?.values || []);
     const warnings = formWarnings(fields, document);
-    return { ok: true, filled, warnings, requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection') };
+    return {
+      ok: true, filled, skipped, warnings,
+      requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection'),
+    };
   }
   if (task.kind === 'submit') {
     const warnings = formWarnings(fields, document);

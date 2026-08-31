@@ -2484,21 +2484,31 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       const profile = extractAutofillProfile();
       const values = fields
         .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
-        .map((field: any) => ({ index: field.index, value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }) }))
+        .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }) }))
         .filter((item: any) => item.value);
+      let filledCount = 0;
+      let skippedCount = 0;
       if (values.length) {
         const fillTask = officialApplicationQueue.enqueue({
           kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""), payload: { values },
         });
         const filled = await waitForOfficialTask(fillTask.id);
         if (!filled?.ok) return `[ERR] 官网表单填写失败：${filled?.error || "未知错误"}`;
+        // 报实际填进去的数量，不是尝试数——签名找不到或有歧义的字段会被跳过。
+        filledCount = Array.isArray(filled.filled) ? filled.filled.length : 0;
+        skippedCount = Array.isArray(filled.skipped) ? filled.skipped.length : 0;
       }
 
       const confirmationId = officialApplicationQueue.requestConfirmation({
         url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
       });
       const warnings = Array.isArray(inspection.warnings) ? inspection.warnings : [];
-      return `[OFFICIAL_CONFIRM:${confirmationId}] 已识别并填写 ${values.length} 个标准字段。${warnings.includes("resume_requires_user_file_selection") ? "请先在官网页面手动选择简历文件；" : ""}请检查页面内容，确认无误后再回复“确认投递”。`;
+      const notes = [
+        `已填写 ${filledCount} 个标准字段`,
+        skippedCount ? `${skippedCount} 个字段因页面已变化未能定位，需要你手动补` : "",
+        warnings.includes("resume_requires_user_file_selection") ? "请先在页面上手动选择简历文件" : "",
+      ].filter(Boolean);
+      return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。请检查页面内容，确认无误后再回复“确认投递”。`;
 
       const platform = isBossJobUrl(job_url) ? "boss" : "web-form";
       let safeGreeting = greeting;
@@ -5132,7 +5142,7 @@ async function startServer() {
     const profile = extractAutofillProfile();
     const values = (Array.isArray(fields) ? fields : [])
       .map((field: any) => ({
-        index: field.index,
+        signature: field.signature,
         value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }),
       }))
       .filter((item: any) => item.value);

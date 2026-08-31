@@ -38,18 +38,40 @@ export function nativeSetValue(el, value) {
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+/**
+ * 按签名填写，而不是按数组下标。
+ *
+ * 每次填写前重新扫一遍当前 DOM——inspect 时的页面和此刻的页面可能已经不同。
+ * 签名找不到或匹配到多个，一律跳过并记录原因：填错框是静默的，用户可能到
+ * 面试前才发现，所以宁可不填。
+ */
 export function fillApplicationFields(root, values = []) {
   const elements = [...root.querySelectorAll('input, textarea, select')];
+  const fields = collectApplicationFields(root);
   const filled = [];
+  const skipped = [];
+  const skip = (signature, reason) => skipped.push({ signature, reason });
+
   for (const item of values) {
-    const el = elements[item.index];
-    if (!el || el.type === 'file' || typeof item.value !== 'string') continue;
+    if (typeof item.value !== 'string') { skip(item.signature, 'invalid_value'); continue; }
+
+    const matches = fields.filter((field) => field.signature === item.signature);
+    if (matches.length === 0) { skip(item.signature, 'not_found'); continue; }
+    if (matches.length > 1) { skip(item.signature, 'ambiguous'); continue; }
+
+    const el = elements[matches[0].index];
+    if (!el) { skip(item.signature, 'not_found'); continue; }
+    if (el.type === 'file') { skip(item.signature, 'file_input'); continue; }
+
     if (el.tagName === 'SELECT') {
       const option = [...el.options].find((entry) => entry.value === item.value || entry.textContent?.trim() === item.value);
-      if (!option) continue;
-      el.value = option.value; el.dispatchEvent(new Event('change', { bubbles: true }));
-    } else nativeSetValue(el, item.value);
-    filled.push(item.index);
+      if (!option) { skip(item.signature, 'option_not_found'); continue; }
+      el.value = option.value;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      nativeSetValue(el, item.value);
+    }
+    filled.push(item.signature);
   }
-  return filled;
+  return { filled, skipped };
 }

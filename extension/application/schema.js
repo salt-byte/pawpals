@@ -27,6 +27,23 @@ export function fieldKind(field) {
   return 'custom';
 }
 
+/**
+ * 跨渲染稳定的字段标识。
+ *
+ * 不能用数组下标：inspect 与 fill 是两次独立的往返，中间用户可能新增一段
+ * 经历、上传简历触发解析重渲染，索引一旦位移，值就会被静默填进别的框。
+ * name / id / type / label 这四项在重渲染后不变。
+ */
+export function fieldSignature(raw) {
+  const part = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return [
+    `name=${part(raw.name)}`,
+    `id=${part(raw.id)}`,
+    `type=${part(raw.type) || 'text'}`,
+    `label=${part(raw.label)}`,
+  ].join('|');
+}
+
 export function normaliseField(raw, index) {
   return {
     index,
@@ -36,6 +53,7 @@ export function normaliseField(raw, index) {
     required: raw.required === true,
     options: Array.isArray(raw.options) ? raw.options.map(String).slice(0, 80) : [],
     kind: fieldKind(raw),
+    signature: fieldSignature(raw),
   };
 }
 
