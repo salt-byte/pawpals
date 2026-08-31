@@ -3,4 +3,5 @@
   const base = chrome.runtime.getURL('');
   await import(`${base}content/pet.js`);
   await import(`${base}content/bridge.js`);
+  await import(`${base}content/official-agent.js`);
 })();
