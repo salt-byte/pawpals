@@ -13,6 +13,7 @@ import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
 import { pickAutofillValue } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
+import { jdAnalysisPrompt, tailorPrompt, canEnterApplyReady } from "./server/job-pipeline.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -3565,25 +3566,6 @@ async function handleSelectedJobsWorkflow(
   const resumeExpert = JOB_AGENTS.find(a => a.id === "resume-expert")!;
 
   for (const row of selectedRows) {
-    const companySlug = row.company.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "company";
-    const boardTarget = JSON.stringify({
-      company: row.company,
-      role: row.role,
-      jdUrl: row.jdUrl || "",
-    });
-    const skillUpdate = JSON.stringify({
-      company: row.company,
-      role: row.role,
-      jdUrl: row.jdUrl || "",
-      skillHighlights: "一句话写清要强调的技能点",
-    });
-    const resumeUpdate = JSON.stringify({
-      company: row.company,
-      role: row.role,
-      jdUrl: row.jdUrl || "",
-      resumeVersion: `v2.1-${companySlug}`,
-      notes: "tailor 初稿已完成",
-    });
     upsertCollaborationRow({
       company: row.company,
       role: row.role,
@@ -3603,33 +3585,11 @@ async function handleSelectedJobsWorkflow(
       });
       jdContent = await fetchJdContent(row.jdUrl);
     }
-    const jdSection = jdContent
-      ? `\n\n【JD 正文】\n${jdContent.slice(0, 3000)}`
-      : "\n\n（未能抓取到 JD 正文，请根据岗位名称和公司信息做分析）";
 
     io.emit("agent_thinking", { agentName: professionalTeacher.name, groupId: "job" });
     await runAgentChain(
       professionalTeacher,
-      [{
-        role: "user",
-        content: `【来自${petName}的任务】
-现在开始针对具体岗位做 JD 定位分析。
-公司：${row.company}
-岗位：${row.role}
-链接：${row.jdUrl || "无"}
-地点：${row.location || "未知"}
-薪资：${row.salary || "未知"}
-${jdSection}
-
-协作表格目标行：${boardTarget}
-
-请输出：
-1. 这个岗位最该强调的 3 个技能点
-2. 用户现有背景里最该前置的经历
-3. 一句简短结论
-
-最后必须追加一行 BOARD_UPDATE::${skillUpdate}`
-      }],
+      [{ role: "user", content: jdAnalysisPrompt({ row, petName, jdContent }) }],
       0,
       io,
       "job",
@@ -3642,23 +3602,7 @@ ${jdSection}
     io.emit("agent_thinking", { agentName: resumeExpert.name, groupId: "job" });
     await runAgentChain(
       resumeExpert,
-      [{
-        role: "user",
-        content: `【来自${petName}的任务】
-现在针对这个岗位做一版定制简历方案。
-公司：${row.company}
-岗位：${row.role}
-链接：${row.jdUrl || "无"}
-
-协作表格目标行：${boardTarget}
-
-请读取协作投递表格中这个岗位行的 skillHighlights，再结合 resume_master.md 和 skills_gap.md，给出：
-1. 简历该怎么重排
-2. 该补哪些关键词
-3. 这版简历的版本号（格式如 v2.1-${companySlug}）
-
-最后必须追加一行 BOARD_UPDATE::${resumeUpdate}`
-      }],
+      [{ role: "user", content: tailorPrompt({ row, petName }) }],
       0,
       io,
       "job",
@@ -3673,7 +3617,7 @@ ${jdSection}
       company: row.company,
       role: row.role,
       jdUrl: row.jdUrl,
-      workflowStage: latest?.skillHighlights && latest?.resumeVersion ? "apply_ready" : "tailoring",
+      workflowStage: canEnterApplyReady(latest) ? "apply_ready" : "tailoring",
     });
   }
 
