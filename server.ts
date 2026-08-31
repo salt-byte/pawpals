@@ -6,6 +6,7 @@ import os from "os";
 import path from "path";
 import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
 import { OfficialApplicationQueue } from "./server/official-application-queue.ts";
+import { resolveRoute } from "./server/routing.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -1814,7 +1815,7 @@ type EvalEvent =
   | { type: "reviewer"; agentId: string; msgId: string; groupId: string; passed: boolean; score: number; issueCount: number }
   | { type: "tool_call"; agentId?: string; toolName: string; success: boolean; durationMs?: number; errorReason?: string }
   | { type: "user_feedback"; msgId: string; agentId?: string; signal: "thumbs_up" | "thumbs_down"; comment?: string }
-  | { type: "routing"; userMsg: string; chosenAgentId: string; route: "explicit_at" | "orchestrate" | "default" };
+  | { type: "routing"; userMsg: string; chosenAgentId: string; route: "explicit_at" | "orchestrate" | "application_delegate" | "default" };
 
 function recordEvalEvent(event: EvalEvent) {
   try {
@@ -3342,17 +3343,21 @@ async function runAgentChain(
       return;
     }
 
-    // 路由：@提到具体专家时直接路由，否则都先经过 career-planner（十二）协调
-    const targetAgent = detectTargetAgent(userMsg);
-    const applicationIntent = /投递|投这|帮.*投|请.*投|申请这个岗位|apply/i.test(userMsg);
-    const routeTarget = applicationIntent
-      ? JOB_AGENTS.find((candidate) => candidate.id === "app-tracker")!
-      : targetAgent;
+    // 路由：显式点名 > 投递意图 > 默认交给 career-planner（团团）协调
+    const nameToId: Record<string, string> = {};
+    for (const [name, a] of Object.entries(agentByName)) nameToId[name] = a.id;
+    const { agentId: routeAgentId, route } = resolveRoute({
+      text: userMsg,
+      nameToId,
+      defaultAgentId: "career-planner",
+      applicationAgentId: "app-tracker",
+    });
+    const routeTarget = JOB_AGENTS.find((candidate) => candidate.id === routeAgentId)!;
     recordEvalEvent({
       type: "routing",
       userMsg: userMsg.slice(0, 200),
       chosenAgentId: routeTarget.id,
-      route: applicationIntent ? "application_delegate" : (routeTarget.id === "career-planner" ? "default" : "explicit_at"),
+      route,
     });
     if (routeTarget.id !== "career-planner") {
       io.emit("agent_thinking", { agentName: routeTarget.name, groupId });
