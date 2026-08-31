@@ -8,3 +8,4 @@ coverage/
 !.env.example
 __MACOSX/
 dist.zip
+release/
