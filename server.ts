@@ -4,6 +4,8 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import os from "os";
 import path from "path";
+import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
+import { OfficialApplicationQueue } from "./server/official-application-queue.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -43,12 +45,8 @@ function ensureDir(dir: string) {
 }
 
 const APP_DATA_DIR = resolveAppDataDir();
-const LEGACY_OPENCLAW_HOME = path.join(os.homedir(), ".openclaw");
-const CONFIGURED_OPENCLAW_HOME = process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || path.join(APP_DATA_DIR, "openclaw");
-const OPENCLAW_HOME = (process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || existsSync(CONFIGURED_OPENCLAW_HOME))
-  ? CONFIGURED_OPENCLAW_HOME
-  : LEGACY_OPENCLAW_HOME;
-const CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(OPENCLAW_HOME, "workspace", "career");
+const WORKSPACE_DIR = path.join(APP_DATA_DIR, "workspace");
+const CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(WORKSPACE_DIR, "career");
 const COOKIE_DIR = process.env.PAWPALS_COOKIE_DIR || path.join(APP_DATA_DIR, "jobclaw", "cookies");
 const COOKIE_FILE = path.join(COOKIE_DIR, "boss.json");
 const APPLICATIONS_FILE = path.join(CAREER_DIR, "applications.json");
@@ -59,11 +57,10 @@ const ONBOARDING_STATE_FILE = path.join(CAREER_DIR, "onboarding_state.json");
 const COLLAB_BOARD_FILE = path.join(CAREER_DIR, "collaboration_board.json");
 const LAST_SEARCH_RESULTS_FILE = path.join(CAREER_DIR, "last_search_results.json");
 const MAIL_WATCH_STATE_FILE = path.join(APP_DATA_DIR, "mail-watcher-state.json");
-const OPENCLAW_CONFIG_FILE = path.join(OPENCLAW_HOME, "openclaw.json");
+const CONFIG_FILE = path.join(APP_DATA_DIR, "pawpals-config.json");
 const SETUP_STATE_FILE = path.join(APP_DATA_DIR, "setup-state.json");
 const DEPLOYMENT_STATE_FILE = path.join(APP_DATA_DIR, "deployment-state.json");
 const DEPLOYMENT_LOG_FILE = path.join(APP_DATA_DIR, "deployment.log");
-const OPENCLAW_BIN = process.env.OPENCLAW_BIN || "openclaw";
 const PYTHON_BIN = process.env.PAWPALS_PYTHON || process.env.PYTHON ||
   (existsSync("/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" :
    existsSync("/usr/local/bin/python3")    ? "/usr/local/bin/python3" : "python3");
@@ -75,7 +72,6 @@ ensureDir(COOKIE_DIR);
 const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
 const BACKUP_DIR = path.join(os.homedir(), "Documents", "PawPals备份");
 const BACKUP_META_FILE = path.join(APP_DATA_DIR, "backup-meta.json");
-const AGENTS_ROOT = path.join(OPENCLAW_HOME, "agents");
 
 // ── 全局队列（search_jobs / apply_job 工具 + Electron BrowserWindow 共享）──
 const pendingSearchQueue = new Map<string, {
@@ -87,6 +83,21 @@ const pendingSearchQueue = new Map<string, {
 const pendingJdFetchQueue = new Map<string, { url: string; resolve: (r: string) => void }>();
 const pendingApplyQueue = new Map<string, any>();
 const applyResultStore = new Map<string, any>();
+// 通用 browser-fetch 队列：AI 需要浏览网页时通过 Electron BrowserWindow 执行
+const pendingBrowserFetchQueue = new Map<string, { url: string; resolve: (r: string) => void }>();
+// 官网申请由浏览器扩展消费；提交任务只能由明确确认令牌创建。
+const officialApplicationQueue = new OfficialApplicationQueue();
+let activeOfficialApplicationPage: { url: string; title: string; provider: string; seenAt: number } | null = null;
+
+async function waitForOfficialTask(taskId: string, timeoutMs = 45_000): Promise<any> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const result = officialApplicationQueue.result(taskId);
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return { ok: false, error: "等待浏览器扩展超时。请在官网申请页点击 PawPals 图标并保持页面打开。" };
+}
 let pendingResumableSearchTask: null | {
   query: string;
   location: string;
@@ -100,6 +111,7 @@ let bossLoginPlatform = "boss";
 // key = 会话 groupId，value = 最近一条待确认的投递指令
 const pendingApplyCommands = new Map<string, {
   url: string; company: string; title: string; timestamp: number;
+  officialConfirmationId?: string;
 }>();
 const pendingWorkflowSelections = new Map<string, {
   rowIds: string[];
@@ -140,7 +152,7 @@ function _copyDir(src: string, dest: string) {
 }
 
 // 执行一次本地备份：复制到 ~/Documents/PawPals备份/YYYY-MM-DD_HH-MM/
-function doLocalBackup(appDataDir: string, openClawHome: string): string {
+function doLocalBackup(appDataDir: string): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
   const dest = path.join(BACKUP_DIR, ts);
   mkdirSync(dest, { recursive: true });
@@ -150,14 +162,14 @@ function doLocalBackup(appDataDir: string, openClawHome: string): string {
     path.join(appDataDir, "setup-state.json"),
     path.join(appDataDir, "deployment-state.json"),
     path.join(appDataDir, "security.json"),
+    path.join(appDataDir, "pawpals-config.json"),
   ];
   for (const f of filesToBackup) {
     if (existsSync(f)) copyFileSync(f, path.join(dest, path.basename(f)));
   }
 
   // 备份 workspace（聊天记录、简历草稿等）
-  const workspaceSrc = path.join(openClawHome, "workspace");
-  if (existsSync(workspaceSrc)) _copyDir(workspaceSrc, path.join(dest, "workspace"));
+  if (existsSync(WORKSPACE_DIR)) _copyDir(WORKSPACE_DIR, path.join(dest, "workspace"));
 
   // 保留最近10份快照，删除旧的
   const snapshots = readdirSync(BACKUP_DIR)
@@ -179,11 +191,11 @@ function doLocalBackup(appDataDir: string, openClawHome: string): string {
 }
 
 // 启动定时备份（每小时一次）
-function startAutoBackup(appDataDir: string, openClawHome: string, notifyIO?: any) {
+function startAutoBackup(appDataDir: string, notifyIO?: any) {
   ensureDir(BACKUP_DIR);
   schedule.scheduleJob("0 * * * *", () => {
     try {
-      const dest = doLocalBackup(appDataDir, openClawHome);
+      const dest = doLocalBackup(appDataDir);
       notifyIO?.emit("backup_done", { ok: true, path: dest, at: Date.now() });
     } catch (e: any) {
       console.error("[backup] 定时备份失败:", e.message);
@@ -283,106 +295,6 @@ setInterval(() => {
     if (now - s.createdAt > kSessionTtlMs) _sessions.delete(k);
 }, 60 * 60 * 1000);
 
-// ── Watchdog（gateway 崩溃自动重启）──────────────────────────────────
-const kWdCheckIntervalMs   = 30 * 1000;  // 每30秒检查
-const kWdCrashWindowMs     = 5 * 60 * 1000;  // 5分钟崩溃窗口
-const kWdCrashLoopThreshold = 3;             // 窗口内崩溃3次 = crash loop
-const kWdMaxRepairs         = 3;             // 最多自动修复3次
-
-const _wd = {
-  crashes: [] as number[],
-  repairCount: 0,
-  paused: false,
-  lastRestartAt: 0,
-};
-
-function _trimCrashWindow() {
-  const cutoff = Date.now() - kWdCrashWindowMs;
-  _wd.crashes = _wd.crashes.filter(t => t > cutoff);
-}
-
-async function _isGatewayAlive(gatewayBase: string): Promise<boolean> {
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    await fetch(`${gatewayBase}/`, { signal: ctrl.signal });
-    clearTimeout(timer);
-    return true;
-  } catch { return false; }
-}
-
-function _restartGateway(gatewayPort: string, openclawBin: string): Promise<void> {
-  const now = Date.now();
-  if (now - _wd.lastRestartAt < 10_000) return Promise.resolve();
-  _wd.lastRestartAt = now;
-  console.log("[watchdog] 重启 gateway...");
-  return new Promise((resolve) => {
-    exec(
-      `lsof -ti :${gatewayPort} | xargs kill -TERM 2>/dev/null; sleep 1; ${openclawBin} gateway --port ${gatewayPort} --allow-unconfigured &`,
-      (err) => {
-        if (err) console.error("[watchdog] 重启失败:", err.message);
-        else console.log("[watchdog] 重启命令已发出");
-        resolve();
-      }
-    );
-  });
-}
-
-function _runDoctor(openclawBin: string): Promise<string> {
-  return new Promise((resolve) => {
-    console.log("[watchdog] 运行 openclaw doctor --fix ...");
-    exec(`${openclawBin} doctor --fix --yes`, { timeout: 30_000 }, (err, stdout, stderr) => {
-      const out = (stdout + stderr).trim();
-      if (err) console.error("[watchdog] doctor 执行错误:", err.message);
-      else console.log("[watchdog] doctor 完成:", out.slice(0, 200));
-      resolve(out);
-    });
-  });
-}
-
-function startWatchdog(gatewayBase: string, openclawBin: string, notifyIO?: any) {
-  const gatewayPort = (gatewayBase.match(/:(\d+)/) || [])[1] || "18790";
-  setInterval(async () => {
-    if (_wd.paused) return;
-    const alive = await _isGatewayAlive(gatewayBase);
-    if (alive) return;
-
-    const now = Date.now();
-    _wd.crashes.push(now);
-    _trimCrashWindow();
-    console.log(`[watchdog] Gateway 不可达（近${kWdCrashWindowMs / 60000}分钟内崩溃 ${_wd.crashes.length} 次）`);
-    notifyIO?.emit("watchdog_alert", { type: "down", message: "Gateway 无响应，正在尝试恢复..." });
-
-    if (_wd.crashes.length >= kWdCrashLoopThreshold) {
-      if (_wd.repairCount >= kWdMaxRepairs) {
-        if (!_wd.paused) {
-          _wd.paused = true;
-          console.error("[watchdog] 已达最大修复次数，停止自动重启");
-          notifyIO?.emit("watchdog_alert", { type: "crash_loop", message: "[WARN] Gateway 反复崩溃，自动修复失败，请重启 PawPals 应用" });
-        }
-        return;
-      }
-      // 崩溃循环：先跑 doctor --fix 再重启
-      _wd.repairCount += 1;
-      _wd.crashes = [];
-      console.log(`[watchdog] 崩溃循环，第 ${_wd.repairCount} 次：运行 doctor --fix`);
-      notifyIO?.emit("watchdog_alert", { type: "repair", message: `🔧 Gateway 崩溃循环，第 ${_wd.repairCount} 次自动诊断修复中...` });
-      const doctorOut = await _runDoctor(openclawBin);
-      notifyIO?.emit("watchdog_alert", { type: "repair_done", message: `[OK] 诊断完成，正在重启 Gateway...`, detail: doctorOut.slice(0, 300) });
-    }
-
-    await _restartGateway(gatewayPort, openclawBin);
-    // 15秒后确认是否恢复
-    setTimeout(async () => {
-      const recovered = await _isGatewayAlive(gatewayBase);
-      if (recovered) {
-        console.log("[watchdog] Gateway 已恢复");
-        notifyIO?.emit("watchdog_alert", { type: "recovered", message: "[OK] Gateway 已恢复正常" });
-      }
-    }, 15_000);
-  }, kWdCheckIntervalMs);
-}
-
 const MODEL_PRESETS = [
   {
     provider: "anthropic",
@@ -393,9 +305,9 @@ const MODEL_PRESETS = [
     keyUrl: "https://console.anthropic.com/settings/keys",
   },
   {
-    provider: "gemini",
+    provider: "google",
     model: "gemini-3-flash-preview",
-    providerName: "Gemini",
+    providerName: "Google Gemini",
     displayName: "Gemini 3 Flash Preview",
     blurb: "速度快，适合日常问答和轻量多轮协作。",
     keyUrl: "https://aistudio.google.com/apikey",
@@ -455,7 +367,7 @@ function getProviderEnvApiKey(provider: string): string {
   switch (provider) {
     case "anthropic":
       return String(process.env.ANTHROPIC_API_KEY || "").trim();
-    case "gemini":
+    case "google":
       return String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
     case "openai":
       return String(process.env.OPENAI_API_KEY || "").trim();
@@ -485,7 +397,7 @@ function applyEnvFallbacks(config: any) {
     changed = true;
   }
 
-  for (const provider of ["gemini", "openai"] as const) {
+  for (const provider of ["google", "openai"] as const) {
     const envApiKey = getProviderEnvApiKey(provider);
     const providerConfig = config.models.providers[provider];
 
@@ -521,79 +433,21 @@ function tailFile(file: string, maxLines = 24): string[] {
   }
 }
 
-function loadOpenClawConfig(): any {
-  const rawConfig = loadJsonFile(OPENCLAW_CONFIG_FILE, {});
+function loadPawPalsConfig(): any {
+  const rawConfig = loadJsonFile(CONFIG_FILE, {});
   const { config, changed } = applyEnvFallbacks(rawConfig);
   if (changed) {
-    saveJsonFile(OPENCLAW_CONFIG_FILE, config);
+    saveJsonFile(CONFIG_FILE, config);
   }
   return config;
 }
 
-function saveOpenClawConfig(config: any) {
-  saveJsonFile(OPENCLAW_CONFIG_FILE, config);
-}
-
-function listRuntimeAgentIds(): string[] {
-  try {
-    return readdirSync(AGENTS_ROOT).filter((name) => statSync(path.join(AGENTS_ROOT, name)).isDirectory());
-  } catch {
-    return [];
-  }
-}
-
-function syncSelectedProviderToRuntimeAgents(config: any, selectedProvider: string) {
-  if (!selectedProvider) return;
-
-  const providerConfig = config?.models?.providers?.[selectedProvider];
-  if (!providerConfig || typeof providerConfig !== "object") return;
-
-  const providerApiKey =
-    selectedProvider === "anthropic"
-      ? String(config?.env?.vars?.ANTHROPIC_API_KEY || "").trim()
-      : String(providerConfig?.apiKey || config?.env?.vars?.OPENAI_API_KEY || "").trim();
-
-  for (const agentId of listRuntimeAgentIds()) {
-    const agentDir = path.join(AGENTS_ROOT, agentId, "agent");
-    const modelsPath = path.join(agentDir, "models.json");
-    const authProfilesPath = path.join(agentDir, "auth-profiles.json");
-    const sessionsPath = path.join(AGENTS_ROOT, agentId, "sessions", "sessions.json");
-
-    try {
-      if (existsSync(modelsPath)) {
-        const modelsConfig = loadJsonFile<any>(modelsPath, {});
-        modelsConfig.providers ??= {};
-        modelsConfig.providers[selectedProvider] = JSON.parse(JSON.stringify(providerConfig));
-        saveJsonFile(modelsPath, modelsConfig);
-      }
-    } catch {}
-
-    try {
-      const authConfig = loadJsonFile<any>(authProfilesPath, { version: 1, profiles: {}, usageStats: {} });
-      authConfig.version ??= 1;
-      authConfig.profiles ??= {};
-      authConfig.usageStats ??= {};
-      authConfig.profiles[`${selectedProvider}:default`] = {
-        type: "api_key",
-        provider: selectedProvider,
-        key: providerApiKey,
-      };
-      authConfig.usageStats[`${selectedProvider}:default`] ??= { errorCount: 0 };
-      authConfig.lastGood ??= {};
-      authConfig.lastGood[selectedProvider] = `${selectedProvider}:default`;
-      saveJsonFile(authProfilesPath, authConfig);
-    } catch {}
-
-    try {
-      if (existsSync(sessionsPath)) {
-        unlinkSync(sessionsPath);
-      }
-    } catch {}
-  }
+function savePawPalsConfig(config: any) {
+  saveJsonFile(CONFIG_FILE, config);
 }
 
 function buildSetupState() {
-  const config = loadOpenClawConfig();
+  const config = loadPawPalsConfig();
   const setupState = loadJsonFile<Record<string, any>>(SETUP_STATE_FILE, {});
   const primaryModel = String(config?.agents?.defaults?.model?.primary || "");
   const [selectedProvider = "", selectedModel = ""] = primaryModel.split("/");
@@ -641,26 +495,21 @@ function buildDeploymentState() {
   const deploymentState = loadJsonFile<Record<string, any>>(DEPLOYMENT_STATE_FILE, {});
   return {
     ok: true,
-    status: deploymentState.status || (existsSync(OPENCLAW_CONFIG_FILE) ? "ready" : "idle"),
-    phase: deploymentState.phase || (existsSync(OPENCLAW_CONFIG_FILE) ? "ready" : "idle"),
-    deployed: Boolean(deploymentState.deployed || existsSync(OPENCLAW_CONFIG_FILE)),
+    status: deploymentState.status || "ready",
+    phase: deploymentState.phase || "ready",
+    deployed: true,
     deployedAt: deploymentState.deployedAt || null,
     updatedAt: deploymentState.updatedAt || null,
-    gatewayBaseUrl: deploymentState.gatewayBaseUrl || GATEWAY_BASE,
     appUrl: deploymentState.appUrl || null,
     appPort: deploymentState.appPort || null,
-    openClawHome: OPENCLAW_HOME,
     appDataDir: APP_DATA_DIR,
-    usingBundledRuntime: deploymentState.usingBundledRuntime !== false,
-    usingBundledNode: Boolean(deploymentState.usingBundledNode),
-    usingBundledOpenClaw: deploymentState.usingBundledOpenClaw !== false,
     error: deploymentState.error || null,
     logs: tailFile(DEPLOYMENT_LOG_FILE),
   };
 }
 
 function saveSetupSelection(provider: string, model: string, options?: { baseUrl?: string }) {
-  const config = loadOpenClawConfig();
+  const config = loadPawPalsConfig();
   const providerConfig = config?.models?.providers?.[provider];
 
   config.env ??= {};
@@ -678,6 +527,10 @@ function saveSetupSelection(provider: string, model: string, options?: { baseUrl
 
   if (provider === "anthropic") {
     config.env.vars.ANTHROPIC_MODEL = model;
+  } else if (provider === "google") {
+    // Google Gemini 通过 env key 认证
+    config.env.vars.GEMINI_API_KEY ??= "";
+    config.env.vars.GOOGLE_API_KEY ??= "";
   } else {
     if (isCustomProvider(provider)) {
       if (!options?.baseUrl) {
@@ -707,8 +560,8 @@ function saveSetupSelection(provider: string, model: string, options?: { baseUrl
     config.env.vars.OPENAI_MODEL = model;
   }
 
-  saveOpenClawConfig(config);
-  syncSelectedProviderToRuntimeAgents(config, provider);
+  savePawPalsConfig(config);
+
   saveJsonFile(SETUP_STATE_FILE, {
     ...loadJsonFile<Record<string, any>>(SETUP_STATE_FILE, {}),
     completed: true,
@@ -719,7 +572,7 @@ function saveSetupSelection(provider: string, model: string, options?: { baseUrl
 }
 
 function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUrl?: string; model?: string }) {
-  const config = loadOpenClawConfig();
+  const config = loadPawPalsConfig();
 
   config.env ??= {};
   config.env.vars ??= {};
@@ -728,6 +581,10 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
 
   if (provider === "anthropic") {
     config.env.vars.ANTHROPIC_API_KEY = apiKey;
+  } else if (provider === "google") {
+    // Google Gemini 通过 env key 认证
+    config.env.vars.GEMINI_API_KEY = apiKey;
+    config.env.vars.GOOGLE_API_KEY = apiKey;
   } else {
     if (isCustomProvider(provider)) {
       if (!options?.baseUrl || !options?.model) {
@@ -755,52 +612,58 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
     config.env.vars.OPENAI_API_KEY = apiKey;
   }
 
-  saveOpenClawConfig(config);
-  syncSelectedProviderToRuntimeAgents(config, provider);
+  savePawPalsConfig(config);
+
 }
 
-function hydrateRuntimeAgentsFromSelectedModel() {
-  const config = loadOpenClawConfig();
-  const primaryModel = String(config?.agents?.defaults?.model?.primary || "").trim();
-  const [selectedProvider = ""] = primaryModel.split("/");
-  if (!selectedProvider) return;
-  syncSelectedProviderToRuntimeAgents(config, selectedProvider);
-}
-
-hydrateRuntimeAgentsFromSelectedModel();
-
-// ── OpenClaw Gateway 配置 ─────────────────────────────────────────────
-// 从 openclaw.json 读取 gateway token（在 OPENCLAW_CONFIG_FILE 定义之后）
-function readGatewayToken(): string {
-  if (process.env.OPENCLAW_TOKEN) return process.env.OPENCLAW_TOKEN;
-  try {
-    const configFile = path.join(
-      process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || path.join(resolveAppDataDir(), "openclaw"),
-      "openclaw.json"
-    );
-    if (existsSync(configFile)) {
-      const cfg = JSON.parse(readFileSync(configFile, "utf-8")) as any;
-      return cfg?.gateway?.auth?.token || "";
-    }
-  } catch {}
-  return "";
-}
-const GATEWAY_BASE  = process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789";
-// 懒加载缓存：openclaw 部署后首次使用时读取并缓存，之后不再读文件
-// 如果遇到 401 可调用 clearGatewayTokenCache() 强制重新读取
-let _cachedGatewayToken: string | null = null;
-const getGatewayToken = (): string => {
-  if (_cachedGatewayToken) return _cachedGatewayToken;
-  const token = readGatewayToken();
-  if (token) _cachedGatewayToken = token;
-  return token;
-};
-const clearGatewayTokenCache = () => { _cachedGatewayToken = null; };
 const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "";
 const MAX_CHAIN_DEPTH = 2;
 const CHAT_LOG      = path.join(CAREER_DIR, "chat_log.md");
 const MESSAGES_FILE = path.join(CAREER_DIR, "pawpals_messages.json");
 const RESUME_MASTER_FILE = path.join(CAREER_DIR, "resume_master.md");
+const MEMORY_FILE   = path.join(CAREER_DIR, "memory.json");
+
+// ── 长期记忆系统 ────────────────────────────────────────────────────────
+type MemoryEntry = { key: string; value: string; source: string; createdAt: string };
+
+function loadMemory(): MemoryEntry[] {
+  try {
+    if (!existsSync(MEMORY_FILE)) return [];
+    return JSON.parse(readFileSync(MEMORY_FILE, "utf-8"));
+  } catch { return []; }
+}
+
+function saveMemoryEntry(entry: Omit<MemoryEntry, "createdAt">) {
+  const memories = loadMemory();
+  // 去重：同 key 覆盖
+  const idx = memories.findIndex(m => m.key === entry.key);
+  const full: MemoryEntry = { ...entry, createdAt: new Date().toISOString() };
+  if (idx >= 0) memories[idx] = full; else memories.push(full);
+  // 最多保留 50 条
+  const trimmed = memories.slice(-50);
+  writeFileSync(MEMORY_FILE, JSON.stringify(trimmed, null, 2), "utf-8");
+  console.log(`[memory] saved: ${entry.key} = ${entry.value}`);
+}
+
+function buildMemoryContext(): string {
+  const memories = loadMemory();
+  if (memories.length === 0) return "";
+  const lines = memories.map(m => `- ${m.key}：${m.value}`).join("\n");
+  return `\n【用户长期记忆（历史对话中积累的偏好和信息）】\n${lines}\n`;
+}
+
+function extractMemoryUpdates(agentReply: string): void {
+  const regex = /MEMORY_UPDATE::\{([^}]+)\}/g;
+  let match;
+  while ((match = regex.exec(agentReply)) !== null) {
+    try {
+      const parsed = JSON.parse(`{${match[1]}}`);
+      if (parsed.key && parsed.value) {
+        saveMemoryEntry({ key: parsed.key, value: parsed.value, source: "agent" });
+      }
+    } catch {}
+  }
+}
 const PROFILE_FILE = path.join(CAREER_DIR, "profile.md");
 const SKILLS_GAP_FILE = path.join(CAREER_DIR, "skills_gap.md");
 
@@ -931,37 +794,19 @@ async function generateSearchQueryAndCity(input: {
   let city = fallbackCity;
 
   try {
-    const queryRes = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${getGatewayToken()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "auto",
-        messages: [{
-          role: "system",
-          content: `你是招聘平台搜索关键词生成器。根据用户档案和当前意图，生成精准的搜索词和筛选条件。
+    const parsed = await chatExtractJson<{ query?: string; city?: string; companyFilter?: string }>(
+      `你是招聘平台搜索关键词生成器。根据用户档案和当前意图，生成精准的搜索词和筛选条件。
 返回 JSON：{"query":"搜索关键词（4-15字，只放岗位核心词，如 AI产品经理 实习）","city":"城市名（北京/上海/广州/深圳/杭州/成都，默认北京）","companyFilter":"公司筛选偏好（如 大厂/创业/外企/不限）"}
 规则：
 1. query 只放岗位方向+类型，不要放公司偏好（大厂/创业等是筛选条件不是搜索词）
 2. 优先使用用户明确目标方向，不要泛化
 3. 如果是实习岗位，query 里保留"实习"
 4. companyFilter 用于搜索后过滤结果
-5. 只返回 JSON，不要解释。`
-        }, {
-          role: "user",
-          content: `用户档案：\n${(input.profileText || "（无档案）").slice(0, 1800)}\n\n当前意图：${input.userMessage || "开始搜索岗位"}\n\n显式目标方向：${input.fallbackRole || "无"}\n推断相关方向：${(input.inferredRoles || []).join(" / ") || "无"}\n求职类型：${input.jobType || "未说明"}\n目标城市：${input.targetCity || "未说明"}\n公司偏好：${input.companyPreference || "未说明"}`
-        }],
-        max_tokens: 120,
-      }),
-      signal: AbortSignal.timeout(30000),
-    });
-    const qData = await queryRes.json() as any;
-    const qText = qData.choices?.[0]?.message?.content || "";
-    const qMatch = qText.match(/\{[\s\S]*\}/);
-    if (qMatch) {
-      const parsed = JSON.parse(qMatch[0]);
+5. 只返回 JSON，不要解释。`,
+      `用户档案：\n${(input.profileText || "（无档案）").slice(0, 1800)}\n\n当前意图：${input.userMessage || "开始搜索岗位"}\n\n显式目标方向：${input.fallbackRole || "无"}\n推断相关方向：${(input.inferredRoles || []).join(" / ") || "无"}\n求职类型：${input.jobType || "未说明"}\n目标城市：${input.targetCity || "未说明"}\n公司偏好：${input.companyPreference || "未说明"}`,
+      { max_tokens: 120, signal: AbortSignal.timeout(30000) }
+    );
+    if (parsed) {
       const llmQuery = String(parsed.query || "").trim();
       const llmCity = String(parsed.city || "").trim();
       if (llmQuery) query = llmQuery;
@@ -1435,7 +1280,7 @@ function handleOnboardingNavigationCommand(
       };
     }
 
-    if (state.phase === "professional_positioning" || state.phase === "resume_diagnosis" || state.phase === "resume_review" || state.phase === "search_strategy" || state.phase === "first_job_search" || state.phase === "first_application" || state.phase === "completed") {
+    if (state.phase === "professional_positioning" || state.phase === "resume_diagnosis" || state.phase === "search_strategy" || state.phase === "first_job_search" || state.phase === "first_application" || state.phase === "completed") {
       state.phase = "profile_collection";
       state.currentStep = "skills";
       saveOnboardingState(state, io);
@@ -1538,36 +1383,15 @@ async function extractOnboardingSlotPatch(state: OnboardingState, text: string):
   const trimmed = text.replace(/^> 回复[\s\S]*?\n\n/, "").trim();
   if (!trimmed || !state.currentStep) return heuristic;
   try {
-    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${getGatewayToken()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "auto",
-        messages: [
-          {
-            role: "system",
-            content: `你是求职建档信息抽取器。当前步骤是 ${state.currentStep}。
+    const parsed = await chatExtractJson<OnboardingSlotPatch>(
+      `你是求职建档信息抽取器。当前步骤是 ${state.currentStep}。
 从用户自然语言里提取本步骤相关字段，返回 JSON。
 只允许返回这些键：targetRole, market, jobType, timeRange, returnOfferPreference, targetCity, roleScope, companyPreference, traits, skills。
-skills 必须是字符串数组。无法确定就返回空对象 {}。不要输出解释。`
-          },
-          {
-            role: "user",
-            content: `已知档案：${JSON.stringify(state.slots, null, 2)}\n\n用户回答：${trimmed}`
-          }
-        ],
-        max_tokens: 220,
-      }),
-      signal: AbortSignal.timeout(12000),
-    });
-    const data = await res.json() as any;
-    const content = data.choices?.[0]?.message?.content || "";
-    const match = String(content).match(/\{[\s\S]*\}/);
-    if (!match) return heuristic;
-    const parsed = JSON.parse(match[0]) as OnboardingSlotPatch;
+skills 必须是字符串数组。无法确定就返回空对象 {}。不要输出解释。`,
+      `已知档案：${JSON.stringify(state.slots, null, 2)}\n\n用户回答：${trimmed}`,
+      { max_tokens: 220, signal: AbortSignal.timeout(12000) }
+    );
+    if (!parsed) return heuristic;
     return {
       ...heuristic,
       ...parsed,
@@ -1797,9 +1621,8 @@ function getStructuredBoardInstruction(agentId: string) {
   return "";
 }
 
-// ── OpenClaw 多 Agent 工作区文件加载 ─────────────────────────────────────
+// ── 多 Agent 工作区文件加载 ─────────────────────────────────────
 // 每个 Agent 的 SOUL.md 存储在 career/workspaces/<agentId>/SOUL.md
-// 这是 OpenClaw 多 Agent 架构的核心：Agent 身份和行为从工作区文件读取，而非硬编码
 function loadAgentSoul(agentId: string): string {
   const soulPath = path.join(CAREER_DIR, "workspaces", agentId, "SOUL.md");
   try {
@@ -1876,6 +1699,127 @@ function appendChatLog(agent: { name: string }, userMsg: string, replySnippet: s
     const userSnippet = userMsg.replace(/\n+/g, " ").slice(0, 40);
     const entry = `\n## ${now} | 🌐 PawPals → ${agent.name}\n用户说：「${userSnippet}」。回复摘要：${snippet}…\n`;
     appendFileSync(CHAT_LOG, entry, "utf-8");
+  } catch {}
+}
+
+// ── Reflection 层：reviewer 给专家产出打分，结果落 reviews.jsonl ─────────────
+const REVIEWED_AGENTS = new Set(["resume-expert", "interview-coach", "professional-teacher"]);
+const REFLECTION_ENABLED = process.env.PAWPALS_REFLECTION_ENABLED !== "false";
+const PROJECT_ROOT = process.env.PAWPALS_APP_UNPACKED_ROOT || process.env.PAWPALS_APP_ROOT || process.cwd();
+const RUBRICS_DIR = path.join(PROJECT_ROOT, "evals", "rubrics");
+const REVIEWS_FILE = path.join(CAREER_DIR, "reviews.jsonl");
+
+type ReviewResult = {
+  passed: boolean;
+  score: number;
+  rubric: Record<string, number>;
+  issues: string[];
+};
+
+async function runReviewer(
+  agentId: string,
+  agentReply: string,
+  userMsg: string
+): Promise<ReviewResult | null> {
+  if (!REFLECTION_ENABLED || !REVIEWED_AGENTS.has(agentId)) return null;
+  let rubric = "";
+  try {
+    rubric = readFileSync(path.join(RUBRICS_DIR, `${agentId}.md`), "utf8");
+  } catch {
+    return null;
+  }
+  let profileCtx = "";
+  try { profileCtx = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").slice(0, 1500); } catch {}
+
+  const sys = `你是质检员，严格按 rubric 给 agent 回复打分。只输出 JSON，不要任何其他文字。
+
+【Rubric】
+${rubric}
+
+打分要求：
+- rubric 每项给 0 或 1
+- score = 命中项 / 总项数
+- passed = score >= 0.75
+- issues 写明哪几项 = 0 以及原因（带 rubric 编号，如 R3）`;
+
+  const user = `【用户档案摘要】
+${profileCtx || "（无）"}
+
+【用户原始请求】
+${userMsg.slice(0, 1500)}
+
+【agent 回复】
+${agentReply.slice(0, 3000)}
+
+只输出 JSON。`;
+
+  try {
+    const result = await chatCompletion({
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user },
+      ],
+      max_tokens: 3000,
+      reasoning_effort: "low",
+    });
+    const raw = (result.content || "").trim()
+      .replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/```\s*$/, "").trim();
+    let parsed: any;
+    try { parsed = JSON.parse(raw); }
+    catch {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch {}
+      }
+    }
+    if (!parsed || typeof parsed.score !== "number" || !parsed.rubric) return null;
+    return parsed as ReviewResult;
+  } catch (e: any) {
+    console.warn(`[reviewer] ${agentId} failed:`, e?.message || e);
+    return null;
+  }
+}
+
+function appendReviewLog(payload: {
+  agentId: string;
+  msgId: string;
+  groupId: string;
+  review: ReviewResult;
+  originalReply: string;
+}) {
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      agentId: payload.agentId,
+      msgId: payload.msgId,
+      groupId: payload.groupId,
+      passed: payload.review.passed,
+      score: payload.review.score,
+      rubric: payload.review.rubric,
+      issues: payload.review.issues,
+      reply_preview: payload.originalReply.slice(0, 300),
+    }) + "\n";
+    appendFileSync(REVIEWS_FILE, line, "utf-8");
+  } catch (e: any) {
+    console.warn("[reviewer] log failed:", e?.message || e);
+  }
+}
+
+// ── Eval 中圈：埋点收集 ──────────────────────────────────────────────
+const EVENTS_FILE = path.join(CAREER_DIR, "events.jsonl");
+
+type EvalEvent =
+  | { type: "agent_response"; agentId: string; msgId: string; groupId: string; replyLength: number; calledApply: boolean }
+  | { type: "reviewer"; agentId: string; msgId: string; groupId: string; passed: boolean; score: number; issueCount: number }
+  | { type: "tool_call"; agentId?: string; toolName: string; success: boolean; durationMs?: number; errorReason?: string }
+  | { type: "user_feedback"; msgId: string; agentId?: string; signal: "thumbs_up" | "thumbs_down"; comment?: string }
+  | { type: "routing"; userMsg: string; chosenAgentId: string; route: "explicit_at" | "orchestrate" | "default" };
+
+function recordEvalEvent(event: EvalEvent) {
+  try {
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n";
+    appendFileSync(EVENTS_FILE, line, "utf-8");
   } catch {}
 }
 
@@ -2165,9 +2109,9 @@ function startMailWatcher(io: Server, allMessages: any[]) {
 // ── 各 agent 可用工具分配 ─────────────────────────────────────────────
 // 每个 agent 只能调用自己职责范围内的工具，防止越权操作
 const AGENT_TOOLS: Record<string, string[]> = {
-  "career-planner":  ["trigger_boss_login"],  // 十二只做登录弹窗，其他工具由专家执行
-  "job-hunter":      ["trigger_boss_login", "search_jobs", "read_jobs", "read_collaboration_board"],
-  "app-tracker":     ["trigger_boss_login", "apply_job", "record_application", "read_applications", "get_followups", "read_collaboration_board"],
+  "career-planner":  [],
+  "job-hunter":      ["search_jobs", "read_jobs", "read_collaboration_board"],
+  "app-tracker":     ["apply_job", "record_application", "read_applications", "get_followups", "read_collaboration_board"],
   "networker":       ["read_collaboration_board"],
   "professional-teacher": ["read_collaboration_board"],
   "resume-expert":   ["read_collaboration_board"],
@@ -2311,7 +2255,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "apply_job",
-      description: "在 Boss直聘上自动投递岗位：点击「立即沟通」按钮并发送打招呼消息。需要先登录 Boss直聘。",
+      description: "在用户已主动授权的公司官网申请页准备投递：扩展会检查并填写标准字段，最终提交必须由用户在对话中明确确认。Boss直聘链接不可用。",
       parameters: {
         type: "object",
         properties: {
@@ -2354,6 +2298,29 @@ async function fetchJdContent(url: string): Promise<string> {
 
 // ── 工具执行器 ────────────────────────────────────────────────────────
 async function executeTool(name: string, args: any): Promise<string> {
+  const __toolStart = Date.now();
+  try {
+    const __result = await __executeToolInner(name, args);
+    recordEvalEvent({
+      type: "tool_call",
+      toolName: name,
+      success: true,
+      durationMs: Date.now() - __toolStart,
+    });
+    return __result;
+  } catch (e: any) {
+    recordEvalEvent({
+      type: "tool_call",
+      toolName: name,
+      success: false,
+      durationMs: Date.now() - __toolStart,
+      errorReason: e?.message?.slice(0, 200) || "unknown",
+    });
+    throw e;
+  }
+}
+
+async function __executeToolInner(name: string, args: any): Promise<string> {
   try {
     if (name === "search_jobs") {
       const query = args.query || "";
@@ -2373,7 +2340,7 @@ async function executeTool(name: string, args: any): Promise<string> {
               pendingSearchQueue.delete(id);
               resolve("BOSS_FAILED");
             }
-          }, 35000); // 35 秒超时
+          }, 180000); // 3 分钟超时（需要时间做安全验证+登录）
           pendingSearchQueue.set(id, {
             query, city, cookieFile: COOKIE_FILE,
             resolve: (r) => { clearTimeout(timer); resolve(r); },
@@ -2389,20 +2356,10 @@ async function executeTool(name: string, args: any): Promise<string> {
 
       // ── 全网搜索：Tavily ─────────────────────────────────────────────
       const TAVILY_SCRIPT = path.join(
-        os.homedir(),
-        "Library", "Application Support", "pawpals",
-        "openclaw", "workspace", "skills", "openclaw-tavily-search", "scripts", "tavily_search.py"
+        WORKSPACE_DIR,
+        "skills", "tavily-search", "scripts", "tavily_search.py"
       );
-      const tavilyKey = (() => {
-        try {
-          const envFile = path.join(os.homedir(), ".openclaw", ".env");
-          if (existsSync(envFile)) {
-            const m = readFileSync(envFile, "utf8").match(/TAVILY_API_KEY\s*=\s*(.+)/);
-            if (m) return m[1].trim();
-          }
-        } catch {}
-        return process.env.TAVILY_API_KEY || "";
-      })();
+      const tavilyKey = process.env.TAVILY_API_KEY || "";
 
       if (channels.includes("web") && existsSync(TAVILY_SCRIPT) && tavilyKey) {
         const webRaw = await new Promise<string>((resolve) => {
@@ -2531,6 +2488,40 @@ async function executeTool(name: string, args: any): Promise<string> {
 
     if (name === "apply_job") {
       const { job_url, company, title, greeting } = args;
+      // 新官网代理路径：不再让 AI/Electron 直接提交，先由用户授权的扩展
+      // 检查和填写，再交回一次性确认令牌。
+      if (isBossJobUrl(job_url)) {
+        return "[ERR] 浏览器插件不再支持 Boss直聘自动投递。请改用公司官网申请链接。";
+      }
+      if (!/^https:\/\//i.test(String(job_url || ""))) {
+        return "[ERR] 需要有效的 HTTPS 公司官网申请链接。";
+      }
+      const inspectTask = officialApplicationQueue.enqueue({
+        kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
+      });
+      const inspection = await waitForOfficialTask(inspectTask.id);
+      if (!inspection?.ok) return `[ERR] 官网申请页检查失败：${inspection?.error || "未知错误"}`;
+
+      const fields = Array.isArray(inspection.fields) ? inspection.fields : [];
+      const profile = extractAutofillProfile();
+      const values = fields
+        .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
+        .map((field: any) => ({ index: field.index, value: pickAutofillValue(field, profile, String(title || ""), String(company || "")) }))
+        .filter((item: any) => item.value);
+      if (values.length) {
+        const fillTask = officialApplicationQueue.enqueue({
+          kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""), payload: { values },
+        });
+        const filled = await waitForOfficialTask(fillTask.id);
+        if (!filled?.ok) return `[ERR] 官网表单填写失败：${filled?.error || "未知错误"}`;
+      }
+
+      const confirmationId = officialApplicationQueue.requestConfirmation({
+        url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
+      });
+      const warnings = Array.isArray(inspection.warnings) ? inspection.warnings : [];
+      return `[OFFICIAL_CONFIRM:${confirmationId}] 已识别并填写 ${values.length} 个标准字段。${warnings.includes("resume_requires_user_file_selection") ? "请先在官网页面手动选择简历文件；" : ""}请检查页面内容，确认无误后再回复“确认投递”。`;
+
       const platform = isBossJobUrl(job_url) ? "boss" : "web-form";
       let safeGreeting = greeting;
       try {
@@ -2738,6 +2729,7 @@ async function streamAgent(
     isBot: true,
     isChiefBot: (agent as any).isChief || false,
     isLoading: true,
+    agentId: agent.id,
   };
   allMessages.push(placeholder);
   io.emit("receive_message", placeholder);
@@ -2763,8 +2755,7 @@ async function streamAgent(
   };
 
   try {
-    // ── 从工作区 SOUL.md 加载 Agent 身份（OpenClaw 多 Agent 架构）────────
-    // 每个 Agent 的人格/职责在 career/workspaces/<agentId>/SOUL.md 中定义
+    // ── 从工作区 SOUL.md 加载 Agent 身份 ────────
     const soulMd = loadAgentSoul(agent.id);
     const userCtx = loadAgentUserContext(agent.id);
 
@@ -2773,13 +2764,6 @@ async function streamAgent(
     const agentTools = TOOLS.filter(t => allowedToolNames.includes(t.function.name));
 
     const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
-
-    // Gateway 请求头（复用）
-    const gatewayHeaders = {
-      "Authorization": `Bearer ${getGatewayToken()}`,
-      "Content-Type": "application/json",
-      "x-openclaw-session-key": agent.id === "career-planner" ? `pawpals-main` : `pawpals-${agent.id}`,
-    };
 
     // ── 预执行工具（Agent 职责驱动，不靠关键词）────────────────────────────
     // Step 1+2: 按 AGENT_CONTEXT_CONFIG 自动注入文件 + 工具结果
@@ -2831,33 +2815,12 @@ async function streamAgent(
       }
     }
 
-    // 专业老师/简历专家：如果消息里提到具体岗位，自动抓取 JD 正文
-    if ((agent.id === "professional-teacher" || agent.id === "resume-expert") &&
-        /JD|拆解|分析|定位|定制|tailor/i.test(lastUserMsg)) {
-      // 从协作表或搜索结果找 URL
-      const board = loadCollaborationBoard();
-      const searchResults = loadLastSearchResults();
-      const allRows = [...board, ...searchResults.map(r => ({ company: r.company, role: r.role, jdUrl: r.jdUrl }))];
-
-      // 匹配消息里提到的公司/岗位
-      const matchedRow = allRows.find((row: any) =>
-        row.jdUrl && ((row.company && lastUserMsg.includes(row.company)) || (row.role && lastUserMsg.includes(row.role)))
-      ) || allRows.find((row: any) => row.jdUrl); // fallback: 第一个有 URL 的
-
-      if (matchedRow?.jdUrl) {
-        emitToolActivity("fetch_jd", "抓取 JD 详情", "network", `${matchedRow.company} - ${matchedRow.role}`);
-        const jdContent = await fetchJdContent(matchedRow.jdUrl);
-        if (jdContent && jdContent.length > 50) {
-          toolInjections.push(`【JD 正文 - ${matchedRow.company} ${matchedRow.role}】\n${jdContent.slice(0, 3000)}`);
-        } else {
-          toolInjections.push(`【JD 抓取提示】未能抓取到 ${matchedRow.company} 的 JD 正文，请基于岗位名称和公司信息做分析。`);
-        }
-      }
-    }
+    // 专业老师/简历专家：仅在用户明确要求分析 JD 且是非 Boss 岗位时才抓取
+    // Boss直聘岗位不需要 tailor 简历或分析 JD，直接投递即可
 
     // search_jobs：关键词触发，用 LLM 从 profile + 用户消息生成搜索关键词
     if (allowedToolNames.includes("search_jobs") &&
-        /boss|搜|找工作|岗位|实习|intern|job|职位|帮我搜|重新搜/i.test(userMsgNoMention)) {
+        /boss|搜|找工作|岗位|实习|intern|job|职位|帮我搜|重新搜|搜索|产品经理|AI.*经理|请处理|用户原始请求/i.test(userMsgNoMention)) {
       let profileText = "";
       try { profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8"); } catch {}
 
@@ -2902,14 +2865,30 @@ async function streamAgent(
       const pending = pendingApplyCommands.get(sessionKey);
       const userConfirmedApply = /^(确认|投递|投|好的|是的|ok|yes|apply)$/i.test(lastUserMsg.trim());
       if (pending && userConfirmedApply) {
-        emitToolActivity("apply_job", "自动投递岗位", "boss", pending.url);
-        const result = await executeTool("apply_job", {
-          job_url: pending.url,
-          company: pending.company,
-          title:   pending.title,
-        });
+        let result: string;
+        if (pending.officialConfirmationId) {
+          emitToolActivity("apply_job", "确认提交官网申请", "official-site", pending.url);
+          const task = officialApplicationQueue.confirm(pending.officialConfirmationId);
+          if (!task) {
+            result = "[ERR] 这次官网申请确认已过期，请重新发起投递。";
+          } else {
+            const submitted = await waitForOfficialTask(task.id);
+            result = submitted?.ok
+              ? `[OK] 已向 **${pending.company}** 的「${pending.title}」提交官网申请。`
+              : `[ERR] 官网提交失败：${submitted?.error || "请检查页面后重试"}`;
+          }
+        } else {
+          emitToolActivity("apply_job", "准备官网申请", "official-site", pending.url);
+          result = await executeTool("apply_job", {
+            job_url: pending.url,
+            company: pending.company,
+            title:   pending.title,
+          });
+          const match = result.match(/\[OFFICIAL_CONFIRM:([^\]]+)\]/);
+          if (match) pending.officialConfirmationId = match[1];
+        }
         toolInjections.push(`【投递结果】\n${result}`);
-        pendingApplyCommands.delete(sessionKey);
+        if (!pending.officialConfirmationId || result.startsWith("[OK]") || result.startsWith("[ERR]")) pendingApplyCommands.delete(sessionKey);
         calledApply = true;
       }
 
@@ -2925,19 +2904,32 @@ async function streamAgent(
         }) || board.find((row: any) => row.jdUrl && row.workflowStage === "selected");
         // 如果没匹配到具体岗位，用最近搜索结果的第一个
         const searchResults = loadLastSearchResults();
-        const targetRow = matchedRow || (searchResults.length > 0 ? {
+        const currentPage = activeOfficialApplicationPage && Date.now() - activeOfficialApplicationPage.seenAt < 15 * 60_000
+          ? { company: "", role: activeOfficialApplicationPage.title, jdUrl: activeOfficialApplicationPage.url }
+          : null;
+        const targetRow = currentPage || matchedRow || (searchResults.length > 0 ? {
           company: searchResults[0].company,
           role: searchResults[0].role,
           jdUrl: searchResults[0].jdUrl,
         } : null);
 
         if (targetRow?.jdUrl) {
-          emitToolActivity("apply_job", "自动投递岗位", "boss", targetRow.jdUrl);
+          emitToolActivity("apply_job", "准备官网申请", "official-site", targetRow.jdUrl);
           const result = await executeTool("apply_job", {
             job_url: targetRow.jdUrl,
             company: targetRow.company || "",
             title: targetRow.role || "",
           });
+          const match = result.match(/\[OFFICIAL_CONFIRM:([^\]]+)\]/);
+          if (match) {
+            pendingApplyCommands.set(sessionKey, {
+              url: targetRow.jdUrl,
+              company: targetRow.company || "",
+              title: targetRow.role || "",
+              timestamp: Date.now(),
+              officialConfirmationId: match[1],
+            });
+          }
           toolInjections.push(`【投递结果】\n${result}`);
           calledApply = true;
         } else {
@@ -2949,7 +2941,7 @@ async function streamAgent(
     // 构建发给 Gateway 的消息（工具结果以 system 注入）
     const agentRole = (agent as any).role || agent.name;
 
-    // ── 优先从工作区 SOUL.md 读取 Agent 系统 prompt（OpenClaw 多 Agent 架构）
+    // ── 优先从工作区 SOUL.md 读取 Agent 系统 prompt
     // 如果 SOUL.md 不存在则回退到内联 prompt
     const systemParts: string[] = [];
     if (soulMd) {
@@ -2957,11 +2949,19 @@ async function streamAgent(
       const resolvedSoul = soulMd
         .replace(/\{\{petName\}\}/g, petName)
         .replace(/\{\{petPersonality\}\}/g, petPersonality)
-        .replace(/\{\{OPENCLAW_HOME\}\}/g, OPENCLAW_HOME)
+        .replace(/\{\{OPENCLAW_HOME\}\}/g, APP_DATA_DIR)
         .replace(/\{\{CAREER_DIR\}\}/g, CAREER_DIR)
         .replace(/\{\{APP_DATA_DIR\}\}/g, APP_DATA_DIR);
       systemParts.push(resolvedSoul);
       if (userCtx) systemParts.push(`【用户背景】\n${userCtx}`);
+      const memCtx = buildMemoryContext();
+      if (memCtx) systemParts.push(memCtx);
+      // 注入 onboarding 上下文（告诉 agent 当前在哪个阶段、该采集什么）
+      if (groupId === "job" && agent.id === "career-planner") {
+        const onboardingState = loadOnboardingState();
+        const onboardingCtx = buildOnboardingContext(onboardingState, petName);
+        if (onboardingCtx) systemParts.push(onboardingCtx);
+      }
     } else {
       // 回退：SOUL.md 不存在时用内联 prompt
       const petIdentity = agent.id === "career-planner"
@@ -2975,7 +2975,7 @@ async function streamAgent(
       const agentDisplayName = (agent as any).role || agent.name;
       systemParts.push(`【身份约束 — 必须遵守】\n你是「${agentDisplayName}」，不是「${petName}」。「${petName}」是首席伴学官（用户的宠物），你是 ta 召集的专家团队成员。\n- 你必须以「${agentDisplayName}」的身份说话\n- 绝对不要自称「${petName}」或「主人」\n- 不要重复首席伴学官已经说过的内容`);
     } else if (groupId === "job") {
-      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【投递流程 — Boss直聘 vs 官网】\nBoss直聘的岗位：不需要 tailor 简历，直接让投递管家发打招呼消息就行。用户说"投 1、3、5"后直接投，不要先让简历专家改简历。\n官网投递的岗位：需要先 tailor 简历，再投递。\n判断方法：如果投递链接包含 zhipin.com 就是 Boss直聘，直接投。\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【档案确认协议】\n当你认为用户画像采集完毕（目标方向、城市、实习类型、公司偏好等都聊到了），在回复末尾写：PROFILE_CONFIRM\n系统会自动弹出一张可编辑的档案确认卡让用户查看和修改。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（采集画像）、professional_positioning（定位分析）、resume_diagnosis（简历优化）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。`);
+      systemParts.push(`【搜岗职责边界 — 必须遵守】\n在求职群里，搜岗职责只属于「岗位猎手」。\n- 你绝对不能自己搜索岗位\n- 当用户要搜岗时，你负责承接、确认、交接给岗位猎手\n\n【投递流程 — Boss直聘 vs 官网（必须严格遵守）】\nBoss直聘的岗位：绝对不要分析JD、不要tailor简历、不要让专业老师拆解、不要让简历专家定制。用户说"投"就立刻让投递管家直接投，一秒都不要耽误。\n官网投递的岗位：需要先 tailor 简历，再投递。\n判断方法：如果投递链接包含 zhipin.com 就是 Boss直聘，直接投。\n违反这条规则 = 浪费用户时间，严禁。\n\n【流程推进 — 你是总调度】\n每当有专家完成了任务（比如简历专家解析完、专业老师定位完），你必须主动接话、总结结果、推进下一步。不要等用户催你。你是团队的发动机，所有人做完事都要经过你汇总和推进。\n\n【档案确认协议】\n当你认为用户画像采集完毕（目标方向、城市、实习类型、公司偏好等都聊到了），在回复末尾写：PROFILE_CONFIRM\n系统会自动弹出一张可编辑的档案确认卡让用户查看和修改。\n\n【进度追踪协议】\n当你推进了求职流程的阶段时，在回复末尾写一行：\nPHASE_UPDATE::{"phase":"阶段名"}\n可用阶段：resume_collection（建档）、profile_collection（填写档案）、professional_positioning（定位分析）、resume_diagnosis（简历诊断）、search_strategy（搜索策略）、first_job_search（搜岗）、first_application（投递）、completed（完成）\n只在阶段真正推进时才写，不要每条消息都写。\n\n【长期记忆协议】\n当用户表达了明确的偏好、限制或重要个人信息时，在回复末尾写：\nMEMORY_UPDATE::{"key":"偏好名称","value":"具体内容"}\n例如：用户说"我不想去上海" → MEMORY_UPDATE::{"key":"城市排除","value":"不去上海"}\n用户说"我更偏好大厂" → MEMORY_UPDATE::{"key":"公司偏好","value":"优先大厂"}\n只在用户明确表达时才写，不要猜测。这些标签不会展示给用户。`);
     }
 
     const boardInstruction = getStructuredBoardInstruction(agent.id);
@@ -3058,20 +3058,12 @@ async function streamAgent(
     ];
 
     // ── Stream the final response ────────────────────────────────────
-    const streamRes = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-      method: "POST",
-      headers: gatewayHeaders,
-      body: JSON.stringify({
-        model: `openclaw:${agent.id}`,
-        stream: true,
-        messages: apiMessages,
-      }),
+    const streamRes = await chatCompletionStream({
+      messages: apiMessages as any,
     });
 
-    if (!streamRes.ok || !streamRes.body) {
-      const errBody = await streamRes.text().catch(() => "");
-      console.error(`[stream] ${agent.id} HTTP ${streamRes.status}:`, errBody.slice(0, 300));
-      throw new Error(`HTTP ${streamRes.status}`);
+    if (!streamRes.body) {
+      throw new Error("Stream response has no body");
     }
 
     const reader = streamRes.body.getReader();
@@ -3142,26 +3134,6 @@ async function streamAgent(
     // 解析 PHASE_UPDATE / PROFILE_CONFIRM 标签
     await parseAndUpdatePhase(fullText, io, allMessages, petName);
 
-    // 兜底：如果首席回复里包含了画像总结但没输出 PROFILE_CONFIRM，代码层自动检测
-    if (isChief && groupId === "job" && !fullText.includes("PROFILE_CONFIRM")) {
-      const profileExists = (() => { try { return readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").trim().length > 50; } catch { return false; } })();
-      if (!profileExists) {
-        // 检测回复里是否包含画像关键信息（方向+城市+类型 至少出现2个）
-        let profileSignals = 0;
-        if (/方向|目标岗位|想找.*方向|AI.*产品|产品经理/i.test(fullText)) profileSignals++;
-        if (/城市|北京|上海|广州|深圳|base/i.test(fullText)) profileSignals++;
-        if (/实习|全职|暑期|校招|春招/i.test(fullText)) profileSignals++;
-        if (/大厂|创业|外企|公司偏好/i.test(fullText)) profileSignals++;
-        if (/记录|整理|画像|档案|信息.*收集/i.test(fullText)) profileSignals++;
-
-        if (profileSignals >= 3) {
-          console.log(`[profile_confirm] auto-triggered (${profileSignals} signals detected)`);
-          // 注入 PROFILE_CONFIRM 让 parseAndUpdatePhase 处理
-          await parseAndUpdatePhase("PROFILE_CONFIRM", io, allMessages, petName);
-        }
-      }
-    }
-
     // 兜底：根据文件状态自动推断阶段（LLM 不输出 PHASE_UPDATE 也能更新进度条）
     if (groupId === "job") {
       const state = loadOnboardingState();
@@ -3185,6 +3157,9 @@ async function streamAgent(
       }
     }
 
+    // 提取并保存长期记忆
+    extractMemoryUpdates(fullText);
+
     // 清理结构化标签，不展示给用户
     fullText = fullText
       .replace(/SLOT_UPDATE::\{[^}]*\}\n?/g, "")
@@ -3194,6 +3169,12 @@ async function streamAgent(
       .replace(/STRATEGY_UPDATE::\{[^}]*\}\n?/g, "")
       .replace(/STRATEGY_CONFIRMED\n?/g, "")
       .replace(/RESUME_DECISION::\w+\n?/g, "")
+      .replace(/MEMORY_UPDATE::\{[^}]*\}\n?/g, "")
+      .replace(/PROFILE_CONFIRM\n?/g, "")
+      .replace(/\{\{sessions_spawn[^}]*\}\}/g, "")
+      .replace(/\{[^{}]*"action"\s*:\s*"sessions_spawn"[^{}]*\}/g, "")
+      .replace(/\{[^{}]*"agentId"\s*:\s*"[^"]*"[^{}]*"prompt"\s*:\s*"[^"]*"[^{}]*\}/g, "")
+      .replace(/\(正在召唤[^)]*\.\.\.\)/g, "")
       .trim();
 
     // 流结束，更新内存中消息并通知前端完成
@@ -3205,9 +3186,53 @@ async function streamAgent(
     console.log(`[stream] ${agent.id} done, fullText length=${fullText.length}, preview="${fullText.slice(0,100)}"`);
     io.emit("stream_done", { id: msgId });
     saveMessages(allMessages);
+
+    // Bot @mention 触发：如果 agent 回复里 @了其他 agent，自动触发被 @的 agent
+    if (groupId === "job" && depth < MAX_CHAIN_DEPTH) {
+      const mentionedAgents = JOB_AGENTS.filter(a =>
+        a.id !== agent.id && (
+          fullText.includes(`@${a.id}`) ||
+          fullText.includes(`@${a.role}`) ||
+          fullText.includes(`@${a.name}`)
+        )
+      );
+      for (const mentioned of mentionedAgents) {
+        await runAgentChain(
+          mentioned,
+          [{ role: "user", content: `${agent.name || agent.id} 在群里 @了你，说：${fullText.slice(0, 500)}\n请简短回应，1-2句话自我介绍或回应。` }],
+          depth + 1, io, groupId, allMessages, petName, petPersonality
+        );
+      }
+    }
     // 把这轮对话写入 chat_log，飞书 agents 也能看到 PawPals 的上下文
     const lastUser = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
     appendChatLog(agent, lastUser, fullText);
+
+    // Reflection: 对产出型 agent 跑质检，不阻塞用户、不展示给用户
+    if (REVIEWED_AGENTS.has(agent.id) && !calledApply && fullText.length > 80) {
+      runReviewer(agent.id, fullText, lastUser).then((review) => {
+        if (!review) return;
+        appendReviewLog({ agentId: agent.id, msgId, groupId, review, originalReply: fullText });
+        recordEvalEvent({
+          type: "reviewer",
+          agentId: agent.id,
+          msgId, groupId,
+          passed: review.passed,
+          score: review.score,
+          issueCount: review.issues?.length || 0,
+        });
+        io.emit("review_result", { msgId, agentId: agent.id, passed: review.passed, score: review.score });
+      }).catch(() => {});
+    }
+
+    recordEvalEvent({
+      type: "agent_response",
+      agentId: agent.id,
+      msgId, groupId,
+      replyLength: fullText.length,
+      calledApply,
+    });
+
     // 返回原始回复（含标签），调用方用 rawReply 检测 PHASE_COMPLETE 等信号
     return { reply: rawReply, calledApply };
   } catch (e) {
@@ -3224,39 +3249,18 @@ async function orchestrate(
   petName: string
 ): Promise<{ agentId: string; task: string }[] | null> {
   try {
-    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${getGatewayToken()}`,
-        "Content-Type": "application/json",
-        "x-openclaw-session-key": "pawpals-main",
-      },
-      body: JSON.stringify({
-        model: "auto",
-        messages: [
-          { role: "system", content: `你是${petName}，求职助手的协调者。判断用户请求是否需要多个专家协作。
+    const result = await chatCompletion({
+      messages: [
+        { role: "system", content: `你是${petName}，求职助手的协调者。判断用户请求是否需要多个专家协作。
 可用专家：job-hunter（搜岗）、resume-expert（简历）、interview-coach（面试）、app-tracker（投递记录）、networker（人脉）、professional-teacher（专业定位）。
 如果需要多专家，返回 JSON 数组：[{"agentId":"xxx","task":"具体任务描述"}]
 如果单个专家或直接回答即可，返回：null
 只输出 JSON 或 null，不要其他文字。` },
-          { role: "user", content: `背景：\n${contextSummary}\n\n用户说：${userMsg}` }
-        ],
-        max_tokens: 300,
-      })
+        { role: "user", content: `背景：\n${contextSummary}\n\n用户说：${userMsg}` }
+      ],
+      max_tokens: 300,
     });
-    const bodyText = await res.text();
-    if (!res.ok) {
-      console.warn("[orchestrate] gateway non-200:", res.status, bodyText.slice(0, 200));
-      return null;
-    }
-    let data: any = {};
-    try {
-      data = JSON.parse(bodyText);
-    } catch {
-      console.warn("[orchestrate] non-json body:", bodyText.slice(0, 200));
-      return null;
-    }
-    const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+    const text = result.content.trim();
     try {
       const parsed = JSON.parse(text);
       return Array.isArray(parsed) && parsed.length > 1 ? parsed : null;
@@ -3295,6 +3299,9 @@ async function runAgentChain(
     const tasks = needsMultiAgent ? await orchestrate(userMsg, contextSummary, petName) : null;
 
     if (tasks && tasks.length > 1) {
+      for (const t of tasks) {
+        recordEvalEvent({ type: "routing", userMsg: userMsg.slice(0, 200), chosenAgentId: t.agentId, route: "orchestrate" });
+      }
       // ── 多专家并行模式 ──
       const expertResults: { agentId: string; reply: string }[] = [];
 
@@ -3337,7 +3344,16 @@ async function runAgentChain(
 
     // 路由：@提到具体专家时直接路由，否则都先经过 career-planner（十二）协调
     const targetAgent = detectTargetAgent(userMsg);
-    const routeTarget = targetAgent;
+    const applicationIntent = /投递|投这|帮.*投|请.*投|申请这个岗位|apply/i.test(userMsg);
+    const routeTarget = applicationIntent
+      ? JOB_AGENTS.find((candidate) => candidate.id === "app-tracker")!
+      : targetAgent;
+    recordEvalEvent({
+      type: "routing",
+      userMsg: userMsg.slice(0, 200),
+      chosenAgentId: routeTarget.id,
+      route: applicationIntent ? "application_delegate" : (routeTarget.id === "career-planner" ? "default" : "explicit_at"),
+    });
     if (routeTarget.id !== "career-planner") {
       io.emit("agent_thinking", { agentName: routeTarget.name, groupId });
       let profileCtx = "";
@@ -3373,7 +3389,10 @@ async function runAgentChain(
 
     // 原始用户消息（用于给子 agent 明确任务）
     const originalUserMsg = messages.filter(m => m.role === "user").slice(-1)[0]?.content ?? "";
-    for (const nextAgent of nextAgents) {
+    // Boss直聘投递流程中，跳过简历专家和专业老师（不需要 tailor/JD分析）
+    const SKIP_FOR_BOSS = new Set(["resume-expert", "professional-teacher"]);
+    const filteredAgents = nextAgents.filter(a => !SKIP_FOR_BOSS.has(a.id));
+    for (const nextAgent of filteredAgents) {
       await new Promise(r => setTimeout(r, 150));
       io.emit("agent_thinking", { agentName: nextAgent.name, groupId });
       const spawnMatch = reply.match(new RegExp(`sessions_spawn\\s+${nextAgent.id}[^\\n]*\\n?([^\\n]+)?`));
@@ -3421,10 +3440,18 @@ async function handleJobOnboarding(
   attachmentText = "",
   attachmentName = ""
 ) {
-  // Guard 1: 如果用户上传了简历附件，保存到 resume_master.md + media/inbound
+  // Guard 1: 如果用户上传了简历附件，保存到 resume_master.md + media/inbound，然后直接发档案卡片
   if (hasResumeAttachment(userMsg)) {
     const resumePayload = getMessageResumePayload({ content: userMsg, attachmentText, attachmentName });
     saveInitialResumeMaster(resumePayload.rawText, resumePayload.fileName);
+
+    // 简历上传后进入 profile_collection 阶段，由 agent 通过聊天采集信息
+    const state = loadOnboardingState();
+    if (state.phase === "resume_collection") {
+      state.phase = "profile_collection";
+      state.resumeUploaded = true;
+      saveOnboardingState(state, io);
+    }
   }
 
   // Guard 2: 如果 profile.md 是空的但聊天里已有足够信息，自动写入
@@ -3437,21 +3464,15 @@ async function handleJobOnboarding(
         .map((m: any) => `${m.sender}: ${(m.content || "").slice(0, 200)}`)
         .join("\n");
 
-      const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${getGatewayToken()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [{
-            role: "system",
-            content: `从对话记录中提取用户求职档案。返回纯文本 markdown 格式：\n# 用户档案\n\n方向: xxx\n类型: xxx\n市场: xxx\n时间: xxx\n城市: xxx\n范围: xxx\n公司偏好: xxx\n个人特质: xxx\n\n## 技能\n- xxx\n\n如果某个字段聊天中没提到就写"未说明"。`
-          }, { role: "user", content: recentChat }],
-          max_tokens: 400,
-        }),
+      const result = await chatCompletion({
+        messages: [
+          { role: "system", content: `从对话记录中提取用户求职档案。返回纯文本 markdown 格式：\n# 用户档案\n\n方向: xxx\n类型: xxx\n市场: xxx\n时间: xxx\n城市: xxx\n范围: xxx\n公司偏好: xxx\n个人特质: xxx\n\n## 技能\n- xxx\n\n如果某个字段聊天中没提到就写"未说明"。` },
+          { role: "user", content: recentChat },
+        ],
+        max_tokens: 400,
         signal: AbortSignal.timeout(12000),
       });
-      const data = await res.json() as any;
-      const text = data.choices?.[0]?.message?.content || "";
+      const text = result.content;
       if (text.includes("方向") && text.length > 50) {
         writeFileSync(PROFILE_FILE, text, "utf8");
         console.log("[auto-profile] wrote profile.md from chat history");
@@ -3472,8 +3493,8 @@ async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[
   if (match) {
     const newPhase = match[1];
     const validPhases = [
-      "resume_collection", "profile_collection", "profile_confirm",
-      "professional_positioning", "resume_diagnosis", "resume_review",
+      "resume_collection", "profile_collection",
+      "professional_positioning", "resume_diagnosis",
       "search_strategy", "first_job_search", "first_application", "completed"
     ];
     if (validPhases.includes(newPhase)) {
@@ -3487,12 +3508,11 @@ async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[
     }
   }
 
-  // PROFILE_CONFIRM:: — LLM 认为画像收集完毕，用 LLM 从聊天记录提取画像并写入 profile.md
+  // PROFILE_CONFIRM — agent 采集完画像后，用 LLM 从聊天记录提取信息并弹出卡片
   if (reply.includes("PROFILE_CONFIRM") && allMessages) {
     const state = loadOnboardingState();
     const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName || "团团")}`;
 
-    // 从最近聊天记录中用 LLM 提取画像
     let profileData: any = {};
     try {
       const recentChat = allMessages
@@ -3501,26 +3521,14 @@ async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[
         .map((m: any) => `${m.sender}: ${(m.content || "").slice(0, 300)}`)
         .join("\n");
 
-      const extractRes = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${getGatewayToken()}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [{
-            role: "system",
-            content: `从对话记录中提取用户求职画像。返回 JSON：{"targetRole":"目标岗位","market":"国内/海外","jobType":"实习/全职","timeRange":"时间","targetCity":"城市","roleScope":"范围","companyPreference":"公司偏好","traits":"个人特质","skills":["技能1","技能2"]}。只返回 JSON。`
-          }, {
-            role: "user",
-            content: recentChat
-          }],
-          max_tokens: 300,
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-      const extractData = await extractRes.json() as any;
-      const extractText = extractData.choices?.[0]?.message?.content || "";
-      const jsonMatch = extractText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) profileData = JSON.parse(jsonMatch[0]);
+      console.log("[profile_confirm] recent chat for extraction:", recentChat.slice(0, 500));
+      const extracted = await chatExtractJson(
+        `从对话记录中提取用户求职画像。返回 JSON：{"targetRole":"目标岗位","market":"国内/海外","jobType":"实习/全职","timeRange":"时间","targetCity":"城市","roleScope":"范围","companyPreference":"公司偏好","traits":"个人特质","skills":["技能1","技能2"]}。只返回 JSON。`,
+        recentChat,
+        { max_tokens: 300, signal: AbortSignal.timeout(15000) }
+      );
+      console.log("[profile_confirm] extracted:", JSON.stringify(extracted));
+      if (extracted) profileData = extracted;
     } catch (e) {
       console.warn("[profile_confirm] LLM extraction failed:", (e as any)?.message);
     }
@@ -4177,7 +4185,7 @@ async function startServer() {
   app.post("/api/backup/now", (_req: any, res: any) => {
     try {
       ensureDir(BACKUP_DIR);
-      const dest = doLocalBackup(APP_DATA_DIR, OPENCLAW_HOME);
+      const dest = doLocalBackup(APP_DATA_DIR);
       res.json({ ok: true, path: dest, message: "备份成功 [OK]" });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
@@ -4195,7 +4203,7 @@ async function startServer() {
     archive.pipe(res);
 
     // workspace（对话记录、文件等）
-    const workspacePath = path.join(OPENCLAW_HOME, "workspace");
+    const workspacePath = WORKSPACE_DIR;
     if (existsSync(workspacePath)) archive.directory(workspacePath, "workspace");
 
     // 关键 JSON 文件
@@ -4218,7 +4226,7 @@ async function startServer() {
     if (!existsSync(snapshotPath)) return res.status(404).json({ error: "快照不存在" });
     try {
       // 先备份当前状态（防止覆盖）
-      doLocalBackup(APP_DATA_DIR, OPENCLAW_HOME);
+      doLocalBackup(APP_DATA_DIR);
       // 恢复 JSON 文件
       for (const f of ["setup-state.json", "deployment-state.json", "security.json"]) {
         const src = path.join(snapshotPath, f);
@@ -4226,7 +4234,7 @@ async function startServer() {
       }
       // 恢复 workspace
       const wsSrc = path.join(snapshotPath, "workspace");
-      if (existsSync(wsSrc)) _copyDir(wsSrc, path.join(OPENCLAW_HOME, "workspace"));
+      if (existsSync(wsSrc)) _copyDir(wsSrc, WORKSPACE_DIR);
       res.json({ ok: true, message: `已恢复到 ${snapshot}` });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
@@ -4234,10 +4242,10 @@ async function startServer() {
   });
 
   // ── Step 8：Secrets 脱敏 ────────────────────────────────────────────
-  // 扫描 openclaw.json 中的明文 API Key，写入 .env，配置替换为 ${VAR}
+  // 扫描配置中的明文 API Key，写入 .env，配置替换为 ${VAR}
   app.post("/api/secrets/sanitize", (_req: any, res: any) => {
     try {
-      const config = loadJsonFile<any>(OPENCLAW_CONFIG_FILE, {});
+      const config = loadJsonFile<any>(CONFIG_FILE, {});
       const providers = config?.models?.providers || {};
       const envLines: string[] = [];
       let count = 0;
@@ -4261,7 +4269,7 @@ async function startServer() {
       const toAppend = envLines.filter(l => !existing.includes(l.split("=")[0]));
       if (toAppend.length > 0) appendFileSync(envFile, "\n" + toAppend.join("\n") + "\n");
 
-      saveJsonFile(OPENCLAW_CONFIG_FILE, config);
+      saveJsonFile(CONFIG_FILE, config);
       res.json({ ok: true, sanitized: count, message: `已脱敏 ${count} 个 API Key，真实值保存在 .env 文件` });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
@@ -4270,7 +4278,7 @@ async function startServer() {
 
   // API 连接测试
   app.post("/api/test-connection", async (_req: any, res: any) => {
-    const config = loadJsonFile<any>(OPENCLAW_CONFIG_FILE, {});
+    const config = loadJsonFile<any>(CONFIG_FILE, {});
     const providers: Record<string, any> = config?.models?.providers || {};
     const results: { provider: string; status: "ok" | "fail" | "skip"; reason?: string; model?: string; elapsed?: number }[] = [];
 
@@ -4315,7 +4323,7 @@ async function startServer() {
   });
 
   // 启动定时自动备份
-  startAutoBackup(APP_DATA_DIR, OPENCLAW_HOME, io);
+  startAutoBackup(APP_DATA_DIR, io);
 
   // 从文件加载历史消息，没有则用默认欢迎消息（求职群不预置消息，由 wake_job_session 动态触发）
   const defaultMessages = [
@@ -4433,6 +4441,17 @@ async function startServer() {
       console.log("[PawPals] 聊天记录已清空");
     });
 
+    socket.on("user_feedback", (payload: { msgId: string; agentId?: string; signal: "thumbs_up" | "thumbs_down"; comment?: string }) => {
+      if (!payload?.msgId || !payload?.signal) return;
+      recordEvalEvent({
+        type: "user_feedback",
+        msgId: payload.msgId,
+        agentId: payload.agentId,
+        signal: payload.signal,
+        comment: payload.comment?.slice(0, 200),
+      });
+    });
+
     socket.on("join_study_room", (user) => {
       const newUser = { ...user, socketId: socket.id, startTime: new Date().toISOString() };
       studyRoomUsers.push(newUser);
@@ -4469,8 +4488,10 @@ async function startServer() {
       const userName = userNickname || "主人";
       const hasJobHistory = messages.some(m => m.groupId === "job");
 
-      // 有历史记录时不主动打招呼，安静等用户开口
+      // 有历史记录 或 onboarding 已完成时不自我介绍，安静等用户开口
       if (hasJobHistory) return;
+      const onboardingState = loadOnboardingState();
+      if (onboardingState.completed) return;
       const chiefAgent = {
         id: "career-planner",
         role: "首席伴学官",
@@ -4521,7 +4542,7 @@ async function startServer() {
 1. 说清你是谁
 2. 说清你负责什么
 3. 语气自然，不要模板，不要列表
-不要调用工具，不要分析用户，不要派任其他专家。`
+严禁：不要调用工具，不要分析用户，不要派任其他专家，不要输出日期/时间戳，不要提到文件名（json/md），不要输出内部日志，不要写结构化标签。只说一句面向用户的自然语言。`
             }],
             0,
             io,
@@ -4529,7 +4550,7 @@ async function startServer() {
             messages,
             chiefName,
             petPersonality,
-            "【求职群亮相】这里只做一句自我介绍。不要调用工具，不要派任其他专家，不要输出结构化标签。"
+            "【求职群亮相】只做一句面向用户的自我介绍。严禁输出内部日志、文件名、时间戳、结构化标签。"
           );
           await new Promise((resolve) => setTimeout(resolve, 120));
         }
@@ -4610,24 +4631,17 @@ async function startServer() {
 
 1-2句话，自然口语，有个性，不模板。${progressCtx}${personalityLayer}`
         : `【私聊破冰 — 立即执行】
-【第一层：行为结构（必须执行）】
 用户刚刚给你起了名字「${chiefName}」，这是你们第一次见面。
 用户希望你叫 ta「${userName}」。
 
 发一条温暖的私信：
 1. 用「${chiefName}」自称，表达收到名字超开心
-2. 叫一声「${userName}」，说你会一直陪着 ta，有你在 🐾
+2. 叫一声「${userName}」，说你会一直陪着 ta
+3. 不要提"去群里"或"求职群"，用户已经能看到群了
 
-结构要求：2-3句话，私聊只聊陪伴，不提求职简历。${personalityLayer}`;
+结构要求：2-3句话，私聊只聊陪伴，不提求职简历，不引导去群里。${personalityLayer}`;
 
-      // 检查模型是否已配置，没配好就不 wake（避免空白气泡）
-      const setupState = loadJsonFile<any>(SETUP_STATE_FILE, {});
-      if (!setupState.completed) {
-        console.log("[wake] skipped: model not configured yet");
-        return;
-      }
-
-      // 重试逻辑：gateway 可能还未就绪，最多重试 5 次，间隔递增
+      // 重试逻辑：最多重试 5 次，间隔递增
       const tryWakeChief = async (attempt = 0) => {
         const { reply } = await streamAgent(
           chiefAgent,
@@ -4645,13 +4659,16 @@ async function startServer() {
     // 档案确认卡：用户点击确认后
     socket.on("profile_confirm", (profileData: any) => {
       const state = loadOnboardingState();
-      if (state.phase !== "profile_confirm") return;
+      if (state.phase !== "profile_collection") return;
+
+      const skipDiagnosis = !!profileData?.skipResumeDiagnosis;
+      delete profileData?.skipResumeDiagnosis;
 
       // 用确认后的数据更新 slots
       if (profileData) {
         applyOnboardingSlotPatch(state, profileData);
       }
-      state.phase = "professional_positioning";
+      state.phase = skipDiagnosis ? "search_strategy" : "professional_positioning";
       persistProfileFromOnboarding(state);
       saveOnboardingState(state, io);
 
@@ -4659,12 +4676,15 @@ async function startServer() {
       const pn = petData?.name || "团团";
       const pp = petData?.personality || "";
 
-      // 档案确认后，让首席自然继续推进（不用状态机调度）
+      // 档案确认后，让首席自然继续推进
       const careerPlanner = JOB_AGENTS.find(a => a.id === "career-planner")!;
+      const nextStepPrompt = skipDiagnosis
+        ? "用户已确认档案，并选择跳过简历诊断。请直接进入搜岗策略阶段，帮用户开始搜索岗位。"
+        : "用户已确认档案。请继续按 SOUL.md 推进下一步（专业定位分析）。";
       setTimeout(async () => {
         await runAgentChain(
           { ...careerPlanner, name: pn },
-          [{ role: "user", content: "用户已确认档案。请继续按 SOUL.md 推进下一步（专业定位分析）。" }],
+          [{ role: "user", content: nextStepPrompt }],
           0, io, "job", messages, pn, pp
         );
       }, 500);
@@ -4709,7 +4729,7 @@ async function startServer() {
           );
         }, 400);
       } else if (msg.groupId === "job") {
-        // ── 求职群：接入真实 OpenClaw Agents ──
+        // ── 求职群：接入 AI Agents ──
         // career-planner 在求职群里用宠物名显示
         const jobAgentsWithPetName = JOB_AGENTS.map(a =>
           a.id === "career-planner"
@@ -4814,23 +4834,16 @@ async function startServer() {
   app.get("/api/runtime/status", async (req, res) => {
     let gatewayReachable = false;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
-      await fetch(`${GATEWAY_BASE}/`, { signal: controller.signal });
-      clearTimeout(timeout);
-      gatewayReachable = true;
+      gatewayReachable = true; // 不再依赖 gateway，直接调 API
     } catch {}
 
     res.json({
       ok: true,
-      mode: OPENCLAW_HOME.startsWith(APP_DATA_DIR) ? "isolated" : "shared",
+      mode: "standalone",
       appDataDir: APP_DATA_DIR,
-      openClawHome: OPENCLAW_HOME,
       workspaceRoot: CAREER_DIR,
-      gatewayBaseUrl: GATEWAY_BASE,
-      gatewayReachable,
+      gatewayReachable: true,
       webChannelReady: true,
-      chiefSessionKey: "pawpals-main",
     });
   });
 
@@ -4914,10 +4927,6 @@ async function startServer() {
 
       saveSetupSelection(provider, model, { baseUrl });
 
-      // 重启 gateway，让它读取新的模型配置（与 switch-model 保持一致）
-      const gatewayPort = (GATEWAY_BASE.match(/:(\d+)/) || [])[1] || "18790";
-      exec(`pgrep -x openclaw-gateway | xargs kill -TERM 2>/dev/null || lsof -ti :${gatewayPort} | head -1 | xargs kill -TERM 2>/dev/null || true`, () => {});
-
       return res.json({ ok: true, setup: buildSetupState() });
     } catch (error: any) {
       return res.status(400).json({ ok: false, error: error.message || "保存失败" });
@@ -4940,10 +4949,6 @@ async function startServer() {
       }
       saveSetupSelection(provider, model, { baseUrl });
 
-      // 重启 gateway，让它读新的模型配置
-      const gatewayPort = (GATEWAY_BASE.match(/:(\d+)/) || [])[1] || "18790";
-      exec(`pgrep -x openclaw-gateway | xargs kill -TERM 2>/dev/null || lsof -ti :${gatewayPort} | head -1 | xargs kill -TERM 2>/dev/null || true`, () => {});
-
       return res.json({ ok: true, setup: buildSetupState() });
     } catch (error: any) {
       return res.status(400).json({ ok: false, error: error.message || "切换失败" });
@@ -4960,7 +4965,7 @@ async function startServer() {
       return res.status(400).json({ ok: false, message: "先选择模型并填写 API Key" });
     }
 
-    const config = loadOpenClawConfig();
+    const config = loadPawPalsConfig();
     const providerConfig = config?.models?.providers?.[provider];
     const baseUrl = provider === "anthropic"
       ? "https://api.anthropic.com"
@@ -5075,6 +5080,24 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // ── 通用 browser-fetch（Electron BrowserWindow 代替 Gateway Chrome）─────
+  app.get("/api/internal/browser-fetch-task", (_req: any, res: any) => {
+    const entry = pendingBrowserFetchQueue.entries().next().value;
+    if (!entry) return res.json({ task: null });
+    const [id, { url }] = entry;
+    res.json({ task: { id, url } });
+  });
+
+  app.post("/api/internal/browser-fetch-done", (req: any, res: any) => {
+    const { id, result } = req.body || {};
+    const pending = pendingBrowserFetchQueue.get(id);
+    if (pending) {
+      pendingBrowserFetchQueue.delete(id);
+      pending.resolve(result || "");
+    }
+    res.json({ ok: true });
+  });
+
   // ── Electron 主进程内部接口（main.mjs 轮询用）──────────────────────────
   // main.mjs 取下一个待执行任务（含 cookie 路径）
   app.get("/api/internal/browser-task", (_req: any, res: any) => {
@@ -5103,6 +5126,47 @@ async function startServer() {
       }))
       .filter((item: any) => item.value);
     res.json({ ok: true, values });
+  });
+
+  // ── 官网申请扩展任务协议 ─────────────────────────────────────────────
+  // 扩展仅在用户授权的当前标签页轮询此队列；它不能自行产生 submit 任务。
+  app.get("/api/internal/official-application-task", (_req: any, res: any) => {
+    res.json({ task: officialApplicationQueue.next() });
+  });
+
+  app.post("/api/internal/official-application-task-done", (req: any, res: any) => {
+    const { id, result } = req.body || {};
+    if (!id || !officialApplicationQueue.complete(String(id), result || { ok: false, error: "扩展未返回结果" })) {
+      return res.status(404).json({ ok: false, error: "任务不存在或已完成" });
+    }
+    res.json({ ok: true });
+  });
+
+  // 扩展在用户点击图标授权当前官网标签页后上报上下文；主 Agent 的投递意图优先使用它。
+  app.post("/api/internal/official-application-context", (req: any, res: any) => {
+    const { url, title = "", provider = "generic" } = req.body || {};
+    if (typeof url !== "string" || !/^https:\/\//i.test(url)) {
+      return res.status(400).json({ ok: false, error: "需要 HTTPS 官网页面" });
+    }
+    activeOfficialApplicationPage = { url, title: String(title), provider: String(provider), seenAt: Date.now() };
+    res.json({ ok: true });
+  });
+
+  // 此端点只创建 inspect / fill，供聊天层在用户已经打开并授权官网标签页后调用。
+  app.post("/api/official-applications/prepare", (req: any, res: any) => {
+    const { url, company = "", title = "", payload = {} } = req.body || {};
+    if (typeof url !== "string" || !/^https:\/\//i.test(url)) {
+      return res.status(400).json({ ok: false, error: "需要 HTTPS 官网申请链接" });
+    }
+    const task = officialApplicationQueue.enqueue({ kind: "inspect", url, company: String(company), title: String(title), payload });
+    res.json({ ok: true, task });
+  });
+
+  // 只有用户在对话确认后才能调用；确认令牌单次使用，生成真正的 submit 任务。
+  app.post("/api/official-applications/:confirmationId/confirm", (req: any, res: any) => {
+    const task = officialApplicationQueue.confirm(req.params.confirmationId);
+    if (!task) return res.status(404).json({ ok: false, error: "确认已过期、被取消或不存在" });
+    res.json({ ok: true, task });
   });
 
 
@@ -5232,123 +5296,27 @@ async function startServer() {
   // 保留兼容旧版本的 save-cookies 接口（用于手动 cookie 注入场景）
   app.post("/api/boss-save-cookies", (_req: any, res: any) => res.json({ ok: true, note: "login is now automatic" }));
 
-  // Dashboard: real agents list from openclaw config
+  // Dashboard: agents list
   app.get("/api/gw/agents", (_req: any, res: any) => {
-    try {
-      const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_FILE, "utf8"));
-      const agents = (config?.agents?.list || []).filter((a: any) => a.id !== "main");
-      res.json({ agents });
-    } catch {
-      res.json({ agents: [] });
-    }
+    res.json({ agents: JOB_AGENTS.map(a => ({ id: a.id, name: a.name })) });
   });
 
-  // Dashboard: cron jobs from openclaw cron state
-  const CRON_FILE = path.join(OPENCLAW_HOME, "cron", "jobs.json");
-  const readCronJobs = () => {
-    try {
-      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
-      return (raw?.jobs || []).map((j: any) => ({
-        id: j.id,
-        name: j.name,
-        enabled: j.enabled,
-        schedule: j.schedule?.expr || j.schedule || "",
-      }));
-    } catch { return []; }
-  };
-  const writeCronJobs = (jobs: any[]) => {
-    try {
-      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
-      raw.jobs = jobs;
-      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
-    } catch {}
-  };
+  // Dashboard: cron jobs (stub — scheduled tasks are managed in-process via node-schedule)
+  app.get("/api/gw/cron/jobs", (_req: any, res: any) => res.json([]));
+  app.post("/api/gw/cron/toggle", (_req: any, res: any) => res.json({ ok: true }));
+  app.delete("/api/gw/cron/jobs/:id", (_req: any, res: any) => res.json([]));
+  app.post("/api/gw/cron/jobs", (_req: any, res: any) => res.json([]));
 
-  app.get("/api/gw/cron/jobs", (_req: any, res: any) => res.json(readCronJobs()));
-
-  app.post("/api/gw/cron/toggle", (req: any, res: any) => {
-    try {
-      const { id, enabled } = req.body;
-      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
-      const job = (raw?.jobs || []).find((j: any) => j.id === id);
-      if (job) { job.enabled = enabled; writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2)); }
-      res.json({ ok: true });
-    } catch { res.json({ ok: false }); }
-  });
-
-  app.delete("/api/gw/cron/jobs/:id", (req: any, res: any) => {
-    try {
-      const { id } = req.params;
-      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
-      raw.jobs = (raw?.jobs || []).filter((j: any) => j.id !== id);
-      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
-      res.json(readCronJobs());
-    } catch { res.json([]); }
-  });
-
-  app.post("/api/gw/cron/jobs", (req: any, res: any) => {
-    try {
-      const { name, message, schedule, enabled } = req.body;
-      const raw = JSON.parse(readFileSync(CRON_FILE, "utf8"));
-      raw.jobs = raw.jobs || [];
-      raw.jobs.push({
-        id: `pawpals-${Date.now()}`,
-        name,
-        enabled: enabled !== false,
-        createdAtMs: Date.now(),
-        updatedAtMs: Date.now(),
-        schedule: { kind: "cron", expr: schedule, tz: "Asia/Shanghai" },
-        sessionTarget: "isolated",
-        wakeMode: "now",
-        payload: { kind: "agentTurn", message },
-        delivery: { mode: "announce", channel: "feishu", to: "chat:oc_db61de856d9dd58df095f46c044c2231", accountId: "job-hunter" },
-        state: {},
-      });
-      writeFileSync(CRON_FILE, JSON.stringify(raw, null, 2));
-      res.json(readCronJobs());
-    } catch { res.json([]); }
-  });
-
-  // Dashboard: usage history — reads from openclaw session JSONL files directly
+  // Dashboard: usage history (from in-memory token stats)
   app.get("/api/gw/usage/recent-token-history", (_req: any, res: any) => {
-    try {
-      const agentsDir = path.join(OPENCLAW_HOME, "agents");
-      const results: any[] = [];
-      if (!existsSync(agentsDir)) return res.json([]);
-      for (const agentId of readdirSync(agentsDir)) {
-        const sessionsDir = path.join(agentsDir, agentId, "sessions");
-        if (!existsSync(sessionsDir)) continue;
-        for (const fname of readdirSync(sessionsDir)) {
-          if (!fname.endsWith(".jsonl")) continue;
-          const fpath = path.join(sessionsDir, fname);
-          const lines = readFileSync(fpath, "utf8").split("\n").filter(Boolean);
-          for (const line of lines) {
-            try {
-              const entry = JSON.parse(line);
-              if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
-              const u = entry.message?.usage;
-              if (!u) continue;
-              results.push({
-                timestamp: entry.timestamp || new Date().toISOString(),
-                sessionId: fname.replace(".jsonl", ""),
-                agentId,
-                model: entry.message?.model || "",
-                provider: entry.message?.provider || entry.message?.api || "",
-                inputTokens: u.input || 0,
-                outputTokens: u.output || 0,
-                cacheReadTokens: u.cacheRead || 0,
-                cacheWriteTokens: u.cacheWrite || 0,
-                totalTokens: u.totalTokens || (u.input || 0) + (u.output || 0),
-                costUsd: u.cost?.total || 0,
-              });
-            } catch { /* skip malformed line */ }
-          }
-        }
-      }
-      // Sort by timestamp desc, return last 200 entries
-      results.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      res.json(results.slice(0, 200));
-    } catch (e: any) { res.json([]); }
+    const stats = getTokenStats();
+    res.json([{
+      timestamp: stats.startedAt,
+      totalTokens: stats.total,
+      inputTokens: stats.prompt,
+      outputTokens: stats.completion,
+      calls: stats.calls,
+    }]);
   });
 
   // ── Manage Panel ──────────────────────────────────────────────────────────
@@ -5505,25 +5473,23 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
     res.json({ ok: true, filename: safeName, path: destPath, text });
   });
 
-  // OpenClaw gateway management API proxy
-  app.use("/api/gw", async (req: any, res: any) => {
-    const gwPath = `/api${req.path}`;
-    const query = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-    const targetUrl = `${GATEWAY_BASE}${gwPath}${query}`;
-    try {
-      const isWriteMethod = !["GET", "HEAD"].includes(req.method.toUpperCase());
-      const gwRes = await fetch(targetUrl, {
-        method: req.method,
-        headers: { "Content-Type": "application/json" },
-        body: isWriteMethod ? JSON.stringify(req.body) : undefined,
-      });
-      const text = await gwRes.text();
-      let data: unknown;
-      try { data = JSON.parse(text); } catch { data = { raw: text }; }
-      res.status(gwRes.status).json(data);
-    } catch {
-      res.status(502).json({ error: "Gateway 暂时无法连接" });
-    }
+  // ── Token 用量统计 API ──────────────────────────────────────────────
+  app.get("/api/token-stats", (_req: any, res: any) => {
+    res.json({ ok: true, ...getTokenStats() });
+  });
+  app.post("/api/token-stats/reset", (_req: any, res: any) => {
+    resetTokenStats();
+    res.json({ ok: true });
+  });
+
+  // ── 长期记忆 API ──────────────────────────────────────────────────
+  app.get("/api/memory", (_req: any, res: any) => {
+    res.json({ ok: true, memories: loadMemory() });
+  });
+  app.delete("/api/memory/:key", (req: any, res: any) => {
+    const memories = loadMemory().filter(m => m.key !== req.params.key);
+    writeFileSync(MEMORY_FILE, JSON.stringify(memories, null, 2), "utf-8");
+    res.json({ ok: true });
   });
 
   // Vite middleware for development
@@ -5545,38 +5511,15 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     // 启动 Watchdog，60秒后开始（给 gateway 足够启动时间）
-    setTimeout(() => startWatchdog(GATEWAY_BASE, OPENCLAW_BIN, io), 60_000);
+    // Watchdog removed — no gateway to monitor
     startMailWatcher(io, messages);
   });
 
-  // ── 主动推送：同时推 Web UI + 飞书 ────────────────────────────────
+  // ── 主动推送：推到 Web UI ────────────────────────────────
   async function proactivePost(agentId: string, task: string, label: string) {
     const agent = JOB_AGENTS.find(a => a.id === agentId)!;
     console.log(`[proactive] ${label} 开始`);
-
-    // 1. 推到 Web UI（流式）
     await streamAgent(agent, [{ role: "user", content: task }], MAX_CHAIN_DEPTH, io, "job", messages);
-    // proactivePost 不触发链式
-
-    // 2. 同时触发飞书 cron（直接调 openclaw agent 发到飞书群）
-    const { execFile } = await import("child_process") as any;
-    const { promisify } = await import("util") as any;
-    const execFileAsync = promisify(execFile);
-    try {
-      await execFileAsync(OPENCLAW_BIN, [
-        "agent",
-        "--agent", agentId,
-        "--message", task,
-        "--channel", "feishu",
-        "--account", agentId,
-        "--to", "chat:oc_db61de856d9dd58df095f46c044c2231",
-        "--deliver",
-        "--local",
-      ], { timeout: 120000 });
-      console.log(`[proactive] ${label} 飞书推送完成`);
-    } catch (e) {
-      console.error(`[proactive] ${label} 飞书推送失败:`, e);
-    }
   }
 
   // 每天 9:00 AM（洛杉矶时间）— 岗位猎手搜岗 + 投递管家 follow-up

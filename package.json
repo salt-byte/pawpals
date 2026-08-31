@@ -7,19 +7,22 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "NODE_ENV=production node --import tsx/esm server.ts",
-    "bootstrap:runtime": "node scripts/bootstrap-pawpals-runtime.mjs",
     "dev:isolated": "node scripts/dev-isolated.mjs",
     "desktop:dev": "node scripts/run-electron.mjs",
     "test:latest-flow": "node scripts/test-latest-job-flow.mjs",
     "test:latest-flow:hard": "node scripts/test-latest-job-flow.mjs --hard",
-    "desktop:build": "vite build && electron-builder",
-    "template:refresh": "node scripts/refresh-openclaw-template.mjs",
+    "playwright:bundle": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium",
+    "desktop:build": "npm run playwright:bundle && vite build && electron-builder",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "tsx evals/harness.ts",
+    "eval:routing": "tsx evals/harness.ts --suite=routing",
+    "eval:resume": "tsx evals/harness.ts --suite=resume --n=3",
+    "eval:interview": "tsx evals/harness.ts --suite=interview --n=3"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
@@ -31,8 +34,8 @@
     "mammoth": "^1.12.0",
     "multer": "^2.1.1",
     "node-schedule": "^2.1.1",
-    "openclaw": "^2026.3.8",
     "pdfjs-dist": "^5.5.207",
+    "playwright": "^1.59.1",
     "socket.io": "^4.8.3",
     "tsx": "^4.21.0"
   },
@@ -71,6 +74,7 @@
       "server/**/*",
       "scripts/**/*",
       "server.ts",
+      "llm.ts",
       "tsconfig.json",
       "package.json"
     ],
@@ -79,6 +83,7 @@
       "resources/avatars/**/*",
       "server/**/*",
       "server.ts",
+      "llm.ts",
       "tsconfig.json",
       "scripts/**/*",
       "resources/**/*",
