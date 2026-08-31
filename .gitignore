@@ -9,3 +9,4 @@ coverage/
 __MACOSX/
 dist.zip
 release/
+.claude/
