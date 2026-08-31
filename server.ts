@@ -2265,14 +2265,6 @@ const TOOLS = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "trigger_boss_login",
-      description: "弹出 Boss直聘登录窗口（Electron BrowserWindow），让用户扫码或账号密码登录。搜索岗位前必须先调用此工具确保已登录。",
-      parameters: { type: "object", properties: {} },
-    },
-  },
 ];
 
 // ── JD 内容抓取（通过 Electron BrowserWindow，复用已登录的 cookie）─────
@@ -2603,12 +2595,6 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           resolve(`[ERR] 自动投递失败：${raw || "未知原因"}`);
         }, 800);
       });
-    }
-
-    if (name === "trigger_boss_login") {
-      // 直接弹出 Electron BrowserWindow 让用户扫码登录
-      bossLoginPending = true;
-      return "【LOGIN_WINDOW_OPENED】已弹出 Boss直聘 登录窗口（Electron 内置浏览器），请用手机扫码或账号密码登录，登录成功后窗口会自动关闭。";
     }
 
     return `工具 ${name} 暂未实现。`;
