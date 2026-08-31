@@ -62,3 +62,27 @@ describe('generic official application form', () => {
     expect(document.querySelectorAll('input')[0].value).toBe('');
   });
 });
+
+describe('verifyFilledFields', () => {
+  it('值确实写进去了就算通过', async () => {
+    const { verifyFilledFields } = await import('./form.js');
+    document.body.innerHTML = '<input name="email" value="a@example.com">';
+    const [field] = collectApplicationFields();
+    expect(verifyFilledFields(document, [field.signature])).toEqual({ stuck: [field.signature], lost: [] });
+  });
+
+  it('值被页面自己的校验清掉时报告丢失', async () => {
+    const { verifyFilledFields } = await import('./form.js');
+    document.body.innerHTML = '<input name="email">';
+    const [field] = collectApplicationFields();
+    expect(verifyFilledFields(document, [field.signature])).toEqual({ stuck: [], lost: [field.signature] });
+  });
+
+  it('字段整个消失时也算丢失，不静默忽略', async () => {
+    const { verifyFilledFields } = await import('./form.js');
+    document.body.innerHTML = '<input name="other">';
+    expect(verifyFilledFields(document, ['name=gone|id=|type=text|label='])).toEqual({
+      stuck: [], lost: ['name=gone|id=|type=text|label='],
+    });
+  });
+});

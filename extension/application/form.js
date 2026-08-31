@@ -75,3 +75,27 @@ export function fillApplicationFields(root, values = []) {
   }
   return { filled, skipped };
 }
+
+/**
+ * 填完之后回读，确认值真的留在页面上了。
+ *
+ * 有些表单（Moka 这类带延迟校验的尤其明显）会在失焦或重渲染时把脚本写入的
+ * 值清掉，页面上看起来什么都没发生。不回读的话，我们会告诉用户「已填写 N
+ * 个字段」，而实际上一个都没留住。
+ *
+ * 字段整个消失也算丢失——静默忽略等于假装填成功了。
+ */
+export function verifyFilledFields(root = document, signatures = []) {
+  const fields = collectApplicationFields(root);
+  const elements = [...root.querySelectorAll('input, textarea, select')];
+  const stuck = [];
+  const lost = [];
+
+  for (const signature of signatures) {
+    const matches = fields.filter((field) => field.signature === signature);
+    const el = matches.length === 1 ? elements[matches[0].index] : null;
+    const value = el ? String(el.value ?? '') : '';
+    (value.trim() ? stuck : lost).push(signature);
+  }
+  return { stuck, lost };
+}

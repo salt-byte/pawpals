@@ -1,5 +1,5 @@
 import { createOfficialTaskClient } from '../background/official-task-client.js';
-import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings } from '../application/form.js';
+import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 
@@ -37,9 +37,15 @@ async function execute(task) {
   }
   if (task.kind === 'fill') {
     const { filled, skipped } = fillApplicationFields(document, task.payload?.values || []);
+
+    // 失焦一次再回读：带延迟校验的表单（Moka 这类）会在失焦时才决定要不要
+    // 保留脚本写入的值，不回读就分不清「填进去了」和「填了又被清掉」。
+    document.activeElement?.blur?.();
+    const { stuck, lost } = verifyFilledFields(document, filled);
+
     const warnings = formWarnings(fields, document);
     return {
-      ok: true, filled, skipped, warnings,
+      ok: true, filled: stuck, skipped, lost, warnings,
       requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection'),
     };
   }

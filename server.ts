@@ -2496,7 +2496,9 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         if (!filled?.ok) return `[ERR] 官网表单填写失败：${filled?.error || "未知错误"}`;
         // 报实际填进去的数量，不是尝试数——签名找不到或有歧义的字段会被跳过。
         filledCount = Array.isArray(filled.filled) ? filled.filled.length : 0;
-        skippedCount = Array.isArray(filled.skipped) ? filled.skipped.length : 0;
+        // skipped：签名没定位到；lost：填进去了但被页面自己的校验清掉了。
+        skippedCount = (Array.isArray(filled.skipped) ? filled.skipped.length : 0)
+          + (Array.isArray(filled.lost) ? filled.lost.length : 0);
       }
 
       const confirmationId = officialApplicationQueue.requestConfirmation({

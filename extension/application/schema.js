@@ -1,12 +1,27 @@
-const PROVIDERS = ['greenhouse', 'lever', 'workday', 'icims', 'smartrecruiters', 'generic'];
+const PROVIDERS = [
+  // 海外
+  'greenhouse', 'lever', 'workday', 'icims', 'smartrecruiters',
+  // 国内
+  'moka', 'beisen', 'dayee',
+  'generic',
+];
 
 export function detectApplicationProvider(url = '') {
   const host = (() => { try { return new URL(url).hostname.toLowerCase(); } catch { return ''; } })();
+  if (!host) return 'generic';
+
   if (/greenhouse\.io$/.test(host) || host.includes('boards.greenhouse')) return 'greenhouse';
   if (/lever\.co$/.test(host) || host.includes('jobs.lever')) return 'lever';
   if (/myworkdayjobs\.com$/.test(host) || host.includes('workday')) return 'workday';
   if (host.includes('icims.com')) return 'icims';
   if (host.includes('smartrecruiters.com')) return 'smartrecruiters';
+
+  // 国内 ATS。域名来自公开的招聘页地址，未逐一在真实页面上核过，
+  // 遇到识别不出的站点应补充而不是改成模糊匹配。
+  if (/(^|\.)mokahr\.com$/.test(host)) return 'moka';
+  if (/(^|\.)zhiye\.com$/.test(host) || /(^|\.)italent\.cn$/.test(host)) return 'beisen';
+  if (/(^|\.)dayeejob\.com$/.test(host)) return 'dayee';
+
   return 'generic';
 }
 
