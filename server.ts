@@ -12,6 +12,7 @@ import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
 import { pickAutofillValue } from "./server/autofill.ts";
+import { planApplicationStep } from "./server/application-flow.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -2478,9 +2479,16 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
       });
       const inspection = await waitForOfficialTask(inspectTask.id);
-      if (!inspection?.ok) return `[ERR] 官网申请页检查失败：${inspection?.error || "未知错误"}`;
+      const plan = planApplicationStep(inspection);
+      if (plan.action === "abort") return `[ERR] 官网申请页检查失败：${plan.reason}`;
 
-      const fields = Array.isArray(inspection.fields) ? inspection.fields : [];
+      // 简历还没上传就先停：很多站点解析简历后会把结果覆盖到表单上，
+      // 这一步先填等于白填，还会让「已填写 N 个字段」变成谎报。
+      if (plan.action === "await_resume_upload") {
+        return `这个页面需要先上传简历附件——浏览器不允许脚本代选文件，而且不少网站会用解析结果覆盖已填内容。\n\n请你在页面上手动选好简历文件，完成后再跟我说一次「投递」，我再把其余字段填好并帮你核对解析结果。`;
+      }
+
+      const fields = plan.fields;
       const profile = extractAutofillProfile();
       const values = fields
         .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
