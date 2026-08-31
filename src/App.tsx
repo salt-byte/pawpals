@@ -46,6 +46,8 @@ import {
   Cpu,
   RefreshCw,
   CornerUpLeft,
+  ThumbsUp,
+  ThumbsDown,
   Paperclip,
   X,
   BarChart2,
@@ -115,9 +117,9 @@ const TOOL_ICON: Record<string, string> = {
 };
 
 const ONBOARDING_STEPS_UI = [
-  { id: 'resume_collection', label: '建档', emoji: '📄', phases: ['resume_collection', 'profile_collection', 'profile_confirm'] },
+  { id: 'resume_collection', label: '建档', emoji: '📄', phases: ['resume_collection', 'profile_collection'] },
   { id: 'professional_positioning', label: '定位', emoji: '🧭', phases: ['professional_positioning'] },
-  { id: 'resume_diagnosis', label: '简历', emoji: '📝', phases: ['resume_diagnosis', 'resume_review'] },
+  { id: 'resume_diagnosis', label: '简历', emoji: '📝', phases: ['resume_diagnosis'] },
   { id: 'search_strategy', label: '搜岗', emoji: '🔍', phases: ['search_strategy', 'first_job_search'] },
   { id: 'first_application', label: '投递', emoji: '🚀', phases: ['first_application'] },
 ];
@@ -152,10 +154,11 @@ function OnboardingProgressBar({ currentPhase, completed }: { currentPhase: stri
   );
 }
 
-function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardData; petName: string; onConfirm: (d: ProfileCardData) => void }) {
+function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardData; petName: string; onConfirm: (d: ProfileCardData & { skipResumeDiagnosis?: boolean }) => void }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState(data);
   const [confirmed, setConfirmed] = useState(false);
+  const [skipDiagnosis, setSkipDiagnosis] = useState(false);
 
   if (confirmed) {
     return (
@@ -215,7 +218,16 @@ function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardDat
           </div>
         </div>
       </div>
-      <div className="flex gap-2 mt-3">
+      <label className="flex items-center gap-2 mt-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={skipDiagnosis}
+          onChange={(e) => setSkipDiagnosis(e.target.checked)}
+          className="w-3.5 h-3.5 rounded accent-pet-orange"
+        />
+        <span className="text-[11px] text-pet-brown/60">跳过简历诊断，直接开始搜岗</span>
+      </label>
+      <div className="flex gap-2 mt-2">
         {editing ? (
           <>
             <button
@@ -223,7 +235,7 @@ function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardDat
               className="flex-1 text-xs py-1.5 rounded-xl bg-white text-pet-brown border border-pet-brown/10"
             >取消</button>
             <button
-              onClick={() => { setConfirmed(true); onConfirm(form); }}
+              onClick={() => { setConfirmed(true); onConfirm({ ...form, skipResumeDiagnosis: skipDiagnosis }); }}
               className="flex-1 text-xs py-1.5 rounded-xl bg-pet-orange text-white font-medium"
             >确认保存</button>
           </>
@@ -234,7 +246,7 @@ function ProfileConfirmCard({ data, petName, onConfirm }: { data: ProfileCardDat
               className="flex-1 text-xs py-1.5 rounded-xl bg-white text-pet-brown border border-pet-brown/10"
             >修改</button>
             <button
-              onClick={() => { setConfirmed(true); onConfirm(data); }}
+              onClick={() => { setConfirmed(true); onConfirm({ ...data, skipResumeDiagnosis: skipDiagnosis }); }}
               className="flex-1 text-xs py-1.5 rounded-xl bg-pet-orange text-white font-medium"
             >确认无误 ✓</button>
           </>
@@ -443,18 +455,6 @@ type SetupResponse = {
   completedAt: string | null;
 };
 
-type RuntimeStatus = {
-  ok: boolean;
-  mode: 'isolated' | 'shared';
-  appDataDir: string;
-  openClawHome: string;
-  workspaceRoot: string;
-  gatewayBaseUrl: string;
-  gatewayReachable: boolean;
-  webChannelReady: boolean;
-  chiefSessionKey: string;
-};
-
 type DeploymentStatus = {
   ok: boolean;
   status: 'idle' | 'running' | 'ready' | 'error';
@@ -462,14 +462,9 @@ type DeploymentStatus = {
   deployed: boolean;
   deployedAt: string | null;
   updatedAt: string | null;
-  gatewayBaseUrl: string;
   appUrl: string | null;
   appPort: string | null;
-  openClawHome: string;
   appDataDir: string;
-  usingBundledRuntime: boolean;
-  usingBundledNode: boolean;
-  usingBundledOpenClaw: boolean;
   error: string | null;
   logs: string[];
 };
@@ -517,6 +512,7 @@ const MODEL_COMPANIES: readonly ModelCompany[] = [
     keyLabel: '去拿 Anthropic Key',
     badge: '推荐首选',
     emoji: '🧠',
+    defaultBaseUrl: 'https://api.anthropic.com',
     placeholder: '粘贴你的 Anthropic API Key',
     models: [
       { model: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: '效果优先，适合重度使用' },
@@ -524,7 +520,7 @@ const MODEL_COMPANIES: readonly ModelCompany[] = [
     ],
   },
   {
-    provider: 'gemini',
+    provider: 'google',
     company: 'Google Gemini',
     subtitle: 'Google AI Studio / Gemini API',
     description: '上手快，速度轻快，适合日常问答和多轮互动。',
@@ -532,6 +528,7 @@ const MODEL_COMPANIES: readonly ModelCompany[] = [
     keyLabel: '去拿 Gemini Key',
     badge: '速度很快',
     emoji: '⚡',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     placeholder: '粘贴你的 Gemini API Key',
     models: [
       { model: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', note: '推荐多数用户先用它' },
@@ -547,6 +544,7 @@ const MODEL_COMPANIES: readonly ModelCompany[] = [
     keyLabel: '去拿 OpenAI Key',
     badge: '国际主流',
     emoji: '🌐',
+    defaultBaseUrl: 'https://api.openai.com/v1',
     placeholder: '粘贴你的 OpenAI API Key',
     models: [
       { model: 'gpt-5-mini', label: 'GPT-5 mini', note: '更轻快，适合大部分使用' },
@@ -637,11 +635,7 @@ export default function App() {
     }
   };
 
-  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>(() =>
-    localStorage.getItem('pawpals_authed') === '1'
-      ? (hasSavedPetProfile() || localStorage.getItem('petProfileConfigured') === '1' ? 'main' : 'onboarding')
-      : 'auth'
-  );
+  const [appStatus, setAppStatus] = useState<'landing' | 'auth' | 'onboarding' | 'main'>('main');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [petProfileConfigured, setPetProfileConfigured] = useState(!!localStorage.getItem('petProfileConfigured'));
@@ -670,6 +664,7 @@ export default function App() {
   const [studyRoomUsers, setStudyRoomUsers] = useState<StudySession[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [replyTo, setReplyTo] = useState<{ id: string; sender: string; content: string } | null>(null);
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, 'thumbs_up' | 'thumbs_down'>>({});
   const [attachedFile, setAttachedFile] = useState<{ name: string; content: string; parsedText?: string; isUpload?: boolean } | null>(null);
   const [attachedImage, setAttachedImage] = useState<{ name: string; dataUrl: string } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -849,19 +844,11 @@ export default function App() {
         localStorage.setItem('petProfileConfigured', '1');
         localStorage.setItem('pet', JSON.stringify(data));
         setAppStatus(prev => (prev === 'auth' || prev === 'landing') ? prev : 'main');
-      } else if (localStorage.getItem('pawpals_authed') === '1') {
-        localStorage.removeItem('petProfileConfigured');
-        localStorage.removeItem('pet');
+      } else {
+        // 没有 pet 数据，在 main 里弹出宠物创建向导
         setPetProfileConfigured(false);
-        setAppStatus('onboarding');
       }
-    }).catch(() => {
-      if (localStorage.getItem('pawpals_authed') === '1' && !hasSavedPetProfile()) {
-        localStorage.removeItem('petProfileConfigured');
-        setPetProfileConfigured(false);
-        setAppStatus('onboarding');
-      }
-    });
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -1012,17 +999,9 @@ export default function App() {
         return;
       }
 
-      if (!data.completed) {
-        setShowSetupWizard(true);
-        setSetupStep(1);
-      }
+      // 不再自动弹出 setup wizard — API key 已内置
     } catch {
       setSetupState(null);
-      // API 失败（服务器未就绪/旧版本）→ 默认弹出 setup wizard
-      if (!options?.forceOpen) {
-        setShowSetupWizard(true);
-        setSetupStep(1);
-      }
     }
   };
 
@@ -1038,11 +1017,8 @@ export default function App() {
     setRuntimeStatus(data);
     setBootLogs([
       `$ pawpals bootstrap --channel web-ui`,
-      `[runtime] mode=${data.mode} chief_session=${data.chiefSessionKey}`,
-      `[gateway] ${data.gatewayReachable ? 'online' : 'offline'} @ ${data.gatewayBaseUrl}`,
-      `[openclaw] home=${data.openClawHome}`,
-      `[workspace] ${data.workspaceRoot}`,
-      `[channel] pawpals-web-ui ${data.webChannelReady ? 'ready' : 'waiting'}`,
+      `[runtime] ready`,
+      `[data] ${data.appDataDir}`,
     ]);
   };
 
@@ -1050,6 +1026,13 @@ export default function App() {
     if (appStatus !== 'main') return;
     loadDeploymentStatus();
     loadSetupState();
+    // 如果没配置过宠物，自动弹出宠物创建向导
+    if (!petProfileConfigured && !hasSavedPetProfile()) {
+      setTimeout(() => {
+        setShowPetProfileWizard(true);
+        petWizardOpenRef.current = true;
+      }, 500);
+    }
   }, [appStatus]);
 
   useEffect(() => {
@@ -1549,7 +1532,7 @@ export default function App() {
       setSetupState(data.setup);
       await loadRuntimeStatus();
       setSetupStep(4);
-      setSetupMessage({ type: 'success', text: '默认模型已经配好，下面是这套独立 OpenClaw 的实时状态。' });
+      setSetupMessage({ type: 'success', text: '默认模型已经配好，系统已就绪。' });
       setSetupApiKey('');
     } catch (error: any) {
       setSetupMessage({ type: 'error', text: error.message || '保存失败，请稍后重试。' });
@@ -2039,24 +2022,6 @@ export default function App() {
   }
 
   if (appStatus === 'onboarding') {
-    // 先检查模型是否已配置，没配好就跳到 main（会显示 setup overlay）
-    if (!setupState?.completed) {
-      return (
-        <div className="min-h-screen bg-pet-cream flex items-center justify-center p-4">
-          <div className="text-center">
-            <div className="text-6xl mb-4">🐾</div>
-            <h2 className="text-2xl font-bold text-pet-brown mb-2">欢迎来到 PawPals！</h2>
-            <p className="text-pet-brown/60 mb-6">先配置一下模型，然后创建你的专属伴学官～</p>
-            <button
-              onClick={() => setAppStatus('main')}
-              className="px-8 py-3 bg-pet-orange text-white rounded-2xl font-bold text-lg hover:scale-105 transition-transform"
-            >
-              开始配置 →
-            </button>
-          </div>
-        </div>
-      );
-    }
     return (
       <div className="min-h-screen bg-pet-cream flex items-center justify-center p-4">
         {renderPetProfileCard()}
@@ -2525,6 +2490,42 @@ export default function App() {
                               >
                                 <CornerUpLeft size={10} /> 回复
                               </button>
+                            )}
+                            {!msg.isLoading && msg.isBot && msg.agentId && ['resume-expert','interview-coach','professional-teacher'].includes(msg.agentId) && (
+                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  disabled={!!feedbackGiven[msg.id]}
+                                  onClick={() => {
+                                    socketRef.current?.emit('user_feedback', { msgId: msg.id, agentId: msg.agentId, signal: 'thumbs_up' });
+                                    setFeedbackGiven(prev => ({ ...prev, [msg.id]: 'thumbs_up' }));
+                                  }}
+                                  className={cn(
+                                    "text-[9px] flex items-center gap-0.5 transition-colors",
+                                    feedbackGiven[msg.id] === 'thumbs_up'
+                                      ? "text-pet-orange"
+                                      : "text-pet-brown/40 hover:text-pet-orange"
+                                  )}
+                                  title="这条建议有用"
+                                >
+                                  <ThumbsUp size={10} />
+                                </button>
+                                <button
+                                  disabled={!!feedbackGiven[msg.id]}
+                                  onClick={() => {
+                                    socketRef.current?.emit('user_feedback', { msgId: msg.id, agentId: msg.agentId, signal: 'thumbs_down' });
+                                    setFeedbackGiven(prev => ({ ...prev, [msg.id]: 'thumbs_down' }));
+                                  }}
+                                  className={cn(
+                                    "text-[9px] flex items-center gap-0.5 transition-colors",
+                                    feedbackGiven[msg.id] === 'thumbs_down'
+                                      ? "text-pet-brown"
+                                      : "text-pet-brown/40 hover:text-pet-brown"
+                                  )}
+                                  title="这条建议没帮到我"
+                                >
+                                  <ThumbsDown size={10} />
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -3565,7 +3566,7 @@ export default function App() {
 
                   <div className="mt-8 rounded-[28px] bg-white p-5">
                     <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40">当前会保存到</div>
-                    <div className="mt-2 text-sm font-semibold text-pet-brown">萌爪伴学自己的独立 OpenClaw 环境</div>
+                    <div className="mt-2 text-sm font-semibold text-pet-brown">萌爪伴学本地数据目录</div>
                     <p className="mt-2 text-xs leading-6 text-pet-brown/50">
                       不会改坏你电脑原本那套环境，后面发给别人也能沿用这一套流程。
                     </p>
@@ -3605,7 +3606,7 @@ export default function App() {
                         <div className="flex items-center justify-between gap-4">
                           <div>
                             <div className="text-xs font-bold uppercase tracking-[0.24em] text-[#E7C9A8]/70">Local Deployment</div>
-                            <div className="mt-2 text-lg font-bold">正在把 OpenClaw 部署到这个用户自己的本地环境里</div>
+                            <div className="mt-2 text-lg font-bold">正在初始化本地环境</div>
                           </div>
                           <div className={cn(
                             'rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em]',
@@ -3637,15 +3638,13 @@ export default function App() {
                         <div className="rounded-[28px] bg-pet-cream/70 p-5">
                           <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40">部署目标</div>
                           <p className="mt-2 text-sm leading-7 text-pet-brown/65">
-                            这不是在复用你电脑原本那套 OpenClaw，而是在 PawPals 自己的数据目录里部署一套独立本地环境。
+                            PawPals 会在自己的数据目录里存储所有配置和聊天记录。
                           </p>
                         </div>
                         <div className="rounded-[28px] bg-pet-cream/70 p-5">
                           <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40">当前环境</div>
                           <div className="mt-2 space-y-2 text-sm leading-7 text-pet-brown/65">
-                            <div>openclaw home: {deploymentStatus?.openClawHome || '等待生成...'}</div>
-                            <div>app data: {deploymentStatus?.appDataDir || '等待生成...'}</div>
-                            <div>bundled runtime: {deploymentStatus?.usingBundledRuntime ? 'yes' : 'no'}</div>
+                            <div>data dir: {deploymentStatus?.appDataDir || '等待生成...'}</div>
                           </div>
                         </div>
                       </div>
@@ -3901,13 +3900,10 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <div>
                             <div className="text-xs font-bold uppercase tracking-[0.24em] text-[#E7C9A8]/70">Runtime Console</div>
-                            <div className="mt-2 text-lg font-bold">🦞 OpenClaw 已在后台苏醒</div>
+                            <div className="mt-2 text-lg font-bold">PawPals 已就绪</div>
                           </div>
-                          <div className={cn(
-                            'rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em]',
-                            runtimeStatus?.gatewayReachable ? 'bg-[#2C4A39] text-[#C5F0D4]' : 'bg-[#5A2E2E] text-[#F3C5C5]',
-                          )}>
-                            {runtimeStatus?.gatewayReachable ? 'gateway online' : 'gateway offline'}
+                          <div className="rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] bg-[#2C4A39] text-[#C5F0D4]">
+                            online
                           </div>
                         </div>
 
@@ -3923,7 +3919,7 @@ export default function App() {
                       <div className="rounded-[28px] bg-pet-cream/70 p-5">
                         <div className="text-xs font-bold uppercase tracking-[0.18em] text-pet-brown/40">你现在看到的是</div>
                         <p className="mt-2 text-sm leading-7 text-pet-brown/65">
-                          PawPals 自己的 Web UI channel 正在连一套独立的 OpenClaw gateway，不是直接复用你个人那套控制台页面。
+                          PawPals 的 Web UI 正在通过内置 AI 引擎提供服务。
                         </p>
                       </div>
                     </div>

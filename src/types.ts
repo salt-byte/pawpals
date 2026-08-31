@@ -41,6 +41,7 @@ export interface Message {
   isBot?: boolean;
   isChiefBot?: boolean;
   isLoading?: boolean;
+  agentId?: string;
   type?: 'text' | 'profile_card';
   profileData?: ProfileCardData;
 }

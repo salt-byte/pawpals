@@ -21,6 +21,7 @@ export default defineConfig(({mode}) => {
       proxy: {
         '/socket.io': { target: 'http://localhost:3010', ws: true, changeOrigin: true },
         '/api': { target: 'http://localhost:3010', changeOrigin: true },
+        '/avatars': { target: 'http://localhost:3010', changeOrigin: true },
       },
     },
   };
