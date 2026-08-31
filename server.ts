@@ -9,6 +9,7 @@ import { OfficialApplicationQueue } from "./server/official-application-queue.ts
 import { resolveRoute } from "./server/routing.ts";
 import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
+import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -694,7 +695,7 @@ type CollaborationRow = {
     weaknesses?: string[];
     notes?: string;
   } | null;
-  workflowStage: "new" | "selected" | "tailoring" | "tailored" | "apply_ready" | "applied";
+  workflowStage: WorkflowStageId;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -1568,17 +1569,6 @@ function applyBoardUpdate(update: any) {
   });
 }
 
-function formatWorkflowStageLabel(stage: CollaborationRow["workflowStage"]) {
-  switch (stage) {
-    case "new": return "新入库";
-    case "selected": return "已选中";
-    case "tailoring": return "定制中";
-    case "tailored": return "已定制";
-    case "apply_ready": return "待投递";
-    case "applied": return "已推进";
-    default: return stage || "未记录";
-  }
-}
 
 function formatApplicationStatusLabel(status: CollaborationRow["applicationStatus"]) {
   switch (status) {
@@ -1602,7 +1592,7 @@ function renderCollaborationBoardChatTable(rows: CollaborationRow[], title = "�
   ];
   for (const row of rows) {
     lines.push(
-      `| ${row.company || "-"} | ${row.role || "-"} | ${formatWorkflowStageLabel(row.workflowStage)} | ${formatApplicationStatusLabel(row.applicationStatus)} | ${row.resumeVersion || "-"} |`
+      `| ${row.company || "-"} | ${row.role || "-"} | ${stageLabel(row.workflowStage)} | ${formatApplicationStatusLabel(row.applicationStatus)} | ${row.resumeVersion || "-"} |`
     );
   }
   return lines.join("\n");
