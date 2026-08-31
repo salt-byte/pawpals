@@ -10,6 +10,7 @@ import { resolveRoute } from "./server/routing.ts";
 import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
+import { planSoulSeed } from "./server/agent-soul.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -2625,6 +2626,31 @@ const JOB_AGENTS = [
   { id: "networker",       role: "人脉顾问",   name: "人脉顾问",   avatar: "/avatars/networker.jpg" },
   { id: "interview-coach", role: "面试教练",   name: "面试教练",   avatar: "/avatars/interview-coach.jpg" },
 ];
+
+// ── 人设投递：把仓库模板里的 SOUL.md 铺到用户工作区 ──────────────────
+// loadAgentSoul() 从 CAREER_DIR/workspaces/<id>/SOUL.md 读，模板却在 resources/ 下。
+// 两者之间原本靠 bootstrap-pawpals-runtime.mjs 搬运，它的 npm 入口随 openclaw
+// 一起被删后就没人调用了，于是 7 份人设从未进过用户工作区。
+const SOUL_TEMPLATE_DIR = path.join(PROJECT_ROOT, "resources", "openclaw-template", "workspace", "career", "workspaces");
+
+function seedAgentSouls() {
+  const soulPath = (root: string, id: string) => path.join(root, id, "SOUL.md");
+  try {
+    const plan = planSoulSeed(JOB_AGENTS.map((a) => a.id), {
+      templateExists: (id) => existsSync(soulPath(SOUL_TEMPLATE_DIR, id)),
+      destExists: (id) => existsSync(soulPath(path.join(CAREER_DIR, "workspaces"), id)),
+    });
+    if (!plan.length) return;
+    for (const { agentId } of plan) {
+      const dest = soulPath(path.join(CAREER_DIR, "workspaces"), agentId);
+      mkdirSync(path.dirname(dest), { recursive: true });
+      copyFileSync(soulPath(SOUL_TEMPLATE_DIR, agentId), dest);
+    }
+    console.log(`[soul] 已铺设 ${plan.length} 份人设：${plan.map((p) => p.agentId).join(", ")}`);
+  } catch (e: any) {
+    console.warn("[soul] 铺设失败：", e?.message || e);
+  }
+}
 
 const agentByName: Record<string, typeof JOB_AGENTS[0]> = {};
 JOB_AGENTS.forEach(a => { agentByName[a.name] = a; });
@@ -5518,9 +5544,12 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
     });
   }
 
+  // 先铺人设再监听：这件事跟端口能不能绑上无关，放进 listen 回调会被
+  // 「端口被占」这类失败连带跳过。
+  seedAgentSouls();
+
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    // 启动 Watchdog，60秒后开始（给 gateway 足够启动时间）
     // Watchdog removed — no gateway to monitor
     startMailWatcher(io, messages);
   });
