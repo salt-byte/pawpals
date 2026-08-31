@@ -179,11 +179,10 @@ function resetVolatileCareerState(reason) {
   const filesToDelete = [
     path.join(runtime.workspaceRoot, "collaboration_board.json"),
     path.join(runtime.workspaceRoot, "last_search_results.json"),
-    path.join(runtime.workspaceRoot, "onboarding_state.json"),
-    path.join(runtime.workspaceRoot, "profile.md"),
-    path.join(runtime.workspaceRoot, "resume_master.md"),
     path.join(runtime.workspaceRoot, "skills_gap.md"),
     path.join(runtime.pawPalsHome, "mail-watcher-state.json"),
+    // 注意：不删除 onboarding_state.json、profile.md、resume_master.md
+    // 这些是用户数据，不应该因为 build 签名变化而重置
   ];
   const filesToReinitialize = [
     path.join(runtime.workspaceRoot, "applications.json"),
@@ -329,7 +328,9 @@ function syncRuntimeBuildMarker() {
   }
 
   if (previousSignature && previousSignature !== nextSignature) {
-    resetNewUserRuntimeState("build signature changed");
+    // 不再重置用户状态（pet、key、profile 等都保留）
+    // 只更新签名标记
+    appendDeploymentLog(`Build signature changed (user state preserved)`);
   }
 
   fs.writeFileSync(

@@ -20,6 +20,24 @@ export const supportsApply = true;  // 支持一键投递（Boss 有"立即沟�
 const PARTITION = "persist:boss"; // 登录 / 搜索 / 投递共用同一个 Chromium session
 const UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome || "136.0.0.0"} Safari/537.36`;
 
+function attachInAppPopupPolicy(win, title) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    const child = new BrowserWindow({
+      show: true,
+      width: 1280,
+      height: 900,
+      title,
+      webPreferences: { partition: PARTITION, contextIsolation: true },
+    });
+    child.webContents.setUserAgent(UA);
+    void child.loadURL(url).catch((error) => {
+      console.warn("[PawPals] Boss popup load failed:", error?.message || error);
+      try { child.close(); } catch {}
+    });
+    return { action: "deny" };
+  });
+}
+
 async function persistBossCookies(session, cookieFile) {
   const all = await session.cookies.get({});
   const filtered = all.filter((c) => c.domain?.includes("zhipin.com"));
@@ -65,6 +83,7 @@ export async function login(cookieFile, serverPort) {
       webPreferences: { partition: PARTITION, contextIsolation: true },
     });
     win.webContents.setUserAgent(UA);
+    attachInAppPopupPolicy(win, "Boss直聘");
     app.focus({ steal: true });
     win.show();
     win.focus();
@@ -133,10 +152,12 @@ export async function search(task, serverPort) {
   const { id: taskId, query, city, careerDir, cookieFile } = task;
 
   const win = new BrowserWindow({
-    show: false, width: 1280, height: 800,
+    show: true, width: 1280, height: 800,
+    title: `PawPals — 搜索：${query}`,
     webPreferences: { partition: PARTITION, contextIsolation: true },
   });
   win.webContents.setUserAgent(UA);
+  attachInAppPopupPolicy(win, `PawPals — 搜索：${query}`);
 
   let result = "BOSS_FAILED";
   try {
@@ -151,6 +172,47 @@ export async function search(task, serverPort) {
       } catch (error) {
         console.warn("[PawPals] failed to refresh Boss cookies during search:", error?.message || error);
       }
+    }
+
+    // 检测是否需要验证或登录
+    const needsAction = await win.webContents.executeJavaScript(`
+      !!document.querySelector('.verify-wrap, .slide-verify, #captcha, .login-wrap, .sign-wrap, .login-btn, .qr-code-wrap')
+      || document.title.includes('验证') || document.title.includes('登录')
+      || window.location.href.includes('/web/user/')
+    `).catch(() => false);
+
+    if (needsAction) {
+      console.log("[PawPals] Boss需要验证/登录，等待用户完成...");
+      win.setTitle("PawPals — 请完成验证和登录，完成后会自动继续搜索");
+      // 等用户完成验证+登录（最多 3 分钟）
+      await new Promise((resolve) => {
+        let checks = 0;
+        const checkDone = async () => {
+          const url = win.webContents.getURL();
+          // 登录成功后会跳转到 /web/geek/ 相关页面
+          if (url.includes('/web/geek/job') || url.includes('/web/geek/home')) {
+            return true;
+          }
+          const still = await win.webContents.executeJavaScript(`
+            !!document.querySelector('.verify-wrap, .slide-verify, #captcha, .login-wrap, .sign-wrap, .qr-code-wrap')
+            || document.title.includes('验证') || document.title.includes('登录')
+            || window.location.href.includes('/web/user/')
+          `).catch(() => false);
+          return !still;
+        };
+        const interval = setInterval(async () => {
+          checks++;
+          const done = await checkDone();
+          if (done || checks > 90) { clearInterval(interval); resolve(); }
+        }, 2000);
+        win.on("closed", () => { clearInterval(interval); resolve(); });
+      });
+      // 登录完成后重新加载搜索页
+      const currentUrl = win.webContents.getURL();
+      if (!currentUrl.includes('/web/geek/job')) {
+        await win.loadURL("https://www.zhipin.com/web/geek/job");
+      }
+      await new Promise(r => setTimeout(r, 3000));
     }
 
     const cityCode = city && /^\d{9}$/.test(city) ? city : "101010100";
@@ -182,7 +244,7 @@ export async function search(task, serverPort) {
 
         // 保存到 jobs.json
         try {
-          const dir = careerDir || path.join(app.getPath("home"), "Library", "Application Support", "PawPals", "openclaw", "workspace", "career");
+          const dir = careerDir || path.join(app.getPath("home"), "Library", "Application Support", "PawPals", "workspace", "career");
           fs.mkdirSync(dir, { recursive: true });
           const jobsFile = path.join(dir, "jobs.json");
           const existing = fs.existsSync(jobsFile) ? JSON.parse(fs.readFileSync(jobsFile, "utf8")) : [];
@@ -231,6 +293,7 @@ export async function apply(task, serverPort) {
     webPreferences: { partition: PARTITION, contextIsolation: true },
   });
   win.webContents.setUserAgent(UA);
+  attachInAppPopupPolicy(win, "PawPals 正在投递...");
 
   let result = "NO_BUTTON";
   try {

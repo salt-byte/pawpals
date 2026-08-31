@@ -18,6 +18,24 @@ export const supportsApply = true;
 const PARTITION = "persist:web-form";
 const UA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome || "136.0.0.0"} Safari/537.36`;
 
+function attachInAppPopupPolicy(win, title) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    const child = new BrowserWindow({
+      show: true,
+      width: 1280,
+      height: 900,
+      title,
+      webPreferences: { partition: PARTITION, contextIsolation: true },
+    });
+    child.webContents.setUserAgent(UA);
+    void child.loadURL(url).catch((error) => {
+      console.warn("[web-form] popup load failed:", error?.message || error);
+      try { child.close(); } catch {}
+    });
+    return { action: "deny" };
+  });
+}
+
 // ── 登录 ────────────────────────────────────────────────────────────────
 // 弹出可见窗口，让用户在任意招聘网站上登录
 // 登录成功后 cookie 自动保存在 persist:web-form partition
@@ -29,6 +47,7 @@ export async function login(loginUrl, serverPort) {
     webPreferences: { partition: PARTITION, contextIsolation: true },
   });
   win.webContents.setUserAgent(UA);
+  attachInAppPopupPolicy(win, "PawPals — 招聘网站登录");
   await win.loadURL(loginUrl || "https://www.linkedin.com/login");
 
   // 等用户手动关闭窗口
@@ -57,6 +76,7 @@ export async function search(task, serverPort) {
     webPreferences: { partition: PARTITION, contextIsolation: true },
   });
   win.webContents.setUserAgent(UA);
+  attachInAppPopupPolicy(win, `PawPals — 搜索：${query}`);
 
   // 如果有指定搜索 URL，直接打开；否则打开通用搜索
   const url = searchUrl || `https://www.google.com/search?q=${encodeURIComponent(query + " 招聘")}`;
@@ -80,6 +100,7 @@ export async function apply(task, serverPort) {
     webPreferences: { partition: PARTITION, contextIsolation: true },
   });
   win.webContents.setUserAgent(UA);
+  attachInAppPopupPolicy(win, `PawPals — 投递：${company || ""} ${title || ""}`);
 
   let result = "NO_FORM";
   try {

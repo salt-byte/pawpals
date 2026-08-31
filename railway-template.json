@@ -1,6 +1,6 @@
 {
   "name": "PawPals — 萌爪伴学",
-  "description": "AI 学习伙伴应用，内置求职助理、考研陪伴、自习室等功能，基于 OpenClaw 多 Agent 框架",
+  "description": "AI 学习伙伴应用，内置求职助理、考研陪伴、自习室等功能",
   "iconUrl": "https://api.dicebear.com/7.x/adventurer/svg?seed=PawPals",
   "services": [
     {
@@ -44,12 +44,6 @@
         {
           "name": "OPENAI_BASE_URL",
           "description": "自定义 API Base URL（使用第三方代理时填写，末尾需含 /v1）",
-          "required": false
-        },
-        {
-          "name": "OPENCLAW_BIN",
-          "description": "openclaw 可执行文件路径（默认 openclaw，已内置）",
-          "defaultValue": "openclaw",
           "required": false
         }
       ],

@@ -14,10 +14,8 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# 安装 openclaw CLI（运行时依赖）
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates python3 python3-pip \
-    && npm install -g openclaw \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # 只复制运行时需要的文件

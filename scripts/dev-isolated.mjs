@@ -1,15 +1,23 @@
-import { startIsolatedRuntime } from "./runtime-launcher.mjs";
+/**
+ * dev:isolated — starts the PawPals server directly (no external gateway needed).
+ * Equivalent to `npm run dev` but with isolated runtime paths.
+ */
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+import path from "path";
 
-const runtime = await startIsolatedRuntime({ stdio: "inherit" });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
 
-const shutdown = () => runtime.stop();
+const server = spawn("node", ["--import", "tsx/esm", "server.ts"], {
+  cwd: repoRoot,
+  stdio: "inherit",
+  env: { ...process.env },
+});
+
+const shutdown = () => {
+  server.kill("SIGTERM");
+};
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-runtime.server.on("exit", (code) => {
-  runtime.stop();
-  process.exit(code ?? 0);
-});
-runtime.gateway.on("exit", (code) => {
-  runtime.stop();
-  process.exit(code ?? 0);
-});
+server.on("exit", (code) => process.exit(code ?? 0));

@@ -49,7 +49,7 @@ function killExistingDesktopDev() {
   if (process.platform === "darwin" || process.platform === "linux") {
     const commands = [
       `pkill -f "node scripts/run-electron.mjs|electron .*PawPals|electron \\\\." || true`,
-      `pkill -f "tsx server.ts|node --import tsx/esm server.ts|openclaw-gateway" || true`,
+      `pkill -f "tsx server.ts|node --import tsx/esm server.ts" || true`,
     ];
     for (const command of commands) {
       try {
@@ -60,8 +60,7 @@ function killExistingDesktopDev() {
 }
 
 const appDataDir = resolveAppDataDir();
-const openclawHome = process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || path.join(appDataDir, "openclaw");
-const careerDir = process.env.PAWPALS_WORKSPACE || path.join(openclawHome, "workspace", "career");
+const careerDir = process.env.PAWPALS_WORKSPACE || path.join(appDataDir, "workspace", "career");
 const cookieDir = process.env.PAWPALS_COOKIE_DIR || path.join(appDataDir, "jobclaw", "cookies");
 const hardReset = process.argv.includes("--hard") || process.env.PAWPALS_HARD_RESET === "1";
 

@@ -18,35 +18,19 @@ export function resolveAppPaths(options = {}) {
   const repoRoot = options.repoRoot || packagedAppRoot || defaultRepoRoot;
   const unpackedRoot = options.unpackedRoot || unpackedAppRoot || repoRoot;
 
-  const bootstrapScript = pickFirstExisting([
-    path.join(unpackedRoot, "scripts", "bootstrap-pawpals-runtime.mjs"),
-    path.join(repoRoot, "scripts", "bootstrap-pawpals-runtime.mjs"),
-  ]);
   const serverEntry = pickFirstExisting([
     path.join(unpackedRoot, "server.ts"),
     path.join(repoRoot, "server.ts"),
-  ]);
-  const templateDir = pickFirstExisting([
-    process.env.OPENCLAW_TEMPLATE_DIR || "",
-    path.join(repoRoot, "resources", "openclaw-template"),
-    path.join(unpackedRoot, "resources", "openclaw-template"),
   ]);
   const tsxCli = pickFirstExisting([
     path.join(unpackedRoot, "node_modules", "tsx", "dist", "cli.mjs"),
     path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
   ]);
-  const openClawCli = pickFirstExisting([
-    path.join(unpackedRoot, "node_modules", "openclaw", "openclaw.mjs"),
-    path.join(repoRoot, "node_modules", "openclaw", "openclaw.mjs"),
-  ]);
 
   return {
     repoRoot,
     unpackedRoot,
-    bootstrapScript,
     serverEntry,
-    templateDir,
     tsxCli,
-    openClawCli,
   };
 }

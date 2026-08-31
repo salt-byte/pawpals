@@ -13,9 +13,7 @@ export function getDeploymentFiles() {
   const logFile = path.join(runtime.pawPalsHome, "deployment.log");
   const serverLogFile = path.join(runtime.pawPalsHome, "pawpals-server.log");
   const serverErrFile = path.join(runtime.pawPalsHome, "pawpals-server.err.log");
-  const gatewayLogFile = path.join(runtime.pawPalsHome, "pawpals-gateway.log");
-  const gatewayErrFile = path.join(runtime.pawPalsHome, "pawpals-gateway.err.log");
-  return { ...runtime, stateFile, firstRunFile, logFile, serverLogFile, serverErrFile, gatewayLogFile, gatewayErrFile };
+  return { ...runtime, stateFile, firstRunFile, logFile, serverLogFile, serverErrFile };
 }
 
 function readState(stateFile) {

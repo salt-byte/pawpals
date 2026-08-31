@@ -1,17 +1,28 @@
 import fs from "fs";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getDeploymentFiles } from "../scripts/deployment-state.mjs";
 import { startIsolatedRuntime } from "../scripts/runtime-launcher.mjs";
 import * as bossPlatform from "./platforms/boss.mjs";
+import * as bossPlaywrightPlatform from "./platforms/boss-playwright.mjs";
 import * as webFormPlatform from "./platforms/web-form.mjs";
 
 // ── 平台注册表 ─────────────────────────────────────────────────────────────
 // 每个平台实现 login / search / apply 三个方法
 // 新平台只需新建 platforms/<name>.mjs 并在这里注册
+//
+// PAWPALS_USE_PLAYWRIGHT=1 切换到 Playwright + 持久化 profile 路径（反爬更强）
+// 默认走原 Electron BrowserWindow 路径
+const USE_PLAYWRIGHT = process.env.PAWPALS_USE_PLAYWRIGHT === "1";
+if (USE_PLAYWRIGHT) {
+  console.log("[PawPals] Boss 投递路径：Playwright + 持久化 profile");
+} else {
+  console.log("[PawPals] Boss 投递路径：Electron BrowserWindow（旧路径）");
+}
+
 const PLATFORMS = {
-  boss: bossPlatform,
+  boss: USE_PLAYWRIGHT ? bossPlaywrightPlatform : bossPlatform,
   "web-form": webFormPlatform,
   // linkedin: linkedinPlatform,   // 未来扩展
   // lagou:    lagouPlatform,
@@ -30,6 +41,41 @@ let runtime = null;
 let runtimeStartPromise = null;
 let applyPollInterval = null;
 let applyingNow = false;
+
+function openUrlInElectron(url, options = {}) {
+  const child = new BrowserWindow({
+    show: true,
+    width: 1280,
+    height: 900,
+    title: options.title || "PawPals",
+    backgroundColor: "#f7f1ea",
+    autoHideMenuBar: true,
+    icon: path.join(__dirname, "../resources/icon.icns"),
+    parent: options.parent || undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      ...(options.partition ? { partition: options.partition } : {}),
+    },
+  });
+
+  child.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+    openUrlInElectron(nextUrl, {
+      parent: child,
+      partition: options.partition,
+      title: options.title,
+    });
+    return { action: "deny" };
+  });
+
+  void child.loadURL(url).catch((error) => {
+    console.warn("[PawPals] child window load failed:", error?.message || error);
+    try { child.close(); } catch {}
+  });
+
+  return child;
+}
 
 // ── 通用平台调度（login / search / apply 统一入口）────────────────────────
 // 根据 task.platform 字段分发到对应平台适配器
@@ -170,11 +216,46 @@ function startApplyPolling(serverUrl) {
         }).catch(() => {});
       }
     } catch {}
+    // 通用网页抓取任务（替代 Gateway Chrome，用 Electron BrowserWindow 执行）
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/internal/browser-fetch-task`,
+        { signal: AbortSignal.timeout(2000) });
+      const { task } = await r.json();
+      if (task) {
+        let pageText = "";
+        try {
+          const win = new BrowserWindow({
+            show: false, width: 1280, height: 800,
+            webPreferences: { contextIsolation: true },
+          });
+          win.webContents.setUserAgent(`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome || "136.0.0.0"} Safari/537.36`);
+          await win.loadURL(task.url);
+          await new Promise(r => setTimeout(r, 5000));
+          pageText = await win.webContents.executeJavaScript(`
+            (() => {
+              const title = document.title || "";
+              const meta = document.querySelector('meta[name="description"]')?.content || "";
+              const body = document.body?.innerText || "";
+              return "【" + title + "】\\n" + (meta ? meta + "\\n\\n" : "") + body.slice(0, 5000);
+            })()
+          `);
+          try { win.close(); } catch {}
+        } catch (e) {
+          console.warn("[PawPals] browser-fetch failed:", e.message);
+          pageText = `ERROR: ${e.message}`;
+        }
+        await fetch(`http://127.0.0.1:${port}/api/internal/browser-fetch-done`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: task.id, result: pageText }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {});
+      }
+    } catch {}
   }, 1000); // 每 1 秒轮询一次
 }
 
 function readDeploymentStatus() {
-  const { stateFile, logFile, openClawHome, pawPalsHome, gatewayBaseUrl } = getDeploymentFiles();
+  const { stateFile, logFile, pawPalsHome } = getDeploymentFiles();
   let state = {};
   try {
     if (fs.existsSync(stateFile)) {
@@ -192,14 +273,9 @@ function readDeploymentStatus() {
     deployed: Boolean(state.deployed || runtime),
     deployedAt: state.deployedAt || null,
     updatedAt: state.updatedAt || null,
-    gatewayBaseUrl: state.gatewayBaseUrl || gatewayBaseUrl,
     appUrl: state.appUrl || runtime?.appUrl || null,
     appPort: state.appPort || null,
-    openClawHome,
     appDataDir: pawPalsHome,
-    usingBundledRuntime: state.usingBundledRuntime !== false,
-    usingBundledNode: Boolean(state.usingBundledNode),
-    usingBundledOpenClaw: state.usingBundledOpenClaw !== false,
     error: state.error || null,
     logs,
   };
@@ -228,7 +304,11 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "launcher.html"));
   }
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openUrlInElectron(url, {
+      parent: mainWindow,
+      partition: url.includes("zhipin.com") ? "persist:boss" : undefined,
+      title: url.includes("zhipin.com") ? "PawPals — Boss直聘" : "PawPals",
+    });
     return { action: "deny" };
   });
 }
@@ -274,24 +354,11 @@ app.whenReady().then(async () => {
   const { stateFile, firstRunFile } = getDeploymentFiles();
   try { if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile); } catch {}
 
-  ipcMain.handle("pawpals:get-deployment-status", async () => readDeploymentStatus());
-  ipcMain.on("pawpals:start-deployment", () => {
-    startDesktopRuntime().catch((error) => {
-      dialog.showErrorBox("PawPals failed to start", String(error));
-    });
+  // 直接启动
+  createWindow();
+  startDesktopRuntime().catch((error) => {
+    dialog.showErrorBox("PawPals failed to start", String(error));
   });
-
-  // First launch: show launcher so user can click "开始自动部署"
-  // Subsequent launches: skip launcher and boot directly into the app
-  const isFirstRun = !fs.existsSync(firstRunFile);
-  if (isFirstRun) {
-    createWindow();
-  } else {
-    startDesktopRuntime().catch((error) => {
-      dialog.showErrorBox("PawPals failed to start", String(error));
-    });
-    createWindow();
-  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -304,8 +371,12 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", async () => {
   app.isQuitting = true;
   if (applyPollInterval) clearInterval(applyPollInterval);
   runtime?.stop();
+  // 关 Playwright 持久化 context（如果启用了）
+  if (USE_PLAYWRIGHT) {
+    try { await bossPlaywrightPlatform.shutdown(); } catch {}
+  }
 });
