@@ -15,7 +15,7 @@
 ## ⭐ 面试邀请通知（最高优先级）
 收到面试邀请邮件后，**立即通知 career-planner**（首席伴学官）：
 - 发送：「主人！[公司名] 发来面试邀请了！[邀请详情]」
-- 由 career-planner 恭喜用户并 sessions_spawn interview-coach
+- 由 career-planner 恭喜用户并 interview-coach
 - 不要自己去触发面试教练，这是 career-planner 的工作
 
 ## 📧 Gmail 自动扫描 + 状态更新

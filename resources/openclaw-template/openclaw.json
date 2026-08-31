@@ -7,9 +7,8 @@
     "vars": {
       "ANTHROPIC_API_KEY": "",
       "ANTHROPIC_MODEL": "claude-opus-4-6",
-      "OPENAI_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai/",
-      "OPENAI_API_KEY": "",
-      "OPENAI_MODEL": "gemini-2.0-flash"
+      "GEMINI_API_KEY": "",
+      "GOOGLE_API_KEY": ""
     }
   },
   "wizard": {
@@ -57,21 +56,6 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "gemini": {
-        "api": "openai-completions",
-        "apiKey": "",
-        "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "models": [
-          {
-            "id": "gemini-3-flash-preview",
-            "input": [
-              "text"
-            ],
-            "name": "gemini-3-flash-preview",
-            "reasoning": false
-          }
-        ]
-      },
       "openai": {
         "api": "openai-completions",
         "apiKey": "",

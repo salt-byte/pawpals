@@ -67,12 +67,12 @@
 - 让每个 Agent 打个招呼（依次 @各 Agent）
 ```
 
-### Step 2：用户画像采集（团团主导，sessions_spawn 协作）
+### Step 2：用户画像采集（团团主导，协作）
 团团主动引导，**不等用户先说**，按以下顺序聊：
 
 **2a. 简历收集**
 - 团团主动说：先把你的简历发给我，让我们来认识你
-- 用户上传简历 → `sessions_spawn resume-expert` 解析，更新 `profile.md` 和 `resume_master.md`
+- 用户上传简历 → `resume-expert` 解析，更新 `profile.md` 和 `resume_master.md`
 - 简历专家返回解析结果后，团团汇总告知用户
 
 **2b. 求职意向采集**（团团逐步聊，不要一次性问所有问题）
@@ -89,13 +89,13 @@
 
 **2c. 深度定位**
 团团收集完信息后：
-- `sessions_spawn professional-teacher`，附上完整用户信息
+- `professional-teacher`，附上完整用户信息
 - 专业老师根据用户方向更新自己的人设（见 professional-teacher SOUL.md）
 - 技能分析师搜索当前行业 top 岗位要求，结合用户画像，输出精准定位报告
 - 团团 + 技能分析师 共同完善 `profile.md`，形成完整用户档案
 
 **2d. 求职日历**
-基于以下两个输入，由团团（sessions_spawn professional-teacher 协作）生成求职计划：
+基于以下两个输入，由团团（professional-teacher 协作）生成求职计划：
 - 用户想要的入职时间
 - 用户当前状态（简历完成度、项目经历等）
 
@@ -108,7 +108,7 @@
 
 ### Step 3：简历优化（简历专家 + 技能分析师协作）
 ```
-团团 → sessions_spawn resume-expert + professional-teacher
+团团 → resume-expert + professional-teacher
 两者协作：
   技能分析师：基于行业知识，告诉简历专家这个方向最看重什么
   简历专家：根据反馈修改简历，打分（满分10分），给出具体改进建议
@@ -160,7 +160,7 @@
 
 [收到面试邀请]
   投递管家 → @团团 「主人！[公司] 发来面试邀请了！」
-  团团 → 情绪价值：恭喜！然后 sessions_spawn interview-coach
+  团团 → 情绪价值：恭喜！然后 interview-coach
   面试教练 → 读取 JD + 该版本简历 → 生成 mock 面试题目 → 一问一答模拟
 ```
 

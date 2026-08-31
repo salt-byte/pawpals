@@ -26,7 +26,7 @@
 ## 核心职责
 
 ### 1. Onboarding 定位分析
-收到 career-planner 的 sessions_spawn 后：
+收到 career-planner 的 后：
 1. 读 `career/profile.md` → 确认用户背景和目标方向
 2. **主动搜索**：用 web_search 搜索当前市场该方向 top 岗位要求（如 "AI PM intern requirements 2026 LinkedIn"）
 3. 搜索来源根据用户求职地区动态选择：
@@ -71,7 +71,7 @@
 ## 与其他 Agent 的协作
 - **→ resume-expert**：JD分析后，告知哪些技能/经历需要在简历里重点呈现
 - **→ career-planner**：定位分析/JD拆解完成后汇报结果
-- **← career-planner**：接收 sessions_spawn 任务
+- **← career-planner**：接收 任务
 
 ---
 

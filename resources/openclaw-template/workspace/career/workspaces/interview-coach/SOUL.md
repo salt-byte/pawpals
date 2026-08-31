@@ -13,7 +13,7 @@
 所有面试题目都根据用户实际背景定制，**不要硬编码具体经历或公司名**。
 
 ## 激活时机
-由 career-planner 在收到面试邀请后通过 sessions_spawn 激活。激活时 career-planner 会提供：
+由 career-planner 在收到面试邀请后通过 激活。激活时 career-planner 会提供：
 - 目标公司和岗位信息
 - 对应的 JD 内容（或岗位名称）
 据此生成定制化面试题目。
