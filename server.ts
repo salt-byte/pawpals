@@ -11,6 +11,7 @@ import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
+import { pickAutofillValue } from "./server/autofill.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
 import schedule from "node-schedule";
@@ -859,18 +860,6 @@ function extractAutofillProfile() {
   };
 }
 
-function pickAutofillValue(field: any, profile: ReturnType<typeof extractAutofillProfile>, title = "", company = "") {
-  const haystack = [field.label, field.name, field.placeholder, field.id, field.type].join(" ").toLowerCase();
-  if (/full name|your name|姓名|名字|name/.test(haystack)) return profile.name;
-  if (/email|邮箱/.test(haystack)) return profile.email;
-  if (/phone|mobile|tel|手机号|电话/.test(haystack)) return profile.phone;
-  if (/linkedin/.test(haystack)) return profile.linkedin;
-  if (/portfolio|website|personal site|作品集|个人网站/.test(haystack)) return profile.portfolio;
-  if (/cover letter|additional information|why|motivation|message|自我介绍|补充说明|说明/.test(haystack)) {
-    return `您好，我对 ${company || "贵司"} 的「${title || "该岗位"}」很感兴趣，相关经历与岗位方向匹配，期待进一步沟通。`;
-  }
-  return "";
-}
 
 function rerankSearchRows(rows: SearchResultRow[], prefs: { orderedCities: string[]; companyPreference: string }) {
   const cityOrder = prefs.orderedCities;
@@ -2495,7 +2484,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       const profile = extractAutofillProfile();
       const values = fields
         .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
-        .map((field: any) => ({ index: field.index, value: pickAutofillValue(field, profile, String(title || ""), String(company || "")) }))
+        .map((field: any) => ({ index: field.index, value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }) }))
         .filter((item: any) => item.value);
       if (values.length) {
         const fillTask = officialApplicationQueue.enqueue({
@@ -5144,7 +5133,7 @@ async function startServer() {
     const values = (Array.isArray(fields) ? fields : [])
       .map((field: any) => ({
         index: field.index,
-        value: pickAutofillValue(field, profile, String(title || ""), String(company || "")),
+        value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }),
       }))
       .filter((item: any) => item.value);
     res.json({ ok: true, values });
