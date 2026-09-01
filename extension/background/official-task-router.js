@@ -15,6 +15,15 @@
  * 真的执行了（哪怕返回空）才回报，否则队列会被这个任务永远堵住。
  */
 
+/**
+ * 可以自主开页的任务类型。
+ *
+ * submit 不在其中，而且这是安全约束不是遗漏：提交只应发生在用户已经打开、
+ * 亲眼看过并回了「确认投递」的那个页面上。如果那个标签页已经被关掉，正确的
+ * 反应是让任务留在队列里，而不是重新开一个页面把表单交上去。
+ */
+const AUTO_OPEN_KINDS = ['inspect', 'fill'];
+
 /** 找到 origin 与任务 URL 相同的标签页；找不到或 URL 解析不了都返回 null。 */
 export function pickTargetTab(taskUrl, tabs) {
   let wanted;
@@ -34,23 +43,70 @@ export function pickTargetTab(taskUrl, tabs) {
 }
 
 /**
- * 跑一轮：拉任务 → 找标签页 → 派发 → 回报。
+ * 任务派发器。收到服务端推来的任务，找到（或打开）目标标签页，把任务交给页面
+ * 里的 content script，再把结果回报回去。
  *
- * deps 全部注入，所以这一层不依赖 chrome.* 也不依赖 fetch，可以直接测。
+ * 全事件驱动，没有轮询也没有心跳：任务从 socket 推进来触发 accept()，页面加载
+ * 完成触发 onPageReady()。这两个事件之外这里不做任何事。
+ *
+ * 派发不成功的任务留在 pending 里而不是丢弃或回报失败——页面可能还在加载，或
+ * 者用户过会儿才打开申请页。只有页面**真的执行了**（哪怕返回空）才回报，否则
+ * 服务端队列会被这个任务永久堵住。
  */
-export async function runOfficialTaskCycle({ client, listTabs, sendToTab }) {
-  const task = await client.next();
-  if (!task) return;
+export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult }) {
+  /** 已收到但还没派出去的任务。 */
+  const pending = new Map();
+  /** 已经为哪些任务开过页，避免页面加载期间重复开。 */
+  const openedFor = new Set();
 
-  const tabId = pickTargetTab(task.url, await listTabs());
-  if (tabId === null) return;
+  /** 尝试把一个任务交给页面。成功返回 true（此时已回报），否则 false。 */
+  async function tryDispatch(task) {
+    const tabId = pickTargetTab(task.url, await listTabs());
+    if (tabId === null) return false;
 
-  let result;
-  try {
-    result = await sendToTab(tabId, { type: 'OFFICIAL_TASK', task });
-  } catch {
-    return; // 页面里没有 content script，任务留在队列里等下一轮
+    let result;
+    try {
+      result = await sendToTab(tabId, { type: 'OFFICIAL_TASK', task });
+    } catch {
+      return false; // 页面里还没有 content script
+    }
+    reportResult(task.id, result ?? { ok: false, error: '页面未返回结果' });
+    return true;
   }
 
-  await client.complete(task.id, result ?? { ok: false, error: '页面未返回结果' });
+  return {
+    /** 服务端推来一个任务。 */
+    async accept(task) {
+      if (!task?.id) return;
+      if (await tryDispatch(task)) {
+        pending.delete(task.id);
+        return;
+      }
+      pending.set(task.id, task);
+      if (!openTab || !AUTO_OPEN_KINDS.includes(task.kind) || openedFor.has(task.id)) return;
+      openedFor.add(task.id);
+      try {
+        await openTab(task.url);
+      } catch {
+        // 开页失败：任务留在待办里，用户手动打开申请页也能接上
+      }
+    },
+
+    /** 某个页面的 content script 上线了，把待办里同源的任务补派给它。 */
+    async onPageReady(origin) {
+      for (const task of [...pending.values()]) {
+        let taskOrigin;
+        try {
+          taskOrigin = new URL(task.url).origin;
+        } catch {
+          pending.delete(task.id);
+          continue;
+        }
+        if (taskOrigin !== origin) continue;
+        if (await tryDispatch(task)) pending.delete(task.id);
+      }
+    },
+
+    pendingCount: () => pending.size,
+  };
 }

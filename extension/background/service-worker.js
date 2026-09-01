@@ -1,36 +1,83 @@
-import { createSessionClient } from './session-client.js';
+import { createSessionClient, SERVER_BASE } from './session-client.js';
 import { createOfficialTaskClient } from './official-task-client.js';
-import { runOfficialTaskCycle } from './official-task-router.js';
+import { createOfficialDispatcher } from './official-task-router.js';
 
 const client = createSessionClient();
 const officialClient = createOfficialTaskClient();
 
 /**
- * 官网申请任务的网络侧全部在这里，因为只有 service worker 的 fetch 带
- * host_permissions、不受 CORS 限制；content script 直接 fetch localhost
- * 会稳定失败（详见 official-task-router.js 顶部注释）。
+ * 官网申请任务改走 WebSocket 推送。
  *
- * 心跳不由这里打：MV3 的 service worker 空闲约 30 秒会被终止，setInterval
- * 既不保活、复活后也不会恢复，轮询会静默停掉。改由 content script 定时发
- * OFFICIAL_TICK——消息事件会把 service worker 唤醒，页面活着心跳就活着。
+ * 之前是轮询：content script 每 1.5 秒发一次心跳把 service worker 唤醒，service
+ * worker 再 GET 一次「有任务吗」。99% 的请求返回 null，任务最多要等 1.5 秒才被
+ * 发现，而那整套心跳只是为了绕开「服务端推不过来」这一件事。
+ *
+ * 换成推送之后，服务端 enqueue 时直接写进这条连接，心跳、busy 锁、每 1.5 秒
+ * 一次的 GET 全部不再需要。顺带解决了 MV3 的保活问题：一条活着的 WebSocket
+ * 本身就会重置 service worker 的空闲计时器。
+ *
+ * 网络仍然只能在这里做——content script 的跨域 fetch 受页面 origin 的 CORS 管，
+ * 直连 localhost 会稳定失败（详见 official-task-router.js 顶部注释）。
  */
-let officialBusy = false;
+const SOCKET_URL = `${SERVER_BASE.replace(/^http/, 'ws')}/ws/official`;
 
-async function pumpOfficialTasks() {
-  if (officialBusy) return;
-  officialBusy = true;
+let socket = null;
+
+function sendToServer(message) {
+  if (socket?.readyState !== WebSocket.OPEN) return false;
   try {
-    await runOfficialTaskCycle({
-      client: officialClient,
-      listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
-      sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
-    });
-  } catch (error) {
-    console.warn('[pawpals] official task cycle failed', error);
-  } finally {
-    officialBusy = false;
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
   }
 }
+
+const dispatcher = createOfficialDispatcher({
+  listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
+  sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
+  // 自主开页：申请页没开着就自己开一个后台标签页。submit 不在可自动开页的类型
+  // 里——提交只发生在用户亲眼确认过的那个页面上。
+  openTab: (url) => chrome.tabs.create({ url, active: false }),
+  reportResult: (id, result) => sendToServer({ type: 'result', id, result }),
+});
+
+function connectOfficialSocket() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+  try {
+    socket = new WebSocket(SOCKET_URL);
+  } catch {
+    socket = null;
+    return;
+  }
+  socket.addEventListener('message', (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (payload?.type === 'task' && payload.task) void dispatcher.accept(payload.task);
+  });
+  socket.addEventListener('close', () => { socket = null; });
+  socket.addEventListener('error', () => { /* close 会紧跟着来，在那里清理 */ });
+}
+
+/**
+ * 重连看门狗。
+ *
+ * 连接活着的时候用不上它——连接本身就保活。但连接一断，service worker 可能随
+ * 之被回收，那就没有任何东西会去重连了。alarms 能唤醒被回收的 service worker，
+ * 30 秒一次纯粹是兜底，不是在轮询任务。
+ */
+chrome.alarms.create('pawpals-official-socket', { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'pawpals-official-socket') connectOfficialSocket();
+});
+
+chrome.runtime.onStartup.addListener(connectOfficialSocket);
+chrome.runtime.onInstalled.addListener(connectOfficialSocket);
+connectOfficialSocket();
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
@@ -52,14 +99,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id });
     sendResponse({ ok: true });
   }
-  if (message?.type === 'OFFICIAL_TICK') {
-    void pumpOfficialTasks();
+  if (message?.type === 'OFFICIAL_PAGE_READY') {
+    // 页面上线：顺手确保连接活着，上报页面上下文，并把待办里同源的任务补派过
+    // 去——任务可能是在这个页面加载完成之前就推过来的。
+    connectOfficialSocket();
+    void officialClient.reportContext(message.payload);
+    void dispatcher.onPageReady(message.origin);
     sendResponse({ ok: true });
     return false;
-  }
-  if (message?.type === 'OFFICIAL_PAGE_CONTEXT') {
-    officialClient.reportContext(message.payload).then(() => sendResponse({ ok: true }));
-    return true;
   }
   return false;
 });

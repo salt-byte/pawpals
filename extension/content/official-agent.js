@@ -8,17 +8,28 @@ import { sendToBackground } from './bg-bridge.js';
  * 的 origin、受 CORS 管，直连 localhost:3000 会稳定拿到 Failed to fetch。
  * 网络全部交给 service worker（见 background/official-task-router.js）。
  *
- * 本文件只做两件事：定时发心跳把 service worker 唤醒；收到派下来的任务就在
+ * 本文件只做两件事：页面加载完成时上报一次「我上线了」；收到派下来的任务就在
  * 页面里执行并把结果回给它。
+ *
+ * 原先这里还有一个每 1.5 秒的心跳，用来唤醒 service worker 去轮询任务。任务
+ * 改成 WebSocket 推送之后不再需要——service worker 由连接保活，任务来了直接
+ * 派下来。
  */
 
 function toBackground(message) {
   return sendToBackground((m) => chrome.runtime.sendMessage(m), message);
 }
 
-function reportActivePage() {
+/**
+ * 告诉 service worker 这个页面上线了。
+ *
+ * 带上 origin 是因为任务可能在本页加载完成之前就被推过来了——那时还没有
+ * content script 可派，任务在 service worker 那边挂着，等这条消息来了才补派。
+ */
+function reportPageReady() {
   return toBackground({
-    type: 'OFFICIAL_PAGE_CONTEXT',
+    type: 'OFFICIAL_PAGE_READY',
+    origin: location.origin,
     payload: { url: location.href, title: document.title, provider: detectApplicationProvider(location.href) },
   });
 }
@@ -87,5 +98,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-void reportActivePage();
-setInterval(() => { void toBackground({ type: 'OFFICIAL_TICK' }); }, 1500);
+void reportPageReady();

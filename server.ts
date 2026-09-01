@@ -14,6 +14,9 @@ import { planSoulSeed } from "./server/agent-soul.ts";
 import { pickAutofillValue } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
+import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
+import { WebSocketServer } from "ws";
+import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
 import { runTailorPipeline, type TailorDeps } from "./server/tailor-pipeline.ts";
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { spawn, exec, execFile } from "child_process";
@@ -96,6 +99,19 @@ const applyResultStore = new Map<string, any>();
 const pendingBrowserFetchQueue = new Map<string, { url: string; resolve: (r: string) => void }>();
 // 官网申请由浏览器扩展消费；提交任务只能由明确确认令牌创建。
 const officialApplicationQueue = new OfficialApplicationQueue();
+const officialTaskHub = createTaskBroadcaster();
+
+/**
+ * 入队并立刻推给已连接的扩展。
+ *
+ * 推不出去（没有扩展在线）不是错误：任务留在队列里，扩展连上来时由 onConnect
+ * 补发。所有 enqueue 都要走这里，否则任务会静静躺在队列里没人知道。
+ */
+function enqueueOfficialTask(input: Parameters<OfficialApplicationQueue["enqueue"]>[0]) {
+  const task = officialApplicationQueue.enqueue(input);
+  officialTaskHub.broadcast(task);
+  return task;
+}
 let activeOfficialApplicationPage: { url: string; title: string; provider: string; seenAt: number } | null = null;
 
 async function waitForOfficialTask(taskId: string, timeoutMs = 45_000): Promise<any> {
@@ -834,6 +850,24 @@ async function generateSearchQueryAndCity(input: {
 
 function isBossJobUrl(url: string) {
   return /zhipin\.com/i.test(url || "");
+}
+
+/**
+ * 档案与简历的**原文**，供大模型取值时引用来源。
+ *
+ * extractAutofillProfile 抽的是解析好的五个字段；模型需要的是原文——它要能
+ * 从里面逐字引出 source，validateAutofillPlan 才验得了。截断是为了不撑爆单条
+ * prompt 的上下文。
+ */
+function readAutofillProfileText(limit = 6000): string {
+  const readIfExists = (file: string) => {
+    try {
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    } catch {
+      return "";
+    }
+  };
+  return `${readIfExists(PROFILE_FILE)}\n\n${readIfExists(RESUME_MASTER_FILE)}`.trim().slice(0, limit);
 }
 
 function extractAutofillProfile() {
@@ -2462,7 +2496,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       if (!/^https:\/\//i.test(String(job_url || ""))) {
         return "[ERR] 需要有效的 HTTPS 公司官网申请链接。";
       }
-      const inspectTask = officialApplicationQueue.enqueue({
+      const inspectTask = enqueueOfficialTask({
         kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
       });
       const inspection = await waitForOfficialTask(inspectTask.id);
@@ -2476,15 +2510,41 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       }
 
       const fields = plan.fields;
-      const profile = extractAutofillProfile();
-      const values = fields
-        .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
-        .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, { title: String(title || ""), company: String(company || "") }) }))
-        .filter((item: any) => item.value);
+      const fillCtx = { title: String(title || ""), company: String(company || "") };
+      const profileText = readAutofillProfileText();
+
+      // 先让模型按 label 取值——国内校招表单的字段（学历、专业、期望薪资）
+      // 在扩展侧几乎全被判成 custom，正则路径一个都填不了。模型给的每一项都
+      // 要过 validateAutofillPlan 的四道机械校验，其中 source 必须能在档案原文
+      // 里逐字找到，编造的值进不来。
+      let values: Array<{ signature: string; value: string }> = [];
+      let rejected: Array<{ signature: string; reason: string }> = [];
+      if (profileText) {
+        try {
+          const raw = await chatExtractJson<{ values?: unknown }>(
+            "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
+            buildAutofillPrompt({ fields, profileText, ctx: fillCtx }),
+            { max_tokens: 2000 }
+          );
+          ({ values, rejected } = validateAutofillPlan(raw?.values, fields, profileText));
+        } catch (error) {
+          console.warn("[autofill] LLM 取值失败，回退到确定性映射:", error);
+        }
+      }
+
+      // 兜底：模型不可用、或一项都没通过校验时，仍按 kind 把已知字段填上。
+      // 宁可少填几个框，也不能因为一次 LLM 故障就整个投递流程停摆。
+      if (values.length === 0) {
+        const profile = extractAutofillProfile();
+        values = fields
+          .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
+          .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, fillCtx) }))
+          .filter((item: any) => item.value);
+      }
       let filledCount = 0;
       let skippedCount = 0;
       if (values.length) {
-        const fillTask = officialApplicationQueue.enqueue({
+        const fillTask = enqueueOfficialTask({
           kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""), payload: { values },
         });
         const filled = await waitForOfficialTask(fillTask.id);
@@ -2500,8 +2560,12 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
       });
       const warnings = Array.isArray(inspection.warnings) ? inspection.warnings : [];
+      // unsourced / option_not_allowed 说明模型想填但被闸门挡下了，这类字段
+      // 页面上是空的，必须让用户知道要手动补，不能沉默。
+      const blockedCount = rejected.filter((r) => r.reason === "unsourced" || r.reason === "option_not_allowed").length;
       const notes = [
         `已填写 ${filledCount} 个标准字段`,
+        blockedCount ? `${blockedCount} 个字段因档案里查无依据被拦下，需要你手动填` : "",
         skippedCount ? `${skippedCount} 个字段因页面已变化未能定位，需要你手动补` : "",
         warnings.includes("resume_requires_user_file_selection") ? "请先在页面上手动选择简历文件" : "",
       ].filter(Boolean);
@@ -3933,6 +3997,34 @@ async function startServer() {
     },
   });
 
+  /**
+   * 扩展的任务推送通道。
+   *
+   * noServer + 手动处理 upgrade：socket.io 也挂在同一个 httpServer 上，直接
+   * new WebSocketServer({ server }) 会和它抢 upgrade 事件。这里只认自己的路径，
+   * 其余一概不碰，交给 socket.io。
+   */
+  const officialWss = new WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (req, socket, head) => {
+    if (!req.url?.startsWith("/ws/official")) return;
+    officialWss.handleUpgrade(req, socket as any, head, (ws) => officialWss.emit("connection", ws, req));
+  });
+
+  officialWss.on("connection", (ws) => {
+    officialTaskHub.add(ws as any);
+    // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
+    const backlog = officialApplicationQueue.next();
+    if (backlog) {
+      try { ws.send(JSON.stringify({ type: "task", task: backlog })); } catch { /* 刚连上就断了 */ }
+    }
+    ws.on("message", (raw) => {
+      const message = parseClientMessage(raw);
+      if (message) officialApplicationQueue.complete(message.id, message.result);
+    });
+    ws.on("close", () => officialTaskHub.remove(ws as any));
+    ws.on("error", () => officialTaskHub.remove(ws as any));
+  });
+
   const PORT = Number(process.env.PAWPALS_PORT || process.env.PORT || 3000);
   app.use(express.json());
   // 静态头像文件
@@ -5024,7 +5116,7 @@ async function startServer() {
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) {
       return res.status(400).json({ ok: false, error: "需要 HTTPS 官网申请链接" });
     }
-    const task = officialApplicationQueue.enqueue({ kind: "inspect", url, company: String(company), title: String(title), payload });
+    const task = enqueueOfficialTask({ kind: "inspect", url, company: String(company), title: String(title), payload });
     res.json({ ok: true, task });
   });
 
@@ -5032,6 +5124,7 @@ async function startServer() {
   app.post("/api/official-applications/:confirmationId/confirm", (req: any, res: any) => {
     const task = officialApplicationQueue.confirm(req.params.confirmationId);
     if (!task) return res.status(404).json({ ok: false, error: "确认已过期、被取消或不存在" });
+    officialTaskHub.broadcast(task);
     res.json({ ok: true, task });
   });
 

@@ -37,7 +37,8 @@
     "pdfjs-dist": "^5.5.207",
     "playwright": "^1.59.1",
     "socket.io": "^4.8.3",
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.14",

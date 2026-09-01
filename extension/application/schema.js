@@ -27,13 +27,21 @@ export function detectApplicationProvider(url = '') {
 
 export function fieldKind(field) {
   const text = [field.label, field.name, field.id, field.placeholder, field.type].filter(Boolean).join(' ').toLowerCase();
+
+  // 任何文件输入都按附件处理，不看标签。真机在帆软秋招页（简道云）上实测：
+  // 简历附件那两个 file 输入的标签取不出来（上传组件把字段名挡在外层），靠标签
+  // 判断会让 resume_requires_user_file_selection 整个不触发，「简历先传」这道闸
+  // 形同虚设。宁可把成绩单、作品集也一并停下来问用户，也不能漏掉简历。
+  if (String(field.type || '').toLowerCase() === 'file') return 'resume';
   if (/resume|cv|简历/.test(text)) return 'resume';
   if (/cover letter|求职信/.test(text)) return 'cover_letter';
-  if (/first.*name|given.*name|名(?!字)/.test(text)) return 'first_name';
+  // 全名必须排在姓/名之前：「姓名」里含「名」，先判 first_name 会把中文表单
+  // 里最常见的全名字段判成名，填进去只有名没有姓。
+  if (/full.*name|your name|姓名|名字/.test(text)) return 'full_name';
+  if (/first.*name|given.*name|名/.test(text)) return 'first_name';
   if (/last.*name|family.*name|姓/.test(text)) return 'last_name';
-  if (/full.*name|姓名|your name/.test(text)) return 'full_name';
   if (/e-?mail|邮箱/.test(text)) return 'email';
-  if (/phone|mobile|telephone|手机号|电话/.test(text)) return 'phone';
+  if (/phone|mobile|telephone|手机|电话|联系方式/.test(text)) return 'phone';
   if (/linkedin/.test(text)) return 'linkedin';
   if (/portfolio|website|personal site|作品集|个人网站/.test(text)) return 'portfolio';
   if (/work authorization|authorized.*work|sponsor|visa|身份|签证/.test(text)) return 'work_authorization';
