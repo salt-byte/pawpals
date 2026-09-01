@@ -207,3 +207,83 @@ describe('标签来源不能是脚本或样式', () => {
   });
 });
 
+/**
+ * 简道云、antd、element-ui 这类框架的下拉/多选是纯 div 模拟的：容器里一个
+ * 原生 input/select 都没有，也没有任何 ARIA role。collectApplicationFields
+ * 只查原生控件，于是这些字段静默地不存在——用户会看到「已填写 N 个字段」，
+ * 然后带着几个空的必填项走到确认投递那一步。
+ *
+ * 真机在帆软秋招页上确认：意向岗位大类 / 意向团队 / 意向工作地点三个必填项
+ * 全是这种控件，一个都没被采集到。
+ */
+describe('自定义控件（无原生表单元素）', () => {
+  const combo = (label, cls = 'fx-form-combo') =>
+    `<div class="fx-field"><span class="field-required">*</span>` +
+    `<div class="field-name">${label}</div>` +
+    `<div class="field-component"><div class="${cls}"><div class="value-wrapper"></div></div></div></div>`;
+
+  it('采集到没有原生控件的字段容器，标成 widget', () => {
+    document.body.innerHTML = combo('意向岗位大类');
+    const [field] = collectApplicationFields();
+    expect(field.label).toBe('意向岗位大类');
+    expect(field.type).toBe('widget');
+    expect(field.required).toBe(true);
+  });
+
+  it('widget 也有稳定签名，能被点名上报', () => {
+    document.body.innerHTML = combo('意向团队', 'fx-form-combocheck') + combo('意向工作地点');
+    const fields = collectApplicationFields();
+    expect(fields).toHaveLength(2);
+    expect(fields[0].signature).not.toBe(fields[1].signature);
+    expect(fields[0].signature).toContain('type=widget');
+  });
+
+  it('触发警告，让提交那一步能拦住——必填项空着不能投出去', () => {
+    document.body.innerHTML = combo('意向岗位大类');
+    expect(formWarnings(collectApplicationFields(), document)).toContain('custom_widget_requires_user_input');
+  });
+
+  it('填写时跳过并说明原因，不假装填了', () => {
+    document.body.innerHTML = combo('意向岗位大类');
+    const [field] = collectApplicationFields();
+    const result = fillApplicationFields(document, [{ signature: field.signature, value: '技术类' }]);
+    expect(result.filled).toEqual([]);
+    expect(result.skipped[0]).toMatchObject({ reason: 'unsupported_widget' });
+  });
+
+  it('有原生控件的容器不会被重复采集成 widget', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><div class="field-name">姓名</div><input type="text"></div>';
+    const fields = collectApplicationFields();
+    expect(fields).toHaveLength(1);
+    expect(fields[0].type).toBe('text');
+  });
+
+  it('没有标签的容器不算字段——页面上到处都是空 div', () => {
+    document.body.innerHTML = '<div class="fx-field"><div class="value-wrapper"></div></div>';
+    expect(collectApplicationFields()).toEqual([]);
+  });
+
+  it('不是字段容器的 div 不算——只认 field / form-item 这类语义容器', () => {
+    document.body.innerHTML = '<div class="banner"><div class="title">帆软秋招</div></div>';
+    expect(collectApplicationFields()).toEqual([]);
+  });
+});
+
+describe('自定义控件：把段落标题排除掉', () => {
+  it('只有标题、没有值区域的容器不算字段', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><div class="field-name">个人基本信息</div></div>';
+    expect(collectApplicationFields()).toEqual([]);
+  });
+
+  it('有值区域的才算——真字段容器里都有一块放值的地方', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><div class="field-name">学历</div>' +
+      '<div class="field-component"><div class="x-combo"><div class="value-wrapper"></div></div></div></div>';
+    const [field] = collectApplicationFields();
+    expect(field.label).toBe('学历');
+    expect(field.type).toBe('widget');
+  });
+});
+

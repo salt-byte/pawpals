@@ -122,14 +122,81 @@ function requiredFor(el) {
   return false;
 }
 
+/** 像"一个表单字段的容器"的 class。覆盖简道云 fx-field、antd form-item、element-ui。 */
+const FIELD_CONTAINER_HINT = /field|form-?item|form-?group/i;
+
+const matchesFieldContainer = (el) => FIELD_CONTAINER_HINT.test(String(el.className || ''));
+
+/**
+ * 字段容器里放值的那块地方。段落标题（「个人基本信息」「教育背景」）也用同样的
+ * field 容器 class，但里面只有一行标题、没有值区域——靠这个把它们排除掉。
+ */
+// 特意不含 component：简道云给每个块（含段落标题）都渲染 .field-component，
+// 带上它等于没过滤。真控件靠 combo / value / picker 这些就能命中。
+const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox|radio|switch|cascader/i;
+
+const hasValueArea = (container) =>
+  [...container.querySelectorAll('*')].some((node) => VALUE_AREA_HINT.test(String(node.className || '')));
+
+/** 容器自己的标签：先找语义 class 的叶子，再退回第一段像标签的文字。 */
+function containerFieldLabel(container) {
+  const leaves = labelLeaves(container);
+  const hinted = leaves.find((leaf) => LABEL_CLASS_HINT.test(String(leaf.el.className || '')));
+  return hinted ? hinted.text : (leaves[0]?.text || '');
+}
+
+const containerRequired = (container) =>
+  [...container.querySelectorAll('[class*="required"]')].some((marker) => tidy(marker.textContent) === '*');
+
+/**
+ * 采集没有原生表单元素的字段容器。
+ *
+ * 简道云、antd、element-ui 这类框架的下拉和多选是纯 div 模拟的：容器里一个
+ * input/select 都没有，也没有任何 ARIA role。只查原生控件的话这些字段静默地
+ * 不存在——用户会看到「已填写 N 个字段」，然后带着几个空的必填项走到确认投递。
+ * 真机在帆软秋招页上确认：意向岗位大类 / 意向团队 / 意向工作地点三个必填项
+ * 全是这种控件，一个都没被采到。
+ *
+ * 这里只做识别和上报，不做填写——填这类控件要模拟点击展开再点选项，是另一件
+ * 事。识别出来至少能让提交那一步拦住，并告诉用户哪几个要手动选。
+ *
+ * index 从原生控件之后接着排，避免和 controls[field.index] 那套下标撞车。
+ */
+function collectWidgetFields(root, startIndex) {
+  const out = [];
+  let index = startIndex;
+  for (const container of root.querySelectorAll('*')) {
+    if (!matchesFieldContainer(container)) continue;
+    if (container.querySelector('input, textarea, select')) continue;
+    // 只取最外层：.fx-field 里的 .field-name / .field-component 也含 field
+    if (container.parentElement?.closest('*') && [...ancestorsOf(container)].some(matchesFieldContainer)) continue;
+
+    if (!hasValueArea(container)) continue; // 段落标题不是字段
+
+    const label = containerFieldLabel(container);
+    if (!label) continue;
+
+    out.push(normaliseField({
+      label, name: '', id: container.id, type: 'widget', required: containerRequired(container), options: [],
+    }, index));
+    index += 1;
+  }
+  return out;
+}
+
+function* ancestorsOf(el) {
+  for (let node = el.parentElement; node; node = node.parentElement) yield node;
+}
+
 export function collectApplicationFields(root = document) {
-  return [...root.querySelectorAll('input, textarea, select')]
+  const native = [...root.querySelectorAll('input, textarea, select')]
     .filter((el) => !el.disabled && !['hidden', 'submit', 'button', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()))
     .map((el, index) => normaliseField({
       label: labelFor(el), name: el.getAttribute('name'), id: el.id, placeholder: el.getAttribute('placeholder'),
       type: el.getAttribute('type') || el.tagName.toLowerCase(), required: requiredFor(el),
       options: el.tagName === 'SELECT' ? [...el.options].map((option) => option.textContent?.trim() || '') : [],
     }, index));
+  return [...native, ...collectWidgetFields(root, native.length)];
 }
 
 export function findSubmitControl(root = document) {
@@ -143,6 +210,9 @@ export function formWarnings(fields, root = document) {
   if (fields.some((field) => field.kind === 'resume' && !controls[field.index]?.files?.length)) warnings.push('resume_requires_user_file_selection');
   if (fields.some((field) => field.kind === 'verification')) warnings.push('verification_required');
   if (fields.some((field) => field.kind === 'sensitive_demographic')) warnings.push('sensitive_questions_require_user_choice');
+  // 纯 div 模拟的下拉/多选：识别得到但填不了，必须让用户自己选，不能带着空的
+  // 必填项走到提交。
+  if (fields.some((field) => field.type === 'widget')) warnings.push('custom_widget_requires_user_input');
   return warnings;
 }
 
@@ -173,6 +243,8 @@ export function fillApplicationFields(root, values = []) {
     const matches = fields.filter((field) => field.signature === item.signature);
     if (matches.length === 0) { skip(item.signature, 'not_found'); continue; }
     if (matches.length > 1) { skip(item.signature, 'ambiguous'); continue; }
+
+    if (matches[0].type === 'widget') { skip(item.signature, 'unsupported_widget'); continue; }
 
     const el = elements[matches[0].index];
     if (!el) { skip(item.signature, 'not_found'); continue; }
