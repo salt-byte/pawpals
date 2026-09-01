@@ -1,6 +1,21 @@
 import { randomUUID } from "crypto";
 
-export type OfficialTaskKind = "inspect" | "upload" | "fill" | "submit";
+export type OfficialTaskKind = "inspect" | "probe" | "upload" | "fill" | "submit";
+
+/**
+ * 校验外部请求的任务类型。
+ *
+ * submit 永远不在放行列表里：提交任务只能由 confirm 令牌产生（见 confirm()），
+ * 不能从任何 HTTP 入口直接造出来。这是投递流程里最硬的那道闸，放宽这里等于
+ * 把它废掉。
+ */
+const REQUESTABLE_KINDS: OfficialTaskKind[] = ["inspect", "probe", "upload", "fill"];
+
+export function parseRequestedKind(raw: unknown, fallback: OfficialTaskKind = "inspect"): OfficialTaskKind | null {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw !== "string") return null;
+  return REQUESTABLE_KINDS.includes(raw as OfficialTaskKind) ? (raw as OfficialTaskKind) : null;
+}
 export type OfficialApplicationTask = {
   id: string;
   kind: OfficialTaskKind;

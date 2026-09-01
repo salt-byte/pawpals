@@ -162,7 +162,7 @@ const containerRequired = (container) =>
  *
  * index 从原生控件之后接着排，避免和 controls[field.index] 那套下标撞车。
  */
-function collectWidgetFields(root, startIndex) {
+function collectWidgetEntries(root, startIndex) {
   const out = [];
   let index = startIndex;
   for (const container of root.querySelectorAll('*')) {
@@ -176,12 +176,28 @@ function collectWidgetFields(root, startIndex) {
     const label = containerFieldLabel(container);
     if (!label) continue;
 
-    out.push(normaliseField({
-      label, name: '', id: container.id, type: 'widget', required: containerRequired(container), options: [],
-    }, index));
+    out.push({
+      container,
+      field: normaliseField({
+        label, name: '', id: container.id, type: 'widget', required: containerRequired(container), options: [],
+      }, index),
+    });
     index += 1;
   }
   return out;
+}
+
+/**
+ * 按签名找回 widget 的容器元素。
+ *
+ * widget 没有对应的原生控件，fillApplicationFields 那套 elements[index] 的
+ * 定位办法用不上，驱动器需要拿到容器本身才能点开它。
+ */
+export function widgetContainerFor(root = document, signature) {
+  const native = [...root.querySelectorAll('input, textarea, select')]
+    .filter((el) => !el.disabled && !['hidden', 'submit', 'button', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()));
+  const hit = collectWidgetEntries(root, native.length).find((entry) => entry.field.signature === signature);
+  return hit ? hit.container : null;
 }
 
 function* ancestorsOf(el) {
@@ -196,7 +212,7 @@ export function collectApplicationFields(root = document) {
       type: el.getAttribute('type') || el.tagName.toLowerCase(), required: requiredFor(el),
       options: el.tagName === 'SELECT' ? [...el.options].map((option) => option.textContent?.trim() || '') : [],
     }, index));
-  return [...native, ...collectWidgetFields(root, native.length)];
+  return [...native, ...collectWidgetEntries(root, native.length).map((entry) => entry.field)];
 }
 
 export function findSubmitControl(root = document) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OfficialApplicationQueue } from "./official-application-queue";
+import { OfficialApplicationQueue, parseRequestedKind } from "./official-application-queue";
 
 describe("OfficialApplicationQueue", () => {
   const draft = { url: "https://jobs.example.com/1", company: "Example", title: "Product Manager" };
@@ -22,3 +22,26 @@ describe("OfficialApplicationQueue", () => {
     expect(queue.confirm(confirmationId)).toBeNull();
   });
 });
+
+describe("parseRequestedKind", () => {
+  it("放行不产生提交的任务类型", () => {
+    for (const kind of ["inspect", "probe", "upload", "fill"]) {
+      expect(parseRequestedKind(kind)).toBe(kind);
+    }
+  });
+
+  it("submit 一律拒绝——提交只能由 confirm 令牌产生，不能从这个入口造出来", () => {
+    expect(parseRequestedKind("submit")).toBe(null);
+  });
+
+  it("未知类型或非字符串返回 null", () => {
+    expect(parseRequestedKind("delete_everything")).toBe(null);
+    expect(parseRequestedKind(123)).toBe(null);
+    expect(parseRequestedKind({})).toBe(null);
+  });
+
+  it("不传时默认 inspect——保持原有行为", () => {
+    expect(parseRequestedKind(undefined, "inspect")).toBe("inspect");
+  });
+});
+

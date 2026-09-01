@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import os from "os";
 import path from "path";
 import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
-import { OfficialApplicationQueue } from "./server/official-application-queue.ts";
+import { OfficialApplicationQueue, parseRequestedKind } from "./server/official-application-queue.ts";
 import { resolveRoute } from "./server/routing.ts";
 import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
@@ -5117,11 +5117,13 @@ async function startServer() {
 
   // 此端点只创建 inspect / fill，供聊天层在用户已经打开并授权官网标签页后调用。
   app.post("/api/official-applications/prepare", (req: any, res: any) => {
-    const { url, company = "", title = "", payload = {} } = req.body || {};
+    const { url, company = "", title = "", payload = {}, kind } = req.body || {};
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) {
       return res.status(400).json({ ok: false, error: "需要 HTTPS 官网申请链接" });
     }
-    const task = enqueueOfficialTask({ kind: "inspect", url, company: String(company), title: String(title), payload });
+    const requested = parseRequestedKind(kind);
+    if (!requested) return res.status(400).json({ ok: false, error: "不支持的任务类型（提交只能经确认令牌创建）" });
+    const task = enqueueOfficialTask({ kind: requested, url, company: String(company), title: String(title), payload });
     res.json({ ok: true, task });
   });
 

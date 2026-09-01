@@ -1,3 +1,4 @@
+import { widgetContainerFor } from './form.js';
 /**
  * 驱动纯 div 模拟的下拉/多选控件。
  *
@@ -109,6 +110,37 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
 }
 
 export { PANEL_HINT };
+
+/**
+ * 把一批值交给 widget 驱动器。
+ *
+ * fillApplicationFields 遇到 widget 会以 unsupported_widget 跳过——那套按
+ * elements[index] 定位的办法对没有原生控件的字段用不上。这里接住这些值，用
+ * 容器 + 驱动器把它们点进去。
+ *
+ * 驱动器的失败原因原样带出（option_not_found 会附上真实可选项），让上游能告诉
+ * 用户「这个框我填不了，可选的是这几个」，而不是笼统地说没填上。
+ */
+export async function applyWidgetValues(root = document, values = [], { driver, findContainer } = {}) {
+  const filled = [];
+  const skipped = [];
+  if (!Array.isArray(values) || values.length === 0 || !driver) return { filled, skipped };
+
+  const locate = findContainer ?? ((signature) => widgetContainerFor(root, signature));
+
+  for (const item of values) {
+    const container = locate(item.signature);
+    if (!container) { skipped.push({ signature: item.signature, reason: 'not_found' }); continue; }
+    try {
+      const result = await driver.selectOption(container, item.value);
+      if (result?.ok) filled.push(item.signature);
+      else skipped.push({ signature: item.signature, reason: result?.reason || 'unknown', options: result?.options });
+    } catch (error) {
+      skipped.push({ signature: item.signature, reason: 'driver_error', error: String(error?.message || error) });
+    }
+  }
+  return { filled, skipped };
+}
 
 /** 值区域的 class 特征。与 form.js 里那份保持一致。 */
 const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox|radio|switch|cascader/i;

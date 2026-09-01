@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWidgetDriver } from './widget.js';
+import { createWidgetDriver, applyWidgetValues } from './widget.js';
+import { widgetContainerFor } from './form.js';
 
 beforeEach(() => { document.body.innerHTML = ''; });
 
@@ -155,6 +156,81 @@ describe('第一次点击被别的面板吃掉时要重试', () => {
     });
     expect(await driver.probeOptions(container())).toEqual([]);
     expect(clicks.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('widgetContainerFor', () => {
+  it('按签名找回 widget 的容器元素', async () => {
+    document.body.innerHTML = COMBO;
+    const { collectApplicationFields } = await import('./form.js');
+    const [field] = collectApplicationFields(document);
+    const container = widgetContainerFor(document, field.signature);
+    expect(container).toBe(document.querySelector('.fx-field'));
+  });
+
+  it('签名对不上时返回 null', () => {
+    document.body.innerHTML = COMBO;
+    expect(widgetContainerFor(document, 'name=|id=|type=widget|label=不存在')).toBe(null);
+  });
+});
+
+describe('applyWidgetValues', () => {
+  const twoCombos = COMBO + COMBO.replace('学历', '学位');
+
+  it('把值交给驱动器，成功的记进 filled', async () => {
+    document.body.innerHTML = COMBO;
+    const { collectApplicationFields } = await import('./form.js');
+    const [field] = collectApplicationFields(document);
+    const driver = { selectOption: vi.fn(async () => ({ ok: true, value: '本科' })) };
+
+    const result = await applyWidgetValues(document, [{ signature: field.signature, value: '本科' }], { driver });
+    expect(result.filled).toEqual([field.signature]);
+    expect(result.skipped).toEqual([]);
+    expect(driver.selectOption).toHaveBeenCalledWith(document.querySelector('.fx-field'), '本科');
+  });
+
+  it('驱动器失败时带上原因和可选项，不算填上', async () => {
+    document.body.innerHTML = COMBO;
+    const { collectApplicationFields } = await import('./form.js');
+    const [field] = collectApplicationFields(document);
+    const driver = { selectOption: vi.fn(async () => ({ ok: false, reason: 'option_not_found', options: ['本科'] })) };
+
+    const result = await applyWidgetValues(document, [{ signature: field.signature, value: '博士' }], { driver });
+    expect(result.filled).toEqual([]);
+    expect(result.skipped[0]).toMatchObject({ reason: 'option_not_found', options: ['本科'] });
+  });
+
+  it('容器找不到时跳过，不去猜别的控件', async () => {
+    document.body.innerHTML = COMBO;
+    const driver = { selectOption: vi.fn() };
+    const result = await applyWidgetValues(document, [{ signature: 'name=|id=|type=widget|label=没有这个', value: 'x' }], { driver });
+    expect(driver.selectOption).not.toHaveBeenCalled();
+    expect(result.skipped[0]).toMatchObject({ reason: 'not_found' });
+  });
+
+  it('驱动器抛错时算失败而不是整批崩掉', async () => {
+    document.body.innerHTML = twoCombos;
+    const { collectApplicationFields } = await import('./form.js');
+    const fields = collectApplicationFields(document);
+    const driver = {
+      selectOption: vi.fn()
+        .mockRejectedValueOnce(new Error('页面炸了'))
+        .mockResolvedValueOnce({ ok: true, value: '哲学' }),
+    };
+    const result = await applyWidgetValues(document, [
+      { signature: fields[0].signature, value: 'A' },
+      { signature: fields[1].signature, value: '哲学' },
+    ], { driver });
+
+    expect(result.skipped[0]).toMatchObject({ reason: 'driver_error' });
+    expect(result.filled).toEqual([fields[1].signature]);
+  });
+
+  it('没有 widget 值要填时不启动驱动器', async () => {
+    document.body.innerHTML = COMBO;
+    const driver = { selectOption: vi.fn() };
+    expect(await applyWidgetValues(document, [], { driver })).toEqual({ filled: [], skipped: [] });
+    expect(driver.selectOption).not.toHaveBeenCalled();
   });
 });
 

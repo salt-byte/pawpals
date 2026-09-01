@@ -22,7 +22,7 @@
  * 亲眼看过并回了「确认投递」的那个页面上。如果那个标签页已经被关掉，正确的
  * 反应是让任务留在队列里，而不是重新开一个页面把表单交上去。
  */
-const AUTO_OPEN_KINDS = ['inspect', 'upload', 'fill'];
+const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill'];
 
 /** 找到 origin 与任务 URL 相同的标签页；找不到或 URL 解析不了都返回 null。 */
 export function pickTargetTab(taskUrl, tabs) {

@@ -1,7 +1,12 @@
-import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields } from '../application/form.js';
+import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields, widgetContainerFor } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
+import { applyWidgetValues, createPageWidgetDriver } from '../application/widget.js';
+import { syntheticImpl } from '../act/synthetic.js';
+
+/** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
+const widgetDriver = createPageWidgetDriver({ click: (el) => syntheticImpl.click(el, { fast: true }) });
 import { sendToBackground } from './bg-bridge.js';
 
 /**
@@ -61,18 +66,48 @@ async function execute(task) {
   }
 
   if (task.kind === 'fill') {
-    const { filled, skipped } = fillApplicationFields(document, task.payload?.values || []);
+    const values = task.payload?.values || [];
+    const { filled, skipped } = fillApplicationFields(document, values);
 
     // 失焦一次再回读：带延迟校验的表单（Moka 这类）会在失焦时才决定要不要
     // 保留脚本写入的值，不回读就分不清「填进去了」和「填了又被清掉」。
     document.activeElement?.blur?.();
     const { stuck, lost } = verifyFilledFields(document, filled);
 
-    const warnings = formWarnings(fields, document);
+    // 纯 div 模拟的下拉/多选：fillApplicationFields 按 unsupported_widget 跳过
+    // 了它们，这里改用驱动器点开面板选中。放在原生字段之后，因为点开面板会滚动
+    // 页面，先做会干扰上面的回读。
+    const widgetTargets = skipped
+      .filter((item) => item.reason === 'unsupported_widget')
+      .map((item) => values.find((value) => value.signature === item.signature))
+      .filter(Boolean);
+    const widgets = await applyWidgetValues(document, widgetTargets, { driver: widgetDriver });
+
+    const warnings = formWarnings(collectApplicationFields(document), document);
     return {
-      ok: true, filled: stuck, skipped, lost, warnings,
+      ok: true,
+      filled: [...stuck, ...widgets.filled],
+      // widget 的失败带着可选项一起报上去，用户能看到「可选的是这几个」
+      skipped: [...skipped.filter((item) => item.reason !== 'unsupported_widget'), ...widgets.skipped],
+      lost, warnings,
       requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection'),
     };
+  }
+
+  if (task.kind === 'probe') {
+    // 探测自定义控件的可选项：这类控件的选项是点开时才渲染的，inspect 采不到。
+    // 服务端拿到之后才能让模型在合法值里选，而不是自由发挥。
+    const probed = [];
+    for (const field of collectApplicationFields(document).filter((f) => f.type === 'widget')) {
+      const container = widgetContainerFor(document, field.signature);
+      if (!container) continue;
+      try {
+        probed.push({ signature: field.signature, label: field.label, options: await widgetDriver.probeOptions(container) });
+      } catch (error) {
+        probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
+      }
+    }
+    return { ok: true, probed };
   }
   if (task.kind === 'submit') {
     const warnings = formWarnings(fields, document);
