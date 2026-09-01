@@ -1,20 +1,26 @@
-import { createOfficialTaskClient } from '../background/official-task-client.js';
 import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
+import { sendToBackground } from './bg-bridge.js';
 
-const client = createOfficialTaskClient();
-let busy = false;
+/**
+ * 页面侧的执行器。这里**不碰网络**——MV3 的 content script 跨域 fetch 走页面
+ * 的 origin、受 CORS 管，直连 localhost:3000 会稳定拿到 Failed to fetch。
+ * 网络全部交给 service worker（见 background/official-task-router.js）。
+ *
+ * 本文件只做两件事：定时发心跳把 service worker 唤醒；收到派下来的任务就在
+ * 页面里执行并把结果回给它。
+ */
 
-async function reportActivePage() {
-  try {
-    await fetch('http://localhost:3000/api/internal/official-application-context', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: location.href, title: document.title, provider: detectApplicationProvider(location.href) }),
-    });
-  } catch (error) {
-    console.warn('[pawpals official agent] cannot report current page', error);
-  }
+function toBackground(message) {
+  return sendToBackground((m) => chrome.runtime.sendMessage(m), message);
+}
+
+function reportActivePage() {
+  return toBackground({
+    type: 'OFFICIAL_PAGE_CONTEXT',
+    payload: { url: location.href, title: document.title, provider: detectApplicationProvider(location.href) },
+  });
 }
 
 function samePage(task) {
@@ -62,25 +68,24 @@ async function execute(task) {
   return { ok: false, error: `未知官网任务：${task.kind}` };
 }
 
-async function poll() {
-  if (busy) return;
-  busy = true;
-  try {
-    const task = await client.next();
-    if (!task || !samePage(task)) return;
-    const result = await execute(task);
-    await client.complete(task.id, result);
-  } catch (error) {
-    console.warn('[pawpals official agent]', error);
-  } finally { busy = false; }
-}
-
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== 'OFFICIAL_AGENT_STATUS') return false;
-  sendResponse({ ok: true, url: location.href, provider: detectApplicationProvider(location.href) });
+  if (message?.type === 'OFFICIAL_AGENT_STATUS') {
+    sendResponse({ ok: true, url: location.href, provider: detectApplicationProvider(location.href) });
+    return false;
+  }
+  if (message?.type === 'OFFICIAL_TASK') {
+    // service worker 已按 origin 选过标签页，这里再挡一道：跨站任务绝不执行。
+    if (!message.task || !samePage(message.task)) {
+      sendResponse({ ok: false, error: '任务与当前页面不同源' });
+      return false;
+    }
+    execute(message.task)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
   return false;
 });
 
 void reportActivePage();
-void poll();
-setInterval(poll, 1500);
+setInterval(() => { void toBackground({ type: 'OFFICIAL_TICK' }); }, 1500);

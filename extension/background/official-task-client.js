@@ -15,5 +15,18 @@ export function createOfficialTaskClient({ fetchImpl, base = SERVER_BASE } = {})
       if (!response.ok) throw new Error(`任务回报失败：${response.status}`);
       return response.json();
     },
+    /**
+     * 上报当前打开的官网申请页。失败只记日志不抛错——上下文丢一次不该把
+     * 轮询循环打断。
+     */
+    async reportContext(payload) {
+      try {
+        await doFetch(`${base}/api/internal/official-application-context`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+      } catch (error) {
+        console.warn('[pawpals] cannot report page context', error);
+      }
+    },
   };
 }
