@@ -4019,7 +4019,12 @@ async function startServer() {
     }
     ws.on("message", (raw) => {
       const message = parseClientMessage(raw);
-      if (message) officialApplicationQueue.complete(message.id, message.result);
+      if (!message) return;
+      // 这条链路（推送 → 开页 → 页面执行 → 回报）在服务端本来完全不可观测，
+      // 出问题时分不清「扩展没收到」「页面没执行」还是「结果丢了」。
+      const r: any = message.result || {};
+      console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} provider=${r.provider ?? "-"} fields=${Array.isArray(r.fields) ? r.fields.length : "-"} url=${r.url ?? "-"}`);
+      officialApplicationQueue.complete(message.id, message.result);
     });
     ws.on("close", () => officialTaskHub.remove(ws as any));
     ws.on("error", () => officialTaskHub.remove(ws as any));

@@ -1,6 +1,7 @@
 import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
+import { applyFileUploads } from '../application/file-upload.js';
 import { sendToBackground } from './bg-bridge.js';
 
 /**
@@ -52,6 +53,13 @@ async function execute(task) {
     await remember({ url: location.href, provider, fields });
     return { ok: true, provider, url: location.href, title: document.title, fields, warnings, hasSubmit: Boolean(findSubmitControl(document)) };
   }
+  if (task.kind === 'upload') {
+    // 上传单独成一拍：不少站点解析简历后会把结果覆盖到表单上，上传完立刻填
+    // 等于白填。这一拍只装文件，等页面解析完再由后续的 inspect + fill 接手。
+    const { uploaded, skipped } = applyFileUploads(document, task.payload?.uploads || []);
+    return { ok: true, uploaded, skipped, warnings: formWarnings(collectApplicationFields(document), document) };
+  }
+
   if (task.kind === 'fill') {
     const { filled, skipped } = fillApplicationFields(document, task.payload?.values || []);
 

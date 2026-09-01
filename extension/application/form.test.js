@@ -176,3 +176,34 @@ describe('fieldKind：真机暴露的中文标签', () => {
   });
 });
 
+describe('标签不跨控件', () => {
+  it('标签和它的输入框之间隔着另一个输入框时，不能算这个框的标签', () => {
+    document.body.innerHTML =
+      '<div><div class="field-name">简历附件</div><input type="file" name="resume"><input type="text" name="email"></div>';
+    const [resume, email] = collectApplicationFields();
+    expect(resume.label).toBe('简历附件');
+    expect(email.label).toBe('');
+  });
+});
+
+describe('标签来源不能是脚本或样式', () => {
+  it('script 内容不能当标签——真机上曾把页面的 access token 当成了字段名', () => {
+    document.body.innerHTML =
+      '<div><script>window.jdy_access_token = "SECRET123";<\/script><input type="text"></div>';
+    const [field] = collectApplicationFields();
+    expect(field.label).toBe('');
+    expect(field.signature).not.toContain('SECRET');
+  });
+
+  it('style 内容同样不能当标签', () => {
+    document.body.innerHTML = '<div><style>.a{color:red}<\/style><input type="text"></div>';
+    expect(collectApplicationFields()[0].label).toBe('');
+  });
+
+  it('脚本旁边真正的标签仍然取得到', () => {
+    document.body.innerHTML =
+      '<div><script>var x=1;<\/script><div class="field-name">邮箱</div><input type="text"></div>';
+    expect(collectApplicationFields()[0].label).toBe('邮箱');
+  });
+});
+

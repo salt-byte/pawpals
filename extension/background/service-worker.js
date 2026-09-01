@@ -1,6 +1,7 @@
 import { createSessionClient, SERVER_BASE } from './session-client.js';
 import { createOfficialTaskClient } from './official-task-client.js';
 import { createOfficialDispatcher } from './official-task-router.js';
+import { createTabGrouper } from './tab-group.js';
 
 const client = createSessionClient();
 const officialClient = createOfficialTaskClient();
@@ -33,12 +34,26 @@ function sendToServer(message) {
   }
 }
 
+/**
+ * 扩展自己开的标签页会被归进一个带名字的分组，用户一眼看得出是谁开的。
+ * 归组失败不影响投递（见 tab-group.js）。
+ */
+const tabGrouper = createTabGrouper({
+  groupTabs: (options) => chrome.tabs.group(options),
+  updateGroup: (groupId, props) => chrome.tabGroups.update(groupId, props),
+  queryGroups: (query) => chrome.tabGroups.query(query),
+});
+
 const dispatcher = createOfficialDispatcher({
   listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
   sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
   // 自主开页：申请页没开着就自己开一个后台标签页。submit 不在可自动开页的类型
   // 里——提交只发生在用户亲眼确认过的那个页面上。
-  openTab: (url) => chrome.tabs.create({ url, active: false }),
+  openTab: async (url) => {
+    const tab = await chrome.tabs.create({ url, active: false });
+    if (tab?.id) await tabGrouper.add(tab.id);
+    return tab;
+  },
   reportResult: (id, result) => sendToServer({ type: 'result', id, result }),
 });
 

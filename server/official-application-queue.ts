@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 
-export type OfficialTaskKind = "inspect" | "fill" | "submit";
+export type OfficialTaskKind = "inspect" | "upload" | "fill" | "submit";
 export type OfficialApplicationTask = {
   id: string;
   kind: OfficialTaskKind;

@@ -1,6 +1,14 @@
 import { normaliseField } from './schema.js';
 
 const CONTROL_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'OPTION']);
+/**
+ * 这些标签的 textContent 是代码不是文案，绝不能当字段标签。
+ *
+ * 真机在帆软秋招页上把 <script> 里的 window.jdy_access_token = "..." 当成了
+ * 一个字段的标签——标签会进签名、上报给服务端、再进 LLM prompt，等于把页面
+ * 的访问令牌顺着链路泄出去。
+ */
+const NON_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'IFRAME']);
 /** 标签最长取这么多字——再长就不是标签，是说明文字。 */
 const LABEL_MAX = 40;
 /** 往上找容器的层数上限。再高就会取到整个表单区块的标题。 */
@@ -14,11 +22,28 @@ const isLabelish = (text) => Boolean(text) && !/^[\s*·:：)(（）\-—|]+$/.te
 /** class 里带这些词的节点，多半就是字段名。 */
 const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
 
+/**
+ * 标签和它的输入框之间不能隔着另一个输入框。
+ *
+ * 扁平 DOM 里往上找容器很容易找到 body，于是一个没有标签的框会继承隔壁字段的
+ * 标签——单测里 email 框就这样拿到了「简历附件」。签名因此变形，填写会定位失败；
+ * 更糟的是分类可能被带偏（一个文本框被当成简历）。
+ */
+function crossesAnotherControl(leaf, el, node) {
+  for (const control of node.querySelectorAll('input, textarea, select')) {
+    if (control === el) continue;
+    const afterLeaf = (leaf.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    const beforeEl = (control.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    if (afterLeaf && beforeEl) return true;
+  }
+  return false;
+}
+
 /** 收集容器里所有"像标签"的叶子节点。 */
 function labelLeaves(node) {
   const leaves = [];
   for (const candidate of node.querySelectorAll('*')) {
-    if (CONTROL_TAGS.has(candidate.tagName)) continue;
+    if (CONTROL_TAGS.has(candidate.tagName) || NON_TEXT_TAGS.has(candidate.tagName)) continue;
     if (candidate.querySelector('*')) continue; // 只看叶子节点
     const text = tidy(candidate.textContent).split('\n')[0];
     if (isLabelish(text)) leaves.push({ el: candidate, text: text.slice(0, LABEL_MAX) });
@@ -58,6 +83,7 @@ function containerLabel(el) {
   for (const node of ancestors) {
     const hinted = labelLeaves(node).find(
       (leaf) => LABEL_CLASS_HINT.test(String(leaf.el.className || '')) && usable(leaf.text)
+        && !crossesAnotherControl(leaf.el, el, node)
     );
     if (hinted) return hinted.text;
   }
@@ -66,6 +92,7 @@ function containerLabel(el) {
   for (const node of ancestors) {
     const preceding = labelLeaves(node).filter(
       (leaf) => usable(leaf.text) && (el.compareDocumentPosition(leaf.el) & Node.DOCUMENT_POSITION_PRECEDING) !== 0
+        && !crossesAnotherControl(leaf.el, el, node)
     );
     if (preceding.length) return preceding[preceding.length - 1].text;
   }
