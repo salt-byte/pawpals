@@ -188,15 +188,25 @@ function collectWidgetEntries(root, startIndex) {
 }
 
 /**
+ * 一次拿到所有 widget 字段及其容器。
+ *
+ * probe 要逐个点开每个 widget，如果对每个字段都调一次 widgetContainerFor，
+ * 内部会把整页重新扫一遍——15 个 widget 就是 15 次全页扫描。
+ */
+export function collectWidgetTargets(root = document) {
+  const native = [...root.querySelectorAll('input, textarea, select')]
+    .filter((el) => !el.disabled && !['hidden', 'submit', 'button', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()));
+  return collectWidgetEntries(root, native.length);
+}
+
+/**
  * 按签名找回 widget 的容器元素。
  *
  * widget 没有对应的原生控件，fillApplicationFields 那套 elements[index] 的
  * 定位办法用不上，驱动器需要拿到容器本身才能点开它。
  */
 export function widgetContainerFor(root = document, signature) {
-  const native = [...root.querySelectorAll('input, textarea, select')]
-    .filter((el) => !el.disabled && !['hidden', 'submit', 'button', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()));
-  const hit = collectWidgetEntries(root, native.length).find((entry) => entry.field.signature === signature);
+  const hit = collectWidgetTargets(root).find((entry) => entry.field.signature === signature);
   return hit ? hit.container : null;
 }
 

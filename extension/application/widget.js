@@ -19,14 +19,23 @@ import { widgetContainerFor } from './form.js';
 
 /** 选项条目长什么样。求差之后再按这个筛，避免把整个面板外壳也算进去。 */
 const OPTION_HINT = /option|item|cell|choice/i;
+/** OPTION_HINT 的选择器版本。先用它缩小候选集，避免遍历整棵树时强制布局。 */
+const OPTION_SELECTOR = '[class*="option"],[class*="Option"],[class*="item"],[class*="Item"],[class*="cell"],[class*="Cell"],[class*="choice"],[class*="Choice"]';
 const PANEL_HINT = /dropdown|popup|popper|menu|select-panel|options/i;
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
 export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, root = document }) {
-  /** 当前可见的、像选项的元素。用于点开前后求差。 */
+  /**
+   * 当前可见的、像选项的元素。用于点开前后求差。
+   *
+   * 必须先用原生选择器把候选集缩小，不能遍历 querySelectorAll('*')：isVisible
+   * 要读 getBoundingClientRect，对每个元素调一次等于强制布局。真机上帆软那页
+   * 几千个元素，每个 widget 要求差 4 次、15 个 widget 就是十几万次强制布局，
+   * 渲染进程直接卡死——probe 任务 60 秒都回不来。
+   */
   const optionNodes = () =>
-    [...root.querySelectorAll('*')].filter(
+    [...root.querySelectorAll(OPTION_SELECTOR)].filter(
       (el) => OPTION_HINT.test(String(el.className || '')) && isVisible(el) && !el.querySelector('*')
     );
 

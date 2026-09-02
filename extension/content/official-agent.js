@@ -1,4 +1,4 @@
-import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields, widgetContainerFor } from '../application/form.js';
+import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields, collectWidgetTargets } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
@@ -98,9 +98,9 @@ async function execute(task) {
     // 探测自定义控件的可选项：这类控件的选项是点开时才渲染的，inspect 采不到。
     // 服务端拿到之后才能让模型在合法值里选，而不是自由发挥。
     const probed = [];
-    for (const field of collectApplicationFields(document).filter((f) => f.type === 'widget')) {
-      const container = widgetContainerFor(document, field.signature);
-      if (!container) continue;
+    // 一次拿全容器：逐个 widgetContainerFor 会把整页重扫一遍，15 个字段就是
+    // 15 次全页扫描。
+    for (const { field, container } of collectWidgetTargets(document)) {
       try {
         probed.push({ signature: field.signature, label: field.label, options: await widgetDriver.probeOptions(container) });
       } catch (error) {
