@@ -151,6 +151,40 @@ export async function applyWidgetValues(root = document, values = [], { driver, 
   return { filled, skipped };
 }
 
+/**
+ * 逐个探测 widget 的可选项，带边界。
+ *
+ * 真机实测：单个 widget 探测约 2.8 秒——级联控件（意向岗位大类这类）点开时要
+ * 向服务器拉选项，快不了。帆软那页 15 个 widget 全探一遍要 42 秒，任务直接
+ * 超时、队列被堵死。
+ *
+ * 所以给两个边界：
+ *   signatures  只探服务端真正要的那几个，不要每次全量
+ *   budgetMs    超预算就停，返回已探到的并标记 partial
+ *
+ * 宁可返回一半并说清楚是一半，也不要让整个任务超时——超时的任务会卡在队首，
+ * 后面所有投递都动不了。
+ */
+export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, now = () => Date.now() } = {}) {
+  const probed = [];
+  if (!driver || targets.length === 0) return { probed, partial: false };
+
+  const wanted = Array.isArray(signatures) && signatures.length ? new Set(signatures) : null;
+  const list = wanted ? targets.filter((t) => wanted.has(t.field.signature)) : targets;
+
+  const startedAt = now();
+  let partial = false;
+  for (const { field, container } of list) {
+    if (now() - startedAt >= budgetMs) { partial = true; break; }
+    try {
+      probed.push({ signature: field.signature, label: field.label, options: await driver.probeOptions(container) });
+    } catch (error) {
+      probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
+    }
+  }
+  return { probed, partial };
+}
+
 /** 值区域的 class 特征。与 form.js 里那份保持一致。 */
 const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox|radio|switch|cascader/i;
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWidgetDriver, applyWidgetValues } from './widget.js';
+import { createWidgetDriver, applyWidgetValues, probeWidgets } from './widget.js';
 import { widgetContainerFor } from './form.js';
 
 beforeEach(() => { document.body.innerHTML = ''; });
@@ -231,6 +231,63 @@ describe('applyWidgetValues', () => {
     const driver = { selectOption: vi.fn() };
     expect(await applyWidgetValues(document, [], { driver })).toEqual({ filled: [], skipped: [] });
     expect(driver.selectOption).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 真机实测：单个 widget 探测约 2.8 秒（级联控件点开时要向服务器拉选项）。
+ * 帆软那页 15 个 widget 全探一遍要 42 秒，任务直接超时。所以探测必须有边界。
+ */
+describe('probeWidgets', () => {
+  const target = (label) => ({ field: { signature: `sig-${label}`, label }, container: {} });
+
+  it('逐个探测并带上标签和选项', async () => {
+    const driver = { probeOptions: vi.fn(async () => ['甲', '乙']) };
+    const result = await probeWidgets([target('学历'), target('学位')], { driver });
+
+    expect(result.probed).toEqual([
+      { signature: 'sig-学历', label: '学历', options: ['甲', '乙'] },
+      { signature: 'sig-学位', label: '学位', options: ['甲', '乙'] },
+    ]);
+    expect(result.partial).toBe(false);
+  });
+
+  it('只探测指定的签名——服务端通常只需要几个字段的选项', async () => {
+    const driver = { probeOptions: vi.fn(async () => ['甲']) };
+    const result = await probeWidgets([target('学历'), target('学位')], { driver, signatures: ['sig-学位'] });
+
+    expect(driver.probeOptions).toHaveBeenCalledTimes(1);
+    expect(result.probed.map((p) => p.label)).toEqual(['学位']);
+  });
+
+  it('超出时间预算就停下并标记 partial，不把整个任务拖到超时', async () => {
+    let clock = 0;
+    const driver = { probeOptions: vi.fn(async () => { clock += 3000; return ['甲']; }) };
+    const result = await probeWidgets([target('a'), target('b'), target('c')], {
+      driver, budgetMs: 5000, now: () => clock,
+    });
+
+    expect(result.probed).toHaveLength(2); // 第三个开始前预算已用尽
+    expect(result.partial).toBe(true);
+  });
+
+  it('某个控件探测抛错时记下来继续，不中断整批', async () => {
+    const driver = {
+      probeOptions: vi.fn()
+        .mockRejectedValueOnce(new Error('面板炸了'))
+        .mockResolvedValueOnce(['甲']),
+    };
+    const result = await probeWidgets([target('a'), target('b')], { driver });
+
+    expect(result.probed[0]).toMatchObject({ label: 'a', options: [], error: expect.any(String) });
+    expect(result.probed[1]).toMatchObject({ label: 'b', options: ['甲'] });
+    expect(result.partial).toBe(false);
+  });
+
+  it('没有目标时返回空结果，不启动驱动器', async () => {
+    const driver = { probeOptions: vi.fn() };
+    expect(await probeWidgets([], { driver })).toEqual({ probed: [], partial: false });
+    expect(driver.probeOptions).not.toHaveBeenCalled();
   });
 });
 

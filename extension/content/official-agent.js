@@ -2,7 +2,7 @@ import { collectApplicationFields, fillApplicationFields, findSubmitControl, for
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
-import { applyWidgetValues, createPageWidgetDriver } from '../application/widget.js';
+import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
@@ -97,17 +97,14 @@ async function execute(task) {
   if (task.kind === 'probe') {
     // 探测自定义控件的可选项：这类控件的选项是点开时才渲染的，inspect 采不到。
     // 服务端拿到之后才能让模型在合法值里选，而不是自由发挥。
-    const probed = [];
-    // 一次拿全容器：逐个 widgetContainerFor 会把整页重扫一遍，15 个字段就是
-    // 15 次全页扫描。
-    for (const { field, container } of collectWidgetTargets(document)) {
-      try {
-        probed.push({ signature: field.signature, label: field.label, options: await widgetDriver.probeOptions(container) });
-      } catch (error) {
-        probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
-      }
-    }
-    return { ok: true, probed };
+    //
+    // 带边界：单个控件真机实测约 2.8 秒，全量探完会让任务超时并把队列堵死。
+    const { probed, partial } = await probeWidgets(collectWidgetTargets(document), {
+      driver: widgetDriver,
+      signatures: task.payload?.signatures,
+      budgetMs: Number(task.payload?.budgetMs) || 20000,
+    });
+    return { ok: true, probed, partial };
   }
   if (task.kind === 'submit') {
     const warnings = formWarnings(fields, document);
