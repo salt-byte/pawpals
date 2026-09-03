@@ -14,8 +14,16 @@ const officialClient = createOfficialTaskClient();
  * 发现，而那整套心跳只是为了绕开「服务端推不过来」这一件事。
  *
  * 换成推送之后，服务端 enqueue 时直接写进这条连接，心跳、busy 锁、每 1.5 秒
- * 一次的 GET 全部不再需要。顺带解决了 MV3 的保活问题：一条活着的 WebSocket
- * 本身就会重置 service worker 的空闲计时器。
+ * 一次的 GET 全部不再需要。
+ *
+ * 注意：曾以为「一条活着的 WebSocket 会让 service worker 不被回收」，真机日志
+ * 推翻了这个说法——连接日志里是四十多组「已连接 → 断开」的循环，service
+ * worker 一直在被回收。真正让链路可用的是下面那个 30 秒的 alarm 看门狗：它把
+ * service worker 拉起来重连，重连时再从队列补发积压任务。
+ *
+ * 所以「即时推送」要打折扣：任务入队时扩展常常处于断开状态，broadcast 送达 0
+ * 个客户端，实际是靠重连补发拿到的（实测端到端约 2 秒）。这仍然远好于轮询——
+ * 空闲时零请求、也不需要页面开着才有心跳——但它不是零延迟。
  *
  * 网络仍然只能在这里做——content script 的跨域 fetch 受页面 origin 的 CORS 管，
  * 直连 localhost 会稳定失败（详见 official-task-router.js 顶部注释）。
