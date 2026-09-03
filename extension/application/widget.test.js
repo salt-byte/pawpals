@@ -245,7 +245,7 @@ describe('probeWidgets', () => {
     const driver = { probeOptions: vi.fn(async () => ['甲', '乙']) };
     const result = await probeWidgets([target('学历'), target('学位')], { driver });
 
-    expect(result.probed).toEqual([
+    expect(result.probed).toMatchObject([
       { signature: 'sig-学历', label: '学历', options: ['甲', '乙'] },
       { signature: 'sig-学位', label: '学位', options: ['甲', '乙'] },
     ]);
@@ -288,6 +288,34 @@ describe('probeWidgets', () => {
     const driver = { probeOptions: vi.fn() };
     expect(await probeWidgets([], { driver })).toEqual({ probed: [], partial: false });
     expect(driver.probeOptions).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 真机踩到：帆软的「本科学校」下拉是全国高校列表，探回来 2604 个选项，两个学校
+ * 字段合起来 5208 个——塞进 LLM prompt 直接把请求撑爆（fetch failed）。
+ *
+ * 这类字段本质是「可搜索」而不是「可枚举」，选项列表对模型没有意义。
+ */
+describe('probeWidgets：超长选项要截断并标记', () => {
+  const target = (label) => ({ field: { signature: `sig-${label}`, label }, container: {} });
+
+  it('选项超过上限时截断，并标记 truncated', async () => {
+    const many = Array.from({ length: 500 }, (_, i) => `选项${i}`);
+    const driver = { probeOptions: vi.fn(async () => many) };
+    const { probed } = await probeWidgets([target('本科学校')], { driver, maxOptions: 60 });
+
+    expect(probed[0].options).toHaveLength(60);
+    expect(probed[0].truncated).toBe(true);
+    expect(probed[0].optionCount).toBe(500);
+  });
+
+  it('选项不超上限时不标记', async () => {
+    const driver = { probeOptions: vi.fn(async () => ['本科', '研究生']) };
+    const { probed } = await probeWidgets([target('学历')], { driver, maxOptions: 60 });
+
+    expect(probed[0].options).toEqual(['本科', '研究生']);
+    expect(probed[0].truncated).toBe(false);
   });
 });
 

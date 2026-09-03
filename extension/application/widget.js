@@ -165,7 +165,7 @@ export async function applyWidgetValues(root = document, values = [], { driver, 
  * 宁可返回一半并说清楚是一半，也不要让整个任务超时——超时的任务会卡在队首，
  * 后面所有投递都动不了。
  */
-export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, now = () => Date.now() } = {}) {
+export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, now = () => Date.now() } = {}) {
   const probed = [];
   if (!driver || targets.length === 0) return { probed, partial: false };
 
@@ -177,7 +177,16 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
   for (const { field, container } of list) {
     if (now() - startedAt >= budgetMs) { partial = true; break; }
     try {
-      probed.push({ signature: field.signature, label: field.label, options: await driver.probeOptions(container) });
+      const all = await driver.probeOptions(container);
+      // 截断超长列表。真机上帆软的「本科学校」是全国高校下拉，探回来 2604 个，
+      // 两个学校字段合起来 5208 个——塞进 LLM prompt 直接把请求撑爆。这类字段
+      // 本质是「可搜索」而不是「可枚举」，完整列表对模型没有意义。
+      probed.push({
+        signature: field.signature, label: field.label,
+        options: all.slice(0, maxOptions),
+        optionCount: all.length,
+        truncated: all.length > maxOptions,
+      });
     } catch (error) {
       probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
     }

@@ -5114,6 +5114,15 @@ async function startServer() {
     res.json({ ok: true, task });
   });
 
+  // 读任务结果。队列一直在存结果，但此前没有任何 HTTP 端点能读到它——只有内部
+  // 的 waitForOfficialTask 拿得到，于是外部无法编排「inspect 拿字段 → probe 拿
+  // 选项 → 取值 → fill」这条链路。
+  app.get("/api/official-applications/:taskId/result", (req: any, res: any) => {
+    const result = officialApplicationQueue.result(String(req.params.taskId));
+    if (!result) return res.status(404).json({ ok: false, error: "结果还没产生或任务不存在" });
+    res.json({ ok: true, result });
+  });
+
   // 只有用户在对话确认后才能调用；确认令牌单次使用，生成真正的 submit 任务。
   app.post("/api/official-applications/:confirmationId/confirm", (req: any, res: any) => {
     const task = officialApplicationQueue.confirm(req.params.confirmationId);
