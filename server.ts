@@ -4012,6 +4012,7 @@ async function startServer() {
 
   officialWss.on("connection", (ws) => {
     officialTaskHub.add(ws as any);
+    console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
     // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
     const backlog = officialApplicationQueue.next();
     if (backlog) {
@@ -4023,10 +4024,13 @@ async function startServer() {
       // 这条链路（推送 → 开页 → 页面执行 → 回报）在服务端本来完全不可观测，
       // 出问题时分不清「扩展没收到」「页面没执行」还是「结果丢了」。
       const r: any = message.result || {};
-      console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} provider=${r.provider ?? "-"} fields=${Array.isArray(r.fields) ? r.fields.length : "-"} url=${r.url ?? "-"}`);
+      const detail = Array.isArray(r.probed)
+        ? `probed=${r.probed.length}${r.partial ? "(partial)" : ""} ${r.probed.map((p: any) => `${p.label}:${(p.options || []).length}`).join(" ")}`
+        : `fields=${Array.isArray(r.fields) ? r.fields.length : "-"}`;
+      console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} ready=${r.formReady ?? "-"} ${detail}`);
       officialApplicationQueue.complete(message.id, message.result);
     });
-    ws.on("close", () => officialTaskHub.remove(ws as any));
+    ws.on("close", () => { officialTaskHub.remove(ws as any); console.log(`[official] 扩展断开，在线 ${officialTaskHub.size()}`); });
     ws.on("error", () => officialTaskHub.remove(ws as any));
   });
 

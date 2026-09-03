@@ -3,6 +3,7 @@ import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
+import { waitForFormReady } from '../application/ready.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
@@ -51,18 +52,22 @@ async function remember(observation) {
 }
 
 async function execute(task) {
+  // 先等表单渲染完。扩展自主开页后 PAGE_READY 在 document_idle 就发了，而简道云
+  // 这类 SPA 那时还没把控件渲染出来——真机上因此出过一次 ok=true 但 probed=0 的
+  // 假成功。等不到就带着 formReady:false 继续，让上游知道结果可能不完整。
+  const readiness = await waitForFormReady({ countFields: () => collectApplicationFields(document).length });
   const fields = collectApplicationFields(document);
   if (task.kind === 'inspect') {
     const provider = detectApplicationProvider(location.href);
     const warnings = formWarnings(fields, document);
     await remember({ url: location.href, provider, fields });
-    return { ok: true, provider, url: location.href, title: document.title, fields, warnings, hasSubmit: Boolean(findSubmitControl(document)) };
+    return { ok: true, provider, url: location.href, title: document.title, fields, warnings, formReady: readiness.ready, hasSubmit: Boolean(findSubmitControl(document)) };
   }
   if (task.kind === 'upload') {
     // 上传单独成一拍：不少站点解析简历后会把结果覆盖到表单上，上传完立刻填
     // 等于白填。这一拍只装文件，等页面解析完再由后续的 inspect + fill 接手。
     const { uploaded, skipped } = applyFileUploads(document, task.payload?.uploads || []);
-    return { ok: true, uploaded, skipped, warnings: formWarnings(collectApplicationFields(document), document) };
+    return { ok: true, uploaded, skipped, formReady: readiness.ready, warnings: formWarnings(collectApplicationFields(document), document) };
   }
 
   if (task.kind === 'fill') {
@@ -89,7 +94,7 @@ async function execute(task) {
       filled: [...stuck, ...widgets.filled],
       // widget 的失败带着可选项一起报上去，用户能看到「可选的是这几个」
       skipped: [...skipped.filter((item) => item.reason !== 'unsupported_widget'), ...widgets.skipped],
-      lost, warnings,
+      lost, warnings, formReady: readiness.ready,
       requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection'),
     };
   }
@@ -104,7 +109,7 @@ async function execute(task) {
       signatures: task.payload?.signatures,
       budgetMs: Number(task.payload?.budgetMs) || 20000,
     });
-    return { ok: true, probed, partial };
+    return { ok: true, probed, partial, formReady: readiness.ready };
   }
   if (task.kind === 'submit') {
     const warnings = formWarnings(fields, document);
