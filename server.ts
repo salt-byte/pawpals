@@ -3989,9 +3989,33 @@ async function startServer() {
     officialWss.handleUpgrade(req, socket as any, head, (ws) => officialWss.emit("connection", ws, req));
   });
 
+  /**
+   * 心跳探活。
+   *
+   * MV3 的 service worker 被回收时，socket 未必会干净地关闭——服务端可能收不到
+   * close，readyState 仍是 OPEN，broadcast 就把任务写进一个没人听的连接里，任务
+   * 静默丢失。真机上出现过：连接日志显示「在线 1」且几分钟没有任何断开，而这段
+   * 时间 service worker 本该被回收重连几十次。
+   *
+   * 每 15 秒 ping 一次，上一轮没回 pong 的直接掐掉——扩展的看门狗会重连。
+   */
+  const alive = new WeakSet<any>();
+  setInterval(() => {
+    for (const ws of officialWss.clients) {
+      if (!alive.has(ws)) { console.log("[official] 连接无响应，掐掉等重连"); ws.terminate(); continue; }
+      alive.delete(ws);
+      try { ws.ping(); } catch { /* 已经断了 */ }
+    }
+  }, 15000);
+
   officialWss.on("connection", (ws) => {
+    alive.add(ws);
+    ws.on("pong", () => alive.add(ws));
     officialTaskHub.add(ws as any);
     console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
+    // 新连接意味着上一个 service worker 已经被回收，它内存里那些还没派出去的
+    // 任务都没了。作废租约，让它们能立刻重新派发，而不是干等到租期结束。
+    officialApplicationQueue.releaseLeases();
     // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
     const backlog = officialApplicationQueue.next();
     if (backlog) {
@@ -5086,6 +5110,9 @@ async function startServer() {
 
   app.post("/api/internal/official-application-task-done", (req: any, res: any) => {
     const { id, result } = req.body || {};
+    // 谁在用这条 HTTP 通路？扩展本该走 WebSocket 回报。真机上出现过「任务完成了
+    // 但 WebSocket 的 complete 从没被调用」，说明有别的东西在走这里。
+    console.log(`[official/http] 有客户端经 HTTP 回报结果 id=${String(id).slice(0, 24)} ua=${String(req.headers["user-agent"] || "-").slice(0, 60)}`);
     if (!id || !officialApplicationQueue.complete(String(id), result || { ok: false, error: "扩展未返回结果" })) {
       return res.status(404).json({ ok: false, error: "任务不存在或已完成" });
     }

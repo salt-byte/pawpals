@@ -115,3 +115,41 @@ describe("租约与过期：卡住的任务不能堵死队列", () => {
   });
 });
 
+
+/**
+ * 真机踩到的机制交互：MV3 的 service worker 会被反复回收，扩展里那个「收到但
+ * 还没派出去」的 pending 是内存态，回收就没了。而服务端的租约是 60 秒——扩展
+ * 重连时 next() 因为还在租期内返回 null，补发不了，任务就这么悬着。
+ *
+ * 租约的前提是「领走的人还活着」。一条新连接意味着上一个持有者已经没了，那些
+ * 租约就该作废。
+ */
+describe("releaseLeases：新连接作废旧租约", () => {
+  const draft = { url: "https://jobs.example.com/1", company: "Example", title: "PM" };
+
+  it("作废之后，租期内的任务也能立刻重新派发", () => {
+    let clock = 0;
+    const queue = new OfficialApplicationQueue({ now: () => clock, leaseMs: 60000 });
+    const task = queue.enqueue({ ...draft, kind: "inspect" });
+
+    expect(queue.next()?.id).toBe(task.id);
+    expect(queue.next()).toBeNull();      // 租期内不重复派
+
+    queue.releaseLeases();                 // 扩展重连
+    expect(queue.next()?.id).toBe(task.id); // 立刻可以再派
+  });
+
+  it("不影响已完成的任务", () => {
+    const queue = new OfficialApplicationQueue();
+    const task = queue.enqueue({ ...draft, kind: "inspect" });
+    queue.next();
+    queue.complete(task.id, { ok: true });
+    queue.releaseLeases();
+    expect(queue.next()).toBeNull();
+  });
+
+  it("队列为空时作废租约不出错", () => {
+    const queue = new OfficialApplicationQueue();
+    expect(() => queue.releaseLeases()).not.toThrow();
+  });
+})

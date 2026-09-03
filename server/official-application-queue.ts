@@ -93,6 +93,17 @@ export class OfficialApplicationQueue {
     return null;
   }
 
+  /**
+   * 作废所有租约，让队列里的任务立刻可以重新派发。
+   *
+   * 扩展重连时调用。租约的前提是「领走的人还活着」——MV3 的 service worker 被
+   * 回收后，它内存里那些还没派出去的任务就没了，而租约还挂着，任务会一直悬到
+   * 租期结束。一条新连接意味着上一个持有者已经没了。
+   */
+  releaseLeases(): void {
+    this.leases.clear();
+  }
+
   complete(id: string, result: TaskResult): boolean {
     if (!this.tasks.has(id)) return false;
     this.tasks.delete(id);
