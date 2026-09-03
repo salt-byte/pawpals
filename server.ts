@@ -2501,7 +2501,9 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           const raw = await chatExtractJson<{ values?: unknown }>(
             "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
             buildAutofillPrompt({ fields, profileText, ctx: fillCtx }),
-            { max_tokens: 2000 }
+            // 纯映射任务不需要推理。推理 token 会算进 max_tokens，字段一多就把
+            // 预算吃光、content 返回空（真机上 8 个字段时就这样）。
+            { max_tokens: 4000, reasoning_effort: "minimal" }
           );
           ({ values, rejected } = validateAutofillPlan(raw?.values, fields, profileText));
         } catch (error) {

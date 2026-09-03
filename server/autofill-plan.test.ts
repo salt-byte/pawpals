@@ -133,3 +133,60 @@ describe("validateAutofillPlan", () => {
     expect(values).toEqual([]);
   });
 });
+
+/**
+ * 真机踩到：SOURCE_MIN_LENGTH = 4 让 3 个字的中文姓名永远过不了 source 校验。
+ * 用真实简历跑，「邓雨蝶」被判 unsourced——最基本的字段填不上。
+ *
+ * 长度是个糟糕的代理指标：4 个拉丁字母几乎不携带信息，3 个汉字的姓名却高度
+ * 特异。真正要的保证是「引用得包含要填的值」——指给我看这个值出自哪里。
+ */
+describe("source 校验：以「引用包含值」代替长度阈值", () => {
+  const field = (over: any = {}) => ({
+    signature: "sig-1", label: "姓名", kind: "custom", type: "text", required: true, options: [], ...over,
+  });
+
+  it("3 个字的中文姓名能通过", () => {
+    const profile = "邓雨蝶\n手机：15996610829";
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-1", value: "邓雨蝶", source: "邓雨蝶" }],
+      [field()], profile
+    );
+    expect(plan.values).toEqual([{ signature: "sig-1", value: "邓雨蝶" }]);
+  });
+
+  it("引用在档案里但不包含要填的值时拦下——那不叫有出处", () => {
+    const profile = "清华大学 数据传播双硕士项目";
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-1", value: "北京大学", source: "清华大学" }],
+      [field()], profile
+    );
+    expect(plan.values).toEqual([]);
+    expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
+  });
+
+  it("有 options 的字段例外：值来自表单选项，引用只需证明依据在档案里", () => {
+    const profile = "清华大学 数据传播双硕士项目";
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-1", value: "研究生", source: "数据传播双硕士项目" }],
+      [field({ options: ["本科", "研究生"] })], profile
+    );
+    expect(plan.values).toEqual([{ signature: "sig-1", value: "研究生" }]);
+  });
+
+  it("引用压根不在档案里，一律拦下", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-1", value: "邓雨蝶", source: "邓雨蝶" }],
+      [field()], "另一个人的简历"
+    );
+    expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
+  });
+
+  it("单字符引用仍然拦下，避免退化匹配", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-1", value: "邓", source: "邓" }],
+      [field()], "邓雨蝶"
+    );
+    expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
+  });
+});

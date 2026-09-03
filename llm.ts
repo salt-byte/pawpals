@@ -180,7 +180,7 @@ export async function chatCompletionStream(options: ChatCompletionOptions): Prom
 export async function chatExtractJson<T = any>(
   systemPrompt: string,
   userContent: string,
-  options?: { max_tokens?: number; signal?: AbortSignal }
+  options?: { max_tokens?: number; signal?: AbortSignal; reasoning_effort?: ChatCompletionOptions["reasoning_effort"] }
 ): Promise<T | null> {
   const result = await chatCompletion({
     messages: [
@@ -188,6 +188,10 @@ export async function chatExtractJson<T = any>(
       { role: "user", content: userContent },
     ],
     max_tokens: options?.max_tokens || 300,
+    // 推理 token 也算进 max_tokens：抽取类任务推理花掉预算就没有 content 了。
+    // 真机上网申取值 3 个字段时推理占 1135 token 还能输出，8 个字段就吃光 2000
+    // 的预算、content 返回空——表现为「时好时坏」。
+    reasoning_effort: options?.reasoning_effort,
     signal: options?.signal,
   });
 

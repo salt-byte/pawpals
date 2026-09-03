@@ -50,7 +50,15 @@ export type AutofillPlan = {
 };
 
 /** 来源短于这个长度不算来源——两三个字随便都能在档案里撞上。 */
-const SOURCE_MIN_LENGTH = 4;
+/**
+ * 引用的最短长度。只用来挡掉单字符这种退化匹配，不承担「证明有出处」的职责——
+ * 那由「引用必须包含值」来保证。
+ *
+ * 原先这里是 4，对中文是错的：4 个拉丁字母几乎不携带信息，3 个汉字的姓名却
+ * 高度特异，而大多数中文姓名就是 2-3 个字。真机上「邓雨蝶」因此被判 unsourced，
+ * 最基本的字段填不上。
+ */
+const SOURCE_MIN_LENGTH = 2;
 
 const isGated = (field: PlannableField) => (GATED_KINDS as readonly string[]).includes(String(field.kind || ""));
 
@@ -140,7 +148,12 @@ export function validateAutofillPlan(
     if (field.options?.length && !field.options.includes(value)) { reject("option_not_allowed"); continue; }
 
     const source = strip(item.source);
-    if (source.length < SOURCE_MIN_LENGTH || !haystack || !haystack.includes(source)) { reject("unsourced"); continue; }
+    const quoted = source.length >= SOURCE_MIN_LENGTH && haystack && haystack.includes(source);
+    // 引用必须包含要填的值——「指给我看这个值出自哪里」。
+    // 有 options 的字段例外：值来自表单给的选项（已在上面校验过命中），引用的
+    // 职责只是证明选这个选项的依据在档案里，比如据「双硕士项目」选「研究生」。
+    const anchored = Boolean(field.options?.length) || source.includes(strip(value));
+    if (!quoted || !anchored) { reject("unsourced"); continue; }
 
     values.push({ signature, value });
     seen.add(signature);
