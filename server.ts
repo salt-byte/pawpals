@@ -11,7 +11,7 @@ import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
 import { planSoulSeed } from "./server/agent-soul.ts";
-import { pickAutofillValue } from "./server/autofill.ts";
+import { pickAutofillValue , parseAutofillProfile } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
 import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
@@ -871,30 +871,7 @@ function readAutofillProfileText(limit = 6000): string {
 }
 
 function extractAutofillProfile() {
-  const readIfExists = (file: string) => {
-    try {
-      return existsSync(file) ? readFileSync(file, "utf8") : "";
-    } catch {
-      return "";
-    }
-  };
-  const profile = readIfExists(PROFILE_FILE);
-  const resume = readIfExists(RESUME_MASTER_FILE);
-  const source = `${profile}\n\n${resume}`;
-  const readFirst = (...patterns: RegExp[]) => {
-    for (const pattern of patterns) {
-      const match = source.match(pattern);
-      if (match?.[1]?.trim()) return match[1].trim();
-    }
-    return "";
-  };
-  return {
-    name: readFirst(/姓名[：:]\s*(.+)/, /^#\s*(.+)$/m),
-    email: readFirst(/邮箱[：:]\s*([^\s]+)/, /email[：: ]\s*([^\s]+)/i, /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i),
-    phone: readFirst(/手机(?:号)?[：:]\s*([+\d\s-]{8,})/i, /电话[：:]\s*([+\d\s-]{8,})/i, /(\+?\d[\d\s-]{8,}\d)/),
-    linkedin: readFirst(/linkedin[：: ]\s*(https?:\/\/[^\s]+)/i),
-    portfolio: readFirst(/作品集[：: ]\s*(https?:\/\/[^\s]+)/i, /portfolio[：: ]\s*(https?:\/\/[^\s]+)/i),
-  };
+  return parseAutofillProfile(readAutofillProfileText());
 }
 
 

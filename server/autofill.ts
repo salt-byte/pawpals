@@ -77,3 +77,59 @@ export function pickAutofillValue(
       return "";
   }
 }
+
+/**
+ * 模板自带的标题，一律不能当姓名。
+ *
+ * saveInitialResumeMaster 写出的文件第一行永远是 `# 原始简历`，而原先的姓名正则
+ * 是 /^#\s*(.+)$/m——只要 profile.md 里还没有「姓名：」，姓名就会被解析成
+ * 「原始简历」并填进雇主的申请表。真机上确认过，这是真实流程里就会发生的。
+ */
+const TEMPLATE_HEADINGS = new Set([
+  "原始简历", "提取文本", "来源文件", "教育经历", "实习经历", "工作经历",
+  "项目经历", "科研与早期经历", "技能", "技能 & 语言", "自我评价", "个人信息",
+]);
+
+/** 像不像一个人名：短、没有数字、没有邮箱链接这类符号。 */
+function looksLikeName(line: string): boolean {
+  const text = line.trim();
+  if (!text || text.length > 20) return false;
+  if (/[\d@|/\\]/.test(text)) return false;
+  if (TEMPLATE_HEADINGS.has(text)) return false;
+  return true;
+}
+
+/**
+ * 从档案原文（profile.md + 简历原文拼起来）里解析出可直接填表的几项。
+ *
+ * 取不到就留空。填错名字比不填更糟——空字段用户一眼看得见，错名字会被提交给
+ * 雇主。
+ */
+export function parseAutofillProfile(source: string): AutofillProfile {
+  const text = String(source || "");
+  const readFirst = (...patterns: RegExp[]) => {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match?.[1]?.trim()) return match[1].trim();
+    }
+    return "";
+  };
+
+  const labelled = readFirst(/姓名[：:]\s*(.+)/);
+  // 没有显式标注时取简历正文的第一行——简历的姓名就写在那儿
+  const body = text.split(/##\s*提取文本\s*/)[1] ?? text;
+  const bodyFirst = body.split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).find(Boolean) ?? "";
+  const heading = readFirst(/^#\s*(.+)$/m);
+
+  const name = labelled
+    || (looksLikeName(bodyFirst) ? bodyFirst : "")
+    || (looksLikeName(heading) ? heading : "");
+
+  return {
+    name,
+    email: readFirst(/邮箱[：:]\s*([^\s]+)/, /email[：: ]\s*([^\s]+)/i, /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/i),
+    phone: readFirst(/手机(?:号)?[：:]\s*([+\d\s-]{8,})/i, /电话[：:]\s*([+\d\s-]{8,})/i, /(\+?\d[\d\s-]{8,}\d)/),
+    linkedin: readFirst(/linkedin[：: ]\s*(https?:\/\/[^\s]+)/i),
+    portfolio: readFirst(/作品集[：: ]\s*(https?:\/\/[^\s]+)/i, /portfolio[：: ]\s*(https?:\/\/[^\s]+)/i),
+  };
+}

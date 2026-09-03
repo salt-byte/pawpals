@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitName, pickAutofillValue } from "./autofill.ts";
+import { splitName, pickAutofillValue , parseAutofillProfile } from "./autofill.ts";
 
 const profile = {
   name: "邓雨蝶",
@@ -84,5 +84,48 @@ describe("pickAutofillValue", () => {
     const empty = { name: "", email: "", phone: "", linkedin: "", portfolio: "" };
     expect(pickAutofillValue(field("email"), empty, ctx)).toBe("");
     expect(pickAutofillValue(field("first_name"), empty, ctx)).toBe("");
+  });
+});
+
+/**
+ * 真机踩到：saveInitialResumeMaster 写出的文件第一行永远是 `# 原始简历`，而
+ * extractAutofillProfile 的姓名正则是 /^#\s*(.+)$/m ——只要 profile.md 里还没有
+ * 「姓名：」，姓名就会被解析成「原始简历」并填进雇主的申请表。
+ */
+describe("parseAutofillProfile", () => {
+  const RESUME_HEADER = "# 原始简历\n\n来源文件: 简历.pdf\n\n## 提取文本\n\n";
+
+  it("优先用显式的「姓名：」标注", () => {
+    const text = `姓名：邓雨蝶\n邮箱：a@b.com`;
+    expect(parseAutofillProfile(text).name).toBe("邓雨蝶");
+  });
+
+  it("没有标注时取正文第一行，不能把模板标题当名字", () => {
+    const text = `${RESUME_HEADER}邓雨蝶\n手机：15996610829\n邮箱：290277166@qq.com`;
+    const profile = parseAutofillProfile(text);
+    expect(profile.name).toBe("邓雨蝶");
+    expect(profile.name).not.toBe("原始简历");
+  });
+
+  it("模板里的固定标题一律不作为姓名", () => {
+    for (const heading of ["原始简历", "提取文本", "教育经历", "实习经历", "项目经历"]) {
+      expect(parseAutofillProfile(`# ${heading}\n\n无正文`).name).not.toBe(heading);
+    }
+  });
+
+  it("正文第一行不像名字时宁可留空——填错名字比不填更糟", () => {
+    const text = `${RESUME_HEADER}15996610829 | 290277166@qq.com | 个人主页`;
+    expect(parseAutofillProfile(text).name).toBe("");
+  });
+
+  it("邮箱和手机照常提取", () => {
+    const text = `${RESUME_HEADER}邓雨蝶\n手机：15996610829\n邮箱：290277166@qq.com`;
+    const profile = parseAutofillProfile(text);
+    expect(profile.email).toBe("290277166@qq.com");
+    expect(profile.phone).toBe("15996610829");
+  });
+
+  it("空档案时全部留空，不编造", () => {
+    expect(parseAutofillProfile("")).toMatchObject({ name: "", email: "", phone: "" });
   });
 });

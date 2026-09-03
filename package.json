@@ -5,8 +5,8 @@
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
-    "dev": "tsx server.ts",
-    "start": "NODE_ENV=production node --import tsx/esm server.ts",
+    "dev": "NODE_USE_ENV_PROXY=1 tsx server.ts",
+    "start": "NODE_ENV=production NODE_USE_ENV_PROXY=1 node --import tsx/esm server.ts",
     "dev:isolated": "node scripts/dev-isolated.mjs",
     "desktop:dev": "node scripts/run-electron.mjs",
     "test:latest-flow": "node scripts/test-latest-job-flow.mjs",
