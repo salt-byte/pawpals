@@ -4003,8 +4003,12 @@ async function startServer() {
       // 这条链路（推送 → 开页 → 页面执行 → 回报）在服务端本来完全不可观测，
       // 出问题时分不清「扩展没收到」「页面没执行」还是「结果丢了」。
       const r: any = message.result || {};
+      const n = (v: unknown) => (Array.isArray(v) ? v.length : 0);
       const detail = Array.isArray(r.probed)
         ? `probed=${r.probed.length}${r.partial ? "(partial)" : ""} ${r.probed.map((p: any) => `${p.label}:${(p.options || []).length}`).join(" ")}`
+        : Array.isArray(r.filled) || Array.isArray(r.uploaded)
+        ? `filled=${n(r.filled)} uploaded=${n(r.uploaded)} skipped=${n(r.skipped)} lost=${n(r.lost)}` +
+          (n(r.skipped) ? ` | 跳过: ${(r.skipped as any[]).map((x) => `${String(x.signature).split("label=")[1] ?? "?"}(${x.reason})`).join(" ")}` : "")
         : `fields=${Array.isArray(r.fields) ? r.fields.length : "-"}`;
       console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} ready=${r.formReady ?? "-"} ${detail}`);
       officialApplicationQueue.complete(message.id, message.result);
