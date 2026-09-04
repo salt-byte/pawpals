@@ -52,6 +52,35 @@ const tabGrouper = createTabGrouper({
   queryGroups: (query) => chrome.tabGroups.query(query),
 });
 
+/**
+ * 任务在飞行中时保活 service worker。
+ *
+ * MV3 的 service worker 空闲约 30 秒被回收，而**调用扩展 API 会重置这个计时器**。
+ * 一个任务要走「收到 → 找/开标签页 → 等表单就绪（最多 8 秒）→ 页面执行 → 回报」，
+ * 中间大段时间都在 await，没有任何 API 调用，计时器照常走完——真机上因此看到
+ * 每 15~30 秒一次干净断开、31 次重连，任务做到一半进程就没了，重发再死，循环。
+ *
+ * 所以只在有任务在手时每 20 秒调一次最便宜的 API，任务做完立刻停——不做无谓保活。
+ */
+let inFlight = 0;
+let keepAliveTimer = null;
+function beginWork() {
+  inFlight += 1;
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(() => { try { chrome.runtime.getPlatformInfo(() => {}); } catch { /* 已失效 */ } }, 20000);
+}
+function endWork() {
+  inFlight = Math.max(0, inFlight - 1);
+  if (inFlight > 0 || !keepAliveTimer) return;
+  clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
+}
+/** 包住一段可能很长的异步工作，期间保活。 */
+async function withKeepAlive(run) {
+  beginWork();
+  try { return await run(); } finally { endWork(); }
+}
+
 const dispatcher = createOfficialDispatcher({
   listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
   sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
@@ -80,7 +109,7 @@ function connectOfficialSocket() {
     } catch {
       return;
     }
-    if (payload?.type === 'task' && payload.task) void dispatcher.accept(payload.task);
+    if (payload?.type === 'task' && payload.task) void withKeepAlive(() => dispatcher.accept(payload.task));
   });
   socket.addEventListener('close', () => { socket = null; });
   socket.addEventListener('error', () => { /* close 会紧跟着来，在那里清理 */ });
@@ -127,7 +156,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // 去——任务可能是在这个页面加载完成之前就推过来的。
     connectOfficialSocket();
     void officialClient.reportContext(message.payload);
-    void dispatcher.onPageReady(message.origin);
+    void withKeepAlive(() => dispatcher.onPageReady(message.origin));
     sendResponse({ ok: true });
     return false;
   }
