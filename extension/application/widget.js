@@ -28,6 +28,15 @@ import { widgetContainerFor } from './form.js';
 const PANEL_SELECTOR = '[class*="dropdown"],[class*="Dropdown"],[class*="popup"],[class*="Popup"],[class*="popper"],[class*="Popper"],[class*="menu"],[class*="Menu"],[class*="options"],[class*="select-panel"]';
 /** 面板里这些标签不是选项：输入框、按钮之类。 */
 const NON_OPTION_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'SCRIPT', 'STYLE', 'SVG', 'PATH']);
+/**
+ * 一个面板里最多取多少个选项，以及最多走多少个节点。
+ *
+ * 真机上帆软的学校下拉有 2604 个选项，不设上限的话光是遍历子树就让 probe 任务
+ * 180 秒回不来。上限之外的部分由 probeWidgets 标成 truncated——那种字段本来
+ * 就是「可搜索」而非「可枚举」，完整列表没有意义。
+ */
+const MAX_OPTIONS_PER_PANEL = 300;
+const MAX_NODES_PER_PANEL = 2000;
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
@@ -61,10 +70,13 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
   const optionsIn = (panels) => {
     const out = [];
     for (const panel of panels) {
+      let scanned = 0;
       for (const el of panel.querySelectorAll('*')) {
+        if (out.length >= MAX_OPTIONS_PER_PANEL || (scanned += 1) > MAX_NODES_PER_PANEL) break;
         if (NON_OPTION_TAGS.has(el.tagName)) continue;
         if (el.querySelector('*')) continue;
-        if (!isVisible(el)) continue;
+        // 特意不逐个做可见性检查：面板自身已经确认可见，对每个选项读一次
+        // getBoundingClientRect 等于强制布局——2604 个选项的下拉会把整个任务拖死。
         const text = tidy(el.textContent);
         if (text) out.push({ el, text });
       }

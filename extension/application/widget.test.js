@@ -376,3 +376,31 @@ describe('选项识别不依赖选项自身的 class', () => {
   });
 });
 
+/**
+ * 真机踩到：面板里逐个节点调 isVisible（读 getBoundingClientRect）等于强制布局。
+ * 帆软的学校下拉有 2604 个选项，两个这样的字段就让 probe 任务 180 秒回不来。
+ *
+ * 而这个检查本来就是冗余的——面板自身已经确认可见，里面的选项不必逐个再验。
+ */
+describe('面板内不逐个做可见性检查，并且有扫描上限', () => {
+  it('选项很多时截断到上限，不把整棵子树走完', async () => {
+    document.body.innerHTML = COMBO;
+    const many = Array.from({ length: 3000 }, (_, i) => `<span>选项${i}</span>`).join('');
+    let visibleCalls = 0;
+    const driver = createWidgetDriver({
+      click: async (el) => {
+        if (el.closest('.x-combo')) document.body.insertAdjacentHTML('beforeend', `<div class="x-popup">${many}</div>`);
+      },
+      wait: async () => {},
+      elementAtCenter: (el) => el.querySelector('.x-combo-dropdown-label') || el,
+      isVisible: (el) => { visibleCalls += 1; return document.body.contains(el); },
+    });
+
+    const options = await driver.probeOptions(container());
+    expect(options.length).toBeLessThanOrEqual(300);
+    expect(options[0]).toBe('选项0');
+    // 只对面板容器做可见性检查，不对 3000 个选项逐个做
+    expect(visibleCalls).toBeLessThan(100);
+  });
+});
+
