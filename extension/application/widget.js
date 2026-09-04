@@ -17,11 +17,17 @@ import { widgetContainerFor } from './form.js';
  * 求差」来定位它，同样不依赖 class 名。
  */
 
-/** 选项条目长什么样。求差之后再按这个筛，避免把整个面板外壳也算进去。 */
-const OPTION_HINT = /option|item|cell|choice/i;
-/** OPTION_HINT 的选择器版本。先用它缩小候选集，避免遍历整棵树时强制布局。 */
-const OPTION_SELECTOR = '[class*="option"],[class*="Option"],[class*="item"],[class*="Item"],[class*="cell"],[class*="Cell"],[class*="choice"],[class*="Choice"]';
-const PANEL_HINT = /dropdown|popup|popper|menu|select-panel|options/i;
+/**
+ * 选项面板的容器长什么样。
+ *
+ * 认面板、而不是认选项——真机根因：简道云级联控件的选项是**完全没有 class 的
+ * <span>**（SPAN. → "产品类" / "研发类"），靠 class 认选项一个都匹配不上，
+ * 「意向岗位大类」这类必填字段因此一直填不上。面板容器倒是有类名，而且两种
+ * 控件用的是同一套（x-popup / x-combo-dropdown）。
+ */
+const PANEL_SELECTOR = '[class*="dropdown"],[class*="Dropdown"],[class*="popup"],[class*="Popup"],[class*="popper"],[class*="Popper"],[class*="menu"],[class*="Menu"],[class*="options"],[class*="select-panel"]';
+/** 面板里这些标签不是选项：输入框、按钮之类。 */
+const NON_OPTION_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'SCRIPT', 'STYLE', 'SVG', 'PATH']);
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
@@ -34,10 +40,37 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
    * 几千个元素，每个 widget 要求差 4 次、15 个 widget 就是十几万次强制布局，
    * 渲染进程直接卡死——probe 任务 60 秒都回不来。
    */
-  const optionNodes = () =>
-    [...root.querySelectorAll(OPTION_SELECTOR)].filter(
-      (el) => OPTION_HINT.test(String(el.className || '')) && isVisible(el) && !el.querySelector('*')
-    );
+  /**
+   * 可见的选项面板，只取最外层。
+   *
+   * 面板往往层层嵌套（.x-popup 里还有 .x-combo-dropdown-list），两层都匹配
+   * PANEL_SELECTOR，不去重就会把同一批选项数两遍。
+   */
+  const panelNodes = () => {
+    const all = [...root.querySelectorAll(PANEL_SELECTOR)].filter(isVisible);
+    const set = new Set(all);
+    return all.filter((panel) => {
+      for (let node = panel.parentElement; node; node = node.parentElement) {
+        if (set.has(node)) return false;
+      }
+      return true;
+    });
+  };
+
+  /** 面板里有文字的叶子节点就是选项。不看它们自己的 class——很多根本没有。 */
+  const optionsIn = (panels) => {
+    const out = [];
+    for (const panel of panels) {
+      for (const el of panel.querySelectorAll('*')) {
+        if (NON_OPTION_TAGS.has(el.tagName)) continue;
+        if (el.querySelector('*')) continue;
+        if (!isVisible(el)) continue;
+        const text = tidy(el.textContent);
+        if (text) out.push({ el, text });
+      }
+    }
+    return out;
+  };
 
   /** 收起面板：先按 Esc，再点一下 body，两条路都试。 */
   async function dismiss() {
@@ -48,13 +81,14 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
     await wait(120);
   }
 
-  /** 点一次触发器，返回相对 before 新出现的选项元素。 */
+  /** 点一次触发器，返回新出现的面板里的选项。 */
   async function clickAndDiff(container, before) {
     const trigger = elementAtCenter(container);
     if (!trigger) return [];
     await click(trigger);
     await wait(250);
-    return optionNodes().filter((el) => !before.has(el));
+    const fresh = panelNodes().filter((panel) => !before.has(panel));
+    return optionsIn(fresh);
   }
 
   /**
@@ -68,16 +102,16 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
    * 不去依赖它，改成让展开这一侧对残留状态免疫。最多点两次，不无限重试。
    */
   async function open(container) {
-    const fresh = await clickAndDiff(container, new Set(optionNodes()));
+    const fresh = await clickAndDiff(container, new Set(panelNodes()));
     if (fresh.length > 0) return fresh;
-    return clickAndDiff(container, new Set(optionNodes()));
+    return clickAndDiff(container, new Set(panelNodes()));
   }
 
   return {
     /** 点开、读出选项、收起。用于让模型知道这个框有哪些合法值。 */
     async probeOptions(container) {
       const fresh = await open(container);
-      const options = fresh.map((el) => tidy(el.textContent)).filter(Boolean);
+      const options = fresh.map((item) => item.text).filter(Boolean);
       await dismiss();
       return options;
     },
@@ -97,14 +131,14 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
         return { ok: false, reason: 'panel_did_not_open' };
       }
 
-      const options = fresh.map((el) => tidy(el.textContent));
-      const hit = fresh.find((el) => tidy(el.textContent) === wanted);
+      const options = fresh.map((item) => item.text);
+      const hit = fresh.find((item) => item.text === wanted);
       if (!hit) {
         await dismiss();
         return { ok: false, reason: 'option_not_found', options };
       }
 
-      await click(hit);
+      await click(hit.el);
       await wait(250);
 
       // 回读：值真的落到控件上了才算成功
@@ -118,7 +152,7 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
   };
 }
 
-export { PANEL_HINT };
+export { PANEL_SELECTOR };
 
 /**
  * 把一批值交给 widget 驱动器。

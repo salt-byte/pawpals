@@ -319,3 +319,60 @@ describe('probeWidgets：超长选项要截断并标记', () => {
   });
 });
 
+/**
+ * 真机根因：简道云级联控件的选项是**完全没有 class 的 <span>**——
+ *   SPAN. → "产品类" / "研发类" / "职能类" ...
+ * 而原先靠 class 含 option|item|cell 来认选项，一个都匹配不上，求差永远是空。
+ * 于是「意向岗位大类」这类必填字段一直填不上。
+ *
+ * 面板容器倒是有类名（x-popup / x-combo-dropdown，两种控件都一样），所以改成
+ * 先找新出现的面板，再取面板里有文字的叶子节点。
+ */
+describe('选项识别不依赖选项自身的 class', () => {
+  const bare = (opts) =>
+    `<div class="x-popup x-combo-dropdown">` + opts.map((o) => `<span>${o}</span>`).join('') + `</div>`;
+
+  function driverWithPanel(panelHtml, { onOptionClick } = {}) {
+    const click = vi.fn(async (el) => {
+      if (el.closest('.x-combo')) { document.body.insertAdjacentHTML('beforeend', panelHtml); return; }
+      if (onOptionClick) return onOptionClick(el);
+      document.querySelector('.value-wrapper').textContent = el.textContent;
+      document.querySelector('.x-popup')?.remove();
+    });
+    return createWidgetDriver({
+      click, wait: async () => {},
+      elementAtCenter: (el) => el.querySelector('.x-combo-dropdown-label') || el,
+      isVisible: (el) => document.body.contains(el),
+    });
+  }
+
+  it('无 class 的 span 选项也能读出来', async () => {
+    document.body.innerHTML = COMBO;
+    const driver = driverWithPanel(bare(['产品类', '研发类', '职能类']));
+    expect(await driver.probeOptions(container())).toEqual(['产品类', '研发类', '职能类']);
+  });
+
+  it('面板里的搜索框不算选项', async () => {
+    document.body.innerHTML = COMBO;
+    const panel = '<div class="x-popup x-combo-dropdown">' +
+      '<div class="x-search-input"><input type="text" placeholder="搜索"></div>' +
+      '<span>产品类</span><span>研发类</span></div>';
+    const driver = driverWithPanel(panel);
+    expect(await driver.probeOptions(container())).toEqual(['产品类', '研发类']);
+  });
+
+  it('能选中无 class 的选项并回读确认', async () => {
+    document.body.innerHTML = COMBO;
+    const driver = driverWithPanel(bare(['产品类', '研发类']));
+    const result = await driver.selectOption(container(), '研发类');
+    expect(result).toMatchObject({ ok: true, value: '研发类' });
+    expect(document.querySelector('.value-wrapper').textContent).toBe('研发类');
+  });
+
+  it('页面上本来就有的面板不算新面板', async () => {
+    document.body.innerHTML = '<div class="x-popup"><span>早就在的</span></div>' + COMBO;
+    const driver = driverWithPanel(bare(['产品类']));
+    expect(await driver.probeOptions(container())).toEqual(['产品类']);
+  });
+});
+
