@@ -431,3 +431,64 @@ describe('单字段探测超时', () => {
   });
 });
 
+/**
+ * 面板里带搜索框时，直接搜比枚举好得多。
+ *
+ * 帆软的「本科学校」是全国高校下拉，2604 个选项——枚举既慢（光渲染就几秒）、
+ * 又塞不进 prompt。而面板的 class 里明明写着 has-search：打字过滤再点，一步到位。
+ */
+describe('带搜索框的面板：搜而不是枚举', () => {
+  const panelWithSearch = (opts) =>
+    '<div class="x-popup x-combo-dropdown has-search">' +
+    '<div class="x-search-input"><input type="text" class="search"></div>' +
+    opts.map((o) => `<span>${o}</span>`).join('') + '</div>';
+
+  function driverWith({ all, onType }) {
+    const typed = [];
+    const click = vi.fn(async (el) => {
+      if (el.closest('.x-combo')) { document.body.insertAdjacentHTML('beforeend', panelWithSearch(all.slice(0, 3))); return; }
+      if (el.tagName === 'SPAN') {
+        document.querySelector('.value-wrapper').textContent = el.textContent;
+        document.querySelector('.x-popup')?.remove();
+      }
+    });
+    const type = vi.fn(async (el, text) => {
+      typed.push(text);
+      const hits = onType ? onType(text) : all.filter((o) => o.includes(text));
+      document.querySelector('.x-popup').innerHTML =
+        '<div class="x-search-input"><input type="text" class="search"></div>' +
+        hits.map((o) => `<span>${o}</span>`).join('');
+    });
+    const driver = createWidgetDriver({
+      click, type, wait: async () => {},
+      elementAtCenter: (el) => el.querySelector('.x-combo-dropdown-label') || el,
+      isVisible: (el) => document.body.contains(el),
+    });
+    return { driver, typed, type };
+  }
+
+  it('面板有搜索框时先打字过滤，再点命中的那个', async () => {
+    document.body.innerHTML = COMBO;
+    const { driver, typed } = driverWith({ all: ['北京大学', '清华大学', '复旦大学', '浙江大学'] });
+    const result = await driver.selectOption(container(), '浙江大学');
+
+    expect(typed).toContain('浙江大学');
+    expect(result).toMatchObject({ ok: true, value: '浙江大学' });
+    expect(document.querySelector('.value-wrapper').textContent).toBe('浙江大学');
+  });
+
+  it('搜不到时如实报告，并带上搜索后的候选', async () => {
+    document.body.innerHTML = COMBO;
+    const { driver } = driverWith({ all: ['北京大学', '清华大学', '复旦大学'], onType: () => [] });
+    const result = await driver.selectOption(container(), '不存在大学');
+    expect(result).toMatchObject({ ok: false, reason: 'option_not_found' });
+  });
+
+  it('没有搜索框的面板走原来的枚举路径', async () => {
+    document.body.innerHTML = COMBO;
+    const { driver } = driverFor();
+    const result = await driver.selectOption(container(), '研究生');
+    expect(result).toMatchObject({ ok: true, value: '研究生' });
+  });
+});
+

@@ -40,7 +40,7 @@ const MAX_NODES_PER_PANEL = 2000;
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
-export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, root = document }) {
+export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisible, root = document }) {
   /**
    * 当前可见的、像选项的元素。用于点开前后求差。
    *
@@ -82,6 +82,15 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
       }
     }
     return out;
+  };
+
+  /** 面板里的搜索框。有它就能搜而不是枚举。 */
+  const searchBoxIn = (panels) => {
+    for (const panel of panels) {
+      const box = panel.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea');
+      if (box) return box;
+    }
+    return null;
   };
 
   /** 收起面板：先按 Esc，再点一下 body，两条路都试。 */
@@ -143,8 +152,23 @@ export function createWidgetDriver({ click, wait, elementAtCenter, isVisible, ro
         return { ok: false, reason: 'panel_did_not_open' };
       }
 
-      const options = fresh.map((item) => item.text);
-      const hit = fresh.find((item) => item.text === wanted);
+      let candidates = fresh;
+      let hit = candidates.find((item) => item.text === wanted);
+
+      // 面板带搜索框时先打字过滤：帆软的「本科学校」是全国高校下拉，2604 个选项，
+      // 枚举既慢（光渲染就几秒）又塞不进 prompt，而面板 class 里明明写着
+      // has-search。搜一下一步到位，也不必事先把这类字段探成 truncated。
+      if (!hit && type) {
+        const box = searchBoxIn(panelNodes());
+        if (box) {
+          await type(box, wanted);
+          await wait(400);
+          candidates = optionsIn(panelNodes());
+          hit = candidates.find((item) => item.text === wanted);
+        }
+      }
+
+      const options = candidates.map((item) => item.text);
       if (!hit) {
         await dismiss();
         return { ok: false, reason: 'option_not_found', options };
@@ -266,7 +290,7 @@ const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox
  * 有效，控件在滚动区外时会命中别的元素或返回 null。真机上这一条决定成败——
  * 加之前只有恰好在屏幕上的两个字段能探测成功。
  */
-export function createPageWidgetDriver({ click, root = document } = {}) {
+export function createPageWidgetDriver({ click, type, root = document } = {}) {
   const valueAreaOf = (container) =>
     [...container.querySelectorAll('*')].find(
       (node) => VALUE_AREA_HINT.test(String(node.className || '')) && node.getBoundingClientRect().height > 0
@@ -274,6 +298,7 @@ export function createPageWidgetDriver({ click, root = document } = {}) {
 
   return createWidgetDriver({
     click,
+    type,
     root,
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     isVisible: (el) => el.offsetParent !== null && el.getBoundingClientRect().height > 0,

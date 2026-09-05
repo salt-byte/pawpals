@@ -7,7 +7,11 @@ import { waitForFormReady } from '../application/ready.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
-const widgetDriver = createPageWidgetDriver({ click: (el) => syntheticImpl.click(el, { fast: true }) });
+const widgetDriver = createPageWidgetDriver({
+  click: (el) => syntheticImpl.click(el, { fast: true }),
+  // 搜索框打字：面板带搜索时不枚举，直接搜
+  type: (el, text) => syntheticImpl.type(el, text, { fast: true }),
+});
 import { sendToBackground } from './bg-bridge.js';
 
 /**
