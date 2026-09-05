@@ -136,15 +136,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'OFFICIAL_TASK') {
     // service worker 已按 origin 选过标签页，这里再挡一道：跨站任务绝不执行。
     if (!message.task || !samePage(message.task)) {
+      console.log('[pawpals] 收到跨站任务，拒绝执行', message.task?.url);
       sendResponse({ ok: false, error: '任务与当前页面不同源' });
       return false;
     }
+    // 扩展侧此前完全无日志：任务到没到页面、执行了多久，只能靠服务端超时反推。
+    const startedAt = Date.now();
+    console.log(`[pawpals] 收到任务 ${message.task.kind} ${String(message.task.id).slice(0, 20)}`);
     execute(message.task)
-      .then(sendResponse)
-      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+      .then((result) => {
+        console.log(`[pawpals] 任务完成 ${message.task.kind} 耗时 ${Date.now() - startedAt}ms`, result);
+        sendResponse(result);
+      })
+      .catch((error) => {
+        console.warn(`[pawpals] 任务失败 ${message.task.kind} 耗时 ${Date.now() - startedAt}ms`, error);
+        sendResponse({ ok: false, error: String(error?.message || error) });
+      });
     return true;
   }
   return false;
 });
 
+console.log('[pawpals] content script 上线', location.href.slice(0, 60));
 void reportPageReady();
