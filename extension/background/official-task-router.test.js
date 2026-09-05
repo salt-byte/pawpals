@@ -161,3 +161,39 @@ describe('createOfficialDispatcher：页面就绪后补派', () => {
     expect(sendToTab).toHaveBeenCalledWith(3, { type: 'OFFICIAL_TASK', task: submitTask });
   });
 });
+
+/**
+ * 真机根因：Chrome 会丢弃后台标签页（document.wasDiscarded === true）。被丢弃
+ * 后 content script 就没了，chrome.tabs.sendMessage **挂住不返回**——而
+ * tryDispatch 只捕获抛错，捕获不了「永远不返回」，任务就悬到超时。
+ *
+ * 症状很有迷惑性：刚导航完标签页是活的，2 秒成功；放一会儿被丢弃，就必然超时。
+ */
+describe('派发要有超时——标签页被丢弃时 sendMessage 会挂住', () => {
+  it('派发挂住时按失败处理，任务留在待办等页面重新就绪', async () => {
+    const sendToTab = vi.fn(() => new Promise(() => {}));   // 永远不 resolve
+    const reportResult = vi.fn();
+    const dispatcher = createOfficialDispatcher({
+      listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
+      sendToTab, reportResult, sendTimeoutMs: 50,
+    });
+
+    await dispatcher.accept(task);
+    expect(reportResult).not.toHaveBeenCalled();
+    expect(dispatcher.pendingCount()).toBe(1);
+  });
+
+  it('正常返回的派发不受超时影响', async () => {
+    const reportResult = vi.fn();
+    const dispatcher = createOfficialDispatcher({
+      listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
+      sendToTab: async () => ({ ok: true }),
+      reportResult, sendTimeoutMs: 5000,
+    });
+
+    await dispatcher.accept(task);
+    expect(reportResult).toHaveBeenCalledWith('official_1', { ok: true });
+    expect(dispatcher.pendingCount()).toBe(0);
+  });
+});
+

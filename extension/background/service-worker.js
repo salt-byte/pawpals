@@ -83,12 +83,20 @@ async function withKeepAlive(run) {
 
 const dispatcher = createOfficialDispatcher({
   listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
-  sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
+  sendToTab: async (tabId, message) => {
+    // Chrome 会丢弃后台标签页，content script 随之消失。标成不可丢弃，
+    // 否则任务派下去就石沉大海（派发侧另有超时兜底）。
+    try { await chrome.tabs.update(tabId, { autoDiscardable: false }); } catch { /* 标签页没了 */ }
+    return chrome.tabs.sendMessage(tabId, message);
+  },
   // 自主开页：申请页没开着就自己开一个后台标签页。submit 不在可自动开页的类型
   // 里——提交只发生在用户亲眼确认过的那个页面上。
   openTab: async (url) => {
     const tab = await chrome.tabs.create({ url, active: false });
-    if (tab?.id) await tabGrouper.add(tab.id);
+    if (tab?.id) {
+      try { await chrome.tabs.update(tab.id, { autoDiscardable: false }); } catch { /* 忽略 */ }
+      await tabGrouper.add(tab.id);
+    }
     return tab;
   },
   reportResult: (id, result) => sendToServer({ type: 'result', id, result }),

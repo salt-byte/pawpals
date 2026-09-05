@@ -53,7 +53,17 @@ export function pickTargetTab(taskUrl, tabs) {
  * 者用户过会儿才打开申请页。只有页面**真的执行了**（哪怕返回空）才回报，否则
  * 服务端队列会被这个任务永久堵住。
  */
-export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult }) {
+/**
+ * 派发的等待上限。
+ *
+ * Chrome 会丢弃后台标签页（document.wasDiscarded === true），被丢弃后 content
+ * script 就没了，chrome.tabs.sendMessage **挂住不返回**——只捕获抛错是接不住
+ * 「永远不返回」的。真机症状很有迷惑性：刚导航完标签页是活的，2 秒成功；放一会
+ * 儿被丢弃，就必然超时。
+ */
+const DEFAULT_SEND_TIMEOUT_MS = 20000;
+
+export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult, sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS }) {
   /** 已收到但还没派出去的任务。 */
   const pending = new Map();
   /** 已经为哪些任务开过页，避免页面加载期间重复开。 */
@@ -64,12 +74,21 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
     const tabId = pickTargetTab(task.url, await listTabs());
     if (tabId === null) return false;
 
+    const TIMEOUT = Symbol('dispatch-timeout');
     let result;
+    let timer;
     try {
-      result = await sendToTab(tabId, { type: 'OFFICIAL_TASK', task });
+      result = await Promise.race([
+        sendToTab(tabId, { type: 'OFFICIAL_TASK', task }),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), sendTimeoutMs); }),
+      ]);
     } catch {
       return false; // 页面里还没有 content script
+    } finally {
+      clearTimeout(timer);
     }
+    // 挂住多半是标签页被丢弃了：按失败处理，任务留在待办，等页面重新就绪再派
+    if (result === TIMEOUT) return false;
     reportResult(task.id, result ?? { ok: false, error: '页面未返回结果' });
     return true;
   }
