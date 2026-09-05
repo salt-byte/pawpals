@@ -1,9 +1,10 @@
-import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields, collectWidgetTargets } from '../application/form.js';
+import { collectApplicationFields, fillApplicationFields, findSubmitControl, formWarnings, verifyFilledFields, collectWidgetTargets, widgetContainerFor } from '../application/form.js';
 import { detectApplicationProvider } from '../application/schema.js';
 import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { waitForFormReady } from '../application/ready.js';
+import { snapshotControls, elementForHandle, fillByHandle } from '../application/snapshot.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
@@ -65,7 +66,11 @@ async function execute(task) {
     const provider = detectApplicationProvider(location.href);
     const warnings = formWarnings(fields, document);
     await remember({ url: location.href, provider, fields });
-    return { ok: true, provider, url: location.href, title: document.title, fields, warnings, formReady: readiness.ready, hasSubmit: Boolean(findSubmitControl(document)) };
+    // 快照与 fields 并存：fields 是旧的启发式解析，snapshot 是给模型看的原文。
+    // 模型按 snapshot 的句柄作答，填写也按同一套句柄定位——两边必须同源。
+    return { ok: true, provider, url: location.href, title: document.title, fields,
+      snapshot: snapshotControls(document),
+      warnings, formReady: readiness.ready, hasSubmit: Boolean(findSubmitControl(document)) };
   }
   if (task.kind === 'upload') {
     // 上传单独成一拍：不少站点解析简历后会把结果覆盖到表单上，上传完立刻填
@@ -76,7 +81,17 @@ async function execute(task) {
 
   if (task.kind === 'fill') {
     const values = task.payload?.values || [];
-    const { filled, skipped } = fillApplicationFields(document, values);
+    // 模型是按快照的句柄作答的，先用快照定位；快照里没有的再交给旧的签名路径，
+    // 迁移期两套并存，任何一套能定位到就算数。
+    const bySnapshot = [];
+    const rest = [];
+    for (const item of values) {
+      (elementForHandle(document, item.signature) ? bySnapshot : rest).push(item);
+    }
+    const snap = fillByHandle(document, bySnapshot);
+    const legacy = fillApplicationFields(document, rest);
+    const filled = [...snap.filled, ...legacy.filled];
+    const skipped = [...snap.skipped, ...legacy.skipped];
 
     // 失焦一次再回读：带延迟校验的表单（Moka 这类）会在失焦时才决定要不要
     // 保留脚本写入的值，不回读就分不清「填进去了」和「填了又被清掉」。
@@ -86,11 +101,18 @@ async function execute(task) {
     // 纯 div 模拟的下拉/多选：fillApplicationFields 按 unsupported_widget 跳过
     // 了它们，这里改用驱动器点开面板选中。放在原生字段之后，因为点开面板会滚动
     // 页面，先做会干扰上面的回读。
-    const widgetTargets = skipped
-      .filter((item) => item.reason === 'unsupported_widget')
-      .map((item) => values.find((value) => value.signature === item.signature))
-      .filter(Boolean);
-    const widgets = await applyWidgetValues(document, widgetTargets, { driver: widgetDriver });
+    const widgetTargets = [
+      ...snap.widgets,
+      ...skipped
+        .filter((item) => item.reason === 'unsupported_widget')
+        .map((item) => values.find((value) => value.signature === item.signature))
+        .filter(Boolean),
+    ];
+    const widgets = await applyWidgetValues(document, widgetTargets, {
+      driver: widgetDriver,
+      // 快照句柄优先；找不到再退回旧签名，迁移期两套并存
+      findContainer: (signature) => elementForHandle(document, signature) || widgetContainerFor(document, signature),
+    });
 
     const warnings = formWarnings(collectApplicationFields(document), document);
     return {

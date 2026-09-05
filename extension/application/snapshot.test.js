@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { snapshotControls } from './snapshot.js';
+import { snapshotControls, snapshotEntries, elementForHandle, fillByHandle } from './snapshot.js';
 
 beforeEach(() => { document.body.innerHTML = ''; });
 
@@ -86,3 +86,82 @@ describe('snapshotControls', () => {
     expect(snapshotControls(document, { maxControls: 120 })).toHaveLength(120);
   });
 });
+
+/**
+ * 快照必须同时是「采集」和「填写」的来源。
+ *
+ * 否则句柄和填写时用的签名是两套，模型按快照的句柄作答，填写时却按另一套定位，
+ * 永远对不上号——这正是快照写好了却接不上线的原因。
+ */
+describe('句柄能反查回元素', () => {
+  it('按句柄找回原生控件', () => {
+    document.body.innerHTML = '<div><div>邮箱</div><input type="text" name="email"></div>';
+    const [c] = snapshotControls(document);
+    expect(elementForHandle(document, c.handle)).toBe(document.querySelector('input'));
+  });
+
+  it('按句柄找回 div 模拟控件的容器', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><div class="field-name">学历</div>' +
+      '<div class="field-component"><div class="x-combo"><div class="value-wrapper"></div></div></div></div>';
+    const [c] = snapshotControls(document);
+    expect(elementForHandle(document, c.handle)).toBe(document.querySelector('.fx-field'));
+  });
+
+  it('句柄对不上时返回 null，不猜别的控件', () => {
+    document.body.innerHTML = '<input type="text" name="a">';
+    expect(elementForHandle(document, 'name=不存在|id=|type=text|label=')).toBe(null);
+  });
+
+  it('snapshotEntries 同时给出控件描述和元素', () => {
+    document.body.innerHTML = '<div><div>手机</div><input type="text" name="p"></div>';
+    const [entry] = snapshotEntries(document);
+    expect(entry.control.handle).toBeTruthy();
+    expect(entry.el).toBe(document.querySelector('input'));
+  });
+});
+
+describe('fillByHandle：按快照句柄填写', () => {
+  it('填进原生文本框并派发事件', () => {
+    document.body.innerHTML = '<div><div>邮箱</div><input type="text" name="email"></div>';
+    const [c] = snapshotControls(document);
+    const events = [];
+    document.querySelector('input').addEventListener('input', () => events.push('input'));
+    document.querySelector('input').addEventListener('change', () => events.push('change'));
+
+    const r = fillByHandle(document, [{ signature: c.handle, value: 'a@b.com' }]);
+    expect(r.filled).toEqual([c.handle]);
+    expect(document.querySelector('input').value).toBe('a@b.com');
+    expect(events).toEqual(['input', 'change']);
+  });
+
+  it('widget 交回上层用驱动器处理，不在这里硬填', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><div class="field-name">学历</div>' +
+      '<div class="field-component"><div class="x-combo"><div class="value-wrapper"></div></div></div></div>';
+    const [c] = snapshotControls(document);
+    const r = fillByHandle(document, [{ signature: c.handle, value: '研究生' }]);
+    expect(r.filled).toEqual([]);
+    expect(r.widgets).toEqual([{ signature: c.handle, value: '研究生' }]);
+  });
+
+  it('文件框永远跳过——文件由 upload 任务处理，不能当文本填', () => {
+    document.body.innerHTML = '<div><div>简历附件</div><input type="file"></div>';
+    const [c] = snapshotControls(document);
+    const r = fillByHandle(document, [{ signature: c.handle, value: 'x.pdf' }]);
+    expect(r.filled).toEqual([]);
+    expect(r.skipped[0]).toMatchObject({ reason: 'file_input' });
+  });
+
+  it('句柄定位不到就跳过，不猜别的控件', () => {
+    document.body.innerHTML = '<input type="text" name="a">';
+    const r = fillByHandle(document, [{ signature: 'name=没有|id=|type=text|label=', value: 'x' }]);
+    expect(r.skipped[0]).toMatchObject({ reason: 'not_found' });
+  });
+
+  it('没有待填项时什么都不做', () => {
+    document.body.innerHTML = '<input type="text" name="a">';
+    expect(fillByHandle(document, [])).toEqual({ filled: [], skipped: [], widgets: [] });
+  });
+});
+

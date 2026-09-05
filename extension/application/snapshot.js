@@ -18,6 +18,7 @@
  */
 
 import { fieldSignature } from './schema.js';
+import { nativeSetValue } from '../act/synthetic.js';
 
 /** 这些标签的文字是代码不是文案，绝不能进快照——否则页面令牌会被送进模型。 */
 const NON_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'IFRAME']);
@@ -84,7 +85,13 @@ function widgetContainers(root) {
   return out;
 }
 
-export function snapshotControls(root = document, { contextLimit = DEFAULT_CONTEXT_LIMIT, maxControls = DEFAULT_MAX_CONTROLS } = {}) {
+/**
+ * 快照条目：控件描述 + 它对应的元素。
+ *
+ * 填写时必须按同一套句柄定位，否则模型按快照作答、填写却按另一套签名找元素，
+ * 永远对不上号。所以快照要同时是「采集」和「填写」的唯一来源。
+ */
+export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEXT_LIMIT, maxControls = DEFAULT_MAX_CONTROLS } = {}) {
   const out = [];
 
   const natives = [...root.querySelectorAll('input, textarea, select')].filter(
@@ -94,7 +101,7 @@ export function snapshotControls(root = document, { contextLimit = DEFAULT_CONTE
     if (out.length >= maxControls) return out;
     const type = (el.getAttribute('type') || el.tagName.toLowerCase()).toLowerCase();
     const context = contextOf(el, contextLimit);
-    out.push({
+    out.push({ el, control: {
       // 句柄不含完整上下文——上下文会随页面别处的改动而变。只取第一段文字做区分，
       // 这是机械取值，不是"这段是标签"的判断。
       handle: fieldSignature({ name: el.getAttribute('name'), id: el.id, type, label: context.split(' ')[0] || '' }),
@@ -102,20 +109,69 @@ export function snapshotControls(root = document, { contextLimit = DEFAULT_CONTE
       required: el.required || el.getAttribute('aria-required') === 'true',
       options: el.tagName === 'SELECT' ? [...el.options].map((option) => tidy(option.textContent)) : [],
       context,
-    });
+    } });
   }
 
   for (const container of widgetContainers(root)) {
     if (out.length >= maxControls) return out;
     const context = contextOf(container.firstElementChild ?? container, contextLimit);
-    out.push({
+    out.push({ el: container, control: {
       handle: fieldSignature({ name: '', id: container.id, type: 'widget', label: context.split(' ')[0] || '' }),
       type: 'widget',
       required: [...container.querySelectorAll('[class*="required"]')].some((m) => tidy(m.textContent) === '*'),
       options: [],
       context,
-    });
+    } });
   }
 
   return out;
 }
+
+/** 只要控件描述，不要元素。给服务端和模型看的就是这个。 */
+export function snapshotControls(root = document, opts = {}) {
+  return snapshotEntries(root, opts).map((entry) => entry.control);
+}
+
+/** 按句柄反查元素。找不到返回 null——绝不退而求其次去猜别的控件。 */
+export function elementForHandle(root = document, handle) {
+  const hit = snapshotEntries(root).find((entry) => entry.control.handle === handle);
+  return hit ? hit.el : null;
+}
+
+/**
+ * 按快照句柄填写。
+ *
+ * 快照必须同时是采集和填写的来源，否则模型按快照的句柄作答、填写却按另一套签名
+ * 定位，永远对不上号。
+ *
+ * 三类分流：
+ *   原生输入框  直接写值并派发 input/change
+ *   widget      交回上层用驱动器点开面板选中——这里不硬填
+ *   文件框      永远跳过，文件由独立的 upload 任务处理
+ */
+export function fillByHandle(root = document, values = []) {
+  const filled = [];
+  const skipped = [];
+  const widgets = [];
+  if (!Array.isArray(values) || values.length === 0) return { filled, skipped, widgets };
+
+  const entries = snapshotEntries(root);
+  for (const item of values) {
+    const hit = entries.find((entry) => entry.control.handle === item.signature);
+    if (!hit) { skipped.push({ signature: item.signature, reason: 'not_found' }); continue; }
+    if (hit.control.type === 'widget') { widgets.push(item); continue; }
+    if (hit.control.type === 'file') { skipped.push({ signature: item.signature, reason: 'file_input' }); continue; }
+    if (typeof item.value !== 'string') { skipped.push({ signature: item.signature, reason: 'invalid_value' }); continue; }
+
+    try {
+      nativeSetValue(hit.el, item.value);
+      hit.el.dispatchEvent(new Event('input', { bubbles: true }));
+      hit.el.dispatchEvent(new Event('change', { bubbles: true }));
+      filled.push(item.signature);
+    } catch (error) {
+      skipped.push({ signature: item.signature, reason: 'set_failed', error: String(error?.message || error) });
+    }
+  }
+  return { filled, skipped, widgets };
+}
+
