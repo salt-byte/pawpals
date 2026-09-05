@@ -404,3 +404,30 @@ describe('面板内不逐个做可见性检查，并且有扫描上限', () => {
   });
 });
 
+/**
+ * 真机：帆软那页 15 个控件探测超过 220 秒。瓶颈是两个学校下拉——2604 个选项光
+ * 渲染就要几秒。现在只有总预算、没有单字段上限，一个慢控件就能吃掉全部时间，
+ * 后面十几个字段一个都探不到。
+ */
+describe('单字段探测超时', () => {
+  const target = (label) => ({ field: { signature: `sig-${label}`, label }, container: {} });
+
+  it('单个控件超时后跳过它，继续探后面的', async () => {
+    const driver = {
+      probeOptions: vi.fn()
+        .mockImplementationOnce(() => new Promise((r) => setTimeout(() => r(['慢']), 10000)))
+        .mockResolvedValueOnce(['甲', '乙']),
+    };
+    const result = await probeWidgets([target('慢控件'), target('学历')], { driver, perFieldMs: 50 });
+
+    expect(result.probed[0]).toMatchObject({ label: '慢控件', options: [], timedOut: true });
+    expect(result.probed[1]).toMatchObject({ label: '学历', options: ['甲', '乙'] });
+  });
+
+  it('没超时的不打 timedOut 标记', async () => {
+    const driver = { probeOptions: vi.fn(async () => ['甲']) };
+    const { probed } = await probeWidgets([target('学历')], { driver, perFieldMs: 5000 });
+    expect(probed[0].timedOut).toBe(false);
+  });
+});
+

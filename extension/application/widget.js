@@ -211,7 +211,10 @@ export async function applyWidgetValues(root = document, values = [], { driver, 
  * 宁可返回一半并说清楚是一半，也不要让整个任务超时——超时的任务会卡在队首，
  * 后面所有投递都动不了。
  */
-export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, now = () => Date.now() } = {}) {
+/** 单个控件最多花多久。超了就跳过，别让一个慢控件吃掉整轮预算。 */
+const DEFAULT_PER_FIELD_MS = 8000;
+
+export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, now = () => Date.now() } = {}) {
   const probed = [];
   if (!driver || targets.length === 0) return { probed, partial: false };
 
@@ -223,7 +226,19 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
   for (const { field, container } of list) {
     if (now() - startedAt >= budgetMs) { partial = true; break; }
     try {
-      const all = await driver.probeOptions(container);
+      // 单字段超时：真机上帆软那两个学校下拉各有 2604 个选项，光渲染就要几秒，
+      // 只有总预算的话它们会吃掉全部时间，后面十几个字段一个都探不到。
+      const TIMEOUT = Symbol('probe-timeout');
+      let timer;
+      const all = await Promise.race([
+        driver.probeOptions(container),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), perFieldMs); }),
+      ]).finally(() => clearTimeout(timer));
+
+      if (all === TIMEOUT) {
+        probed.push({ signature: field.signature, label: field.label, options: [], optionCount: 0, truncated: false, timedOut: true });
+        continue;
+      }
       // 截断超长列表。真机上帆软的「本科学校」是全国高校下拉，探回来 2604 个，
       // 两个学校字段合起来 5208 个——塞进 LLM prompt 直接把请求撑爆。这类字段
       // 本质是「可搜索」而不是「可枚举」，完整列表对模型没有意义。
@@ -232,6 +247,7 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
         options: all.slice(0, maxOptions),
         optionCount: all.length,
         truncated: all.length > maxOptions,
+        timedOut: false,
       });
     } catch (error) {
       probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
