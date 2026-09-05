@@ -197,3 +197,45 @@ describe('派发要有超时——标签页被丢弃时 sendMessage 会挂住', 
   });
 });
 
+/**
+ * 光有超时不够：标签页被丢弃后 content script 就没了，除非页面重新加载，否则
+ * PAGE_READY 永远不会来，待办里的任务就一直等下去。所以派发失败时要主动把那个
+ * 标签页刷一下，让 content script 回来。
+ */
+describe('派发失败时复活标签页', () => {
+  it('派发挂住后刷新目标标签页，让 content script 回来', async () => {
+    const reloadTab = vi.fn(async () => {});
+    const dispatcher = createOfficialDispatcher({
+      listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
+      sendToTab: () => new Promise(() => {}),
+      reportResult: vi.fn(), reloadTab, sendTimeoutMs: 50,
+    });
+
+    await dispatcher.accept(task);
+    expect(reloadTab).toHaveBeenCalledWith(7);
+    expect(dispatcher.pendingCount()).toBe(1);
+  });
+
+  it('同一个任务只刷一次，不反复刷页面', async () => {
+    const reloadTab = vi.fn(async () => {});
+    const dispatcher = createOfficialDispatcher({
+      listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
+      sendToTab: () => new Promise(() => {}),
+      reportResult: vi.fn(), reloadTab, sendTimeoutMs: 30,
+    });
+    await dispatcher.accept(task);
+    await dispatcher.onPageReady('https://acme.mokahr.com');
+    expect(reloadTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('派发成功时不刷页面', async () => {
+    const reloadTab = vi.fn(async () => {});
+    const dispatcher = createOfficialDispatcher({
+      listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
+      sendToTab: async () => ({ ok: true }), reportResult: vi.fn(), reloadTab,
+    });
+    await dispatcher.accept(task);
+    expect(reloadTab).not.toHaveBeenCalled();
+  });
+});
+

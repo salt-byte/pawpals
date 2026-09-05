@@ -100,6 +100,8 @@ const dispatcher = createOfficialDispatcher({
     return tab;
   },
   reportResult: (id, result) => sendToServer({ type: 'result', id, result }),
+  // 标签页被丢弃后只能靠重新加载把 content script 请回来
+  reloadTab: (tabId) => chrome.tabs.reload(tabId),
 });
 
 function connectOfficialSocket() {

@@ -63,11 +63,13 @@ export function pickTargetTab(taskUrl, tabs) {
  */
 const DEFAULT_SEND_TIMEOUT_MS = 20000;
 
-export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult, sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS }) {
+export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult, reloadTab, sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS }) {
   /** 已收到但还没派出去的任务。 */
   const pending = new Map();
   /** 已经为哪些任务开过页，避免页面加载期间重复开。 */
   const openedFor = new Set();
+  /** 已经为哪些任务刷过页，避免反复刷新用户正在看的页面。 */
+  const reloadedFor = new Set();
 
   /** 尝试把一个任务交给页面。成功返回 true（此时已回报），否则 false。 */
   async function tryDispatch(task) {
@@ -87,8 +89,15 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
     } finally {
       clearTimeout(timer);
     }
-    // 挂住多半是标签页被丢弃了：按失败处理，任务留在待办，等页面重新就绪再派
-    if (result === TIMEOUT) return false;
+    // 挂住多半是标签页被丢弃了。光等没用——content script 已经没了，PAGE_READY
+    // 永远不会来。主动刷一下把它请回来，刷完的 PAGE_READY 会带着待办任务重来。
+    if (result === TIMEOUT) {
+      if (reloadTab && !reloadedFor.has(task.id)) {
+        reloadedFor.add(task.id);
+        try { await reloadTab(tabId); } catch { /* 标签页没了 */ }
+      }
+      return false;
+    }
     reportResult(task.id, result ?? { ok: false, error: '页面未返回结果' });
     return true;
   }
