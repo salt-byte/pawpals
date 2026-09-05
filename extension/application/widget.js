@@ -238,7 +238,7 @@ export async function applyWidgetValues(root = document, values = [], { driver, 
 /** 单个控件最多花多久。超了就跳过，别让一个慢控件吃掉整轮预算。 */
 const DEFAULT_PER_FIELD_MS = 8000;
 
-export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, now = () => Date.now() } = {}) {
+export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, now = () => Date.now(), onProgress } = {}) {
   const probed = [];
   if (!driver || targets.length === 0) return { probed, partial: false };
 
@@ -247,8 +247,10 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
 
   const startedAt = now();
   let partial = false;
-  for (const { field, container } of list) {
+  const report = (progress) => { try { onProgress?.(progress); } catch { /* 进度上报不能打断填写 */ } };
+  for (const [index, { field, container }] of list.entries()) {
     if (now() - startedAt >= budgetMs) { partial = true; break; }
+    report({ stage: 'probing', completed: index, total: list.length, label: field.label, signature: field.signature });
     try {
       // 单字段超时：真机上帆软那两个学校下拉各有 2604 个选项，光渲染就要几秒，
       // 只有总预算的话它们会吃掉全部时间，后面十几个字段一个都探不到。
@@ -261,6 +263,7 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
 
       if (all === TIMEOUT) {
         probed.push({ signature: field.signature, label: field.label, options: [], optionCount: 0, truncated: false, timedOut: true });
+        report({ stage: 'probing', completed: index + 1, total: list.length, label: field.label, signature: field.signature, timedOut: true });
         continue;
       }
       // 截断超长列表。真机上帆软的「本科学校」是全国高校下拉，探回来 2604 个，
@@ -273,8 +276,10 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
         truncated: all.length > maxOptions,
         timedOut: false,
       });
+      report({ stage: 'probing', completed: index + 1, total: list.length, label: field.label, signature: field.signature });
     } catch (error) {
       probed.push({ signature: field.signature, label: field.label, options: [], error: String(error?.message || error) });
+      report({ stage: 'probing', completed: index + 1, total: list.length, label: field.label, signature: field.signature, error: true });
     }
   }
   return { probed, partial };
@@ -313,4 +318,3 @@ export function createPageWidgetDriver({ click, type, root = document } = {}) {
     },
   });
 }
-

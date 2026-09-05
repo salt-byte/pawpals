@@ -107,6 +107,29 @@ describe("租约与过期：卡住的任务不能堵死队列", () => {
     expect(queue.next()).toBeNull();
   });
 
+  it("把阶段和进度留在服务端：扩展断开后仍能说明卡在哪", () => {
+    let clock = 0;
+    const queue = new OfficialApplicationQueue({ now: () => clock });
+    const task = queue.enqueue({ ...draft, kind: "probe" });
+    expect(queue.status(task.id)).toMatchObject({ phase: "queued", attempts: 0 });
+
+    queue.next();
+    queue.progress(task.id, { stage: "probing", completed: 3, total: 15, label: "学历" });
+    expect(queue.status(task.id)).toMatchObject({ phase: "running", attempts: 1, progress: { completed: 3, total: 15 } });
+
+    clock += 10;
+    queue.releaseLeases();
+    expect(queue.status(task.id)).toMatchObject({ phase: "queued", progress: { stage: "probing", completed: 3, total: 15 } });
+  });
+
+  it("结束后保留完成状态，供外部查询而不是只留一份裸结果", () => {
+    const queue = new OfficialApplicationQueue();
+    const task = queue.enqueue({ ...draft, kind: "inspect" });
+    queue.next();
+    queue.complete(task.id, { ok: true, fields: [] });
+    expect(queue.status(task.id)).toMatchObject({ phase: "completed", attempts: 1, progress: { stage: "completed" } });
+  });
+
   it("不传配置时沿用默认值，行为跟以前一样", () => {
     const queue = new OfficialApplicationQueue();
     const task = queue.enqueue({ ...draft, kind: "inspect" });

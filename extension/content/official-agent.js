@@ -33,6 +33,15 @@ function toBackground(message) {
 }
 
 /**
+ * 页面不能直连本地服务（受页面 CORS 约束），进度和最终结果一样经 service
+ * worker 的 WebSocket 回传。它只记录最近一个安全步骤，掉线后仍由服务端保留。
+ */
+function reportTaskProgress(task, progress) {
+  if (!task?.id) return;
+  void toBackground({ type: 'OFFICIAL_TASK_PROGRESS', id: task.id, progress });
+}
+
+/**
  * 告诉 service worker 这个页面上线了。
  *
  * 带上 origin 是因为任务可能在本页加载完成之前就被推过来了——那时还没有
@@ -57,12 +66,14 @@ async function remember(observation) {
 }
 
 async function execute(task) {
+  reportTaskProgress(task, { stage: 'page_ready', url: location.href });
   // 先等表单渲染完。扩展自主开页后 PAGE_READY 在 document_idle 就发了，而简道云
   // 这类 SPA 那时还没把控件渲染出来——真机上因此出过一次 ok=true 但 probed=0 的
   // 假成功。等不到就带着 formReady:false 继续，让上游知道结果可能不完整。
   const readiness = await waitForFormReady({ countFields: () => collectApplicationFields(document).length });
   const fields = collectApplicationFields(document);
   if (task.kind === 'inspect') {
+    reportTaskProgress(task, { stage: 'inspecting' });
     const provider = detectApplicationProvider(location.href);
     const warnings = formWarnings(fields, document);
     await remember({ url: location.href, provider, fields });
@@ -73,6 +84,7 @@ async function execute(task) {
       warnings, formReady: readiness.ready, hasSubmit: Boolean(findSubmitControl(document)) };
   }
   if (task.kind === 'upload') {
+    reportTaskProgress(task, { stage: 'uploading' });
     // 上传单独成一拍：不少站点解析简历后会把结果覆盖到表单上，上传完立刻填
     // 等于白填。这一拍只装文件，等页面解析完再由后续的 inspect + fill 接手。
     const { uploaded, skipped } = applyFileUploads(document, task.payload?.uploads || []);
@@ -80,6 +92,7 @@ async function execute(task) {
   }
 
   if (task.kind === 'fill') {
+    reportTaskProgress(task, { stage: 'filling', total: Array.isArray(task.payload?.values) ? task.payload.values.length : 0 });
     const values = task.payload?.values || [];
     // 模型是按快照的句柄作答的，先用快照定位；快照里没有的再交给旧的签名路径，
     // 迁移期两套并存，任何一套能定位到就算数。
@@ -134,6 +147,7 @@ async function execute(task) {
       driver: widgetDriver,
       signatures: task.payload?.signatures,
       budgetMs: Number(task.payload?.budgetMs) || 20000,
+      onProgress: (progress) => reportTaskProgress(task, progress),
     });
     return { ok: true, probed, partial, formReady: readiness.ready };
   }

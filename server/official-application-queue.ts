@@ -28,6 +28,19 @@ export type OfficialApplicationTask = {
 
 export type TaskResult = { ok: boolean; error?: string; [key: string]: unknown };
 
+/** 服务端是任务事实来源；扩展、标签页只是可以随时消失的执行器。 */
+export type OfficialTaskPhase = "queued" | "running" | "completed" | "failed";
+export type OfficialTaskStatus = {
+  id: string;
+  kind: OfficialTaskKind;
+  phase: OfficialTaskPhase;
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
+  /** 页面主动上报的最近一个安全进度点；断线重派时让用户知道从哪一步继续。 */
+  progress?: Record<string, unknown>;
+};
+
 export type QueueOptions = {
   now?: () => number;
   /** 派发之后多久算「这次没人接」，可以重新派。 */
@@ -54,6 +67,7 @@ export class OfficialApplicationQueue {
   private readonly results = new Map<string, TaskResult>();
   private readonly confirmations = new Map<string, Omit<OfficialApplicationTask, "id" | "kind" | "createdAt">>();
   private readonly leases = new Map<string, number>();
+  private readonly statuses = new Map<string, OfficialTaskStatus>();
   private readonly now: () => number;
   private readonly leaseMs: number;
   private readonly maxAgeMs: number;
@@ -67,6 +81,7 @@ export class OfficialApplicationQueue {
   enqueue(input: Omit<OfficialApplicationTask, "id" | "createdAt">): OfficialApplicationTask {
     const task = { ...input, id: `official_${randomUUID()}`, createdAt: this.now() };
     this.tasks.set(task.id, task);
+    this.statuses.set(task.id, { id: task.id, kind: task.kind, phase: "queued", attempts: 0, createdAt: task.createdAt, updatedAt: task.createdAt });
     return task;
   }
 
@@ -77,7 +92,10 @@ export class OfficialApplicationQueue {
       if (task.createdAt > cutoff) continue;
       this.tasks.delete(id);
       this.leases.delete(id);
-      this.results.set(id, { ok: false, error: "任务超时：浏览器扩展未在时限内回报结果" });
+      const result = { ok: false, error: "任务超时：浏览器扩展未在时限内回报结果" };
+      this.results.set(id, result);
+      const status = this.statuses.get(id);
+      if (status) Object.assign(status, { phase: "failed", updatedAt: this.now(), progress: { stage: "expired", message: result.error } });
     }
   }
 
@@ -88,6 +106,8 @@ export class OfficialApplicationQueue {
       const leasedAt = this.leases.get(task.id);
       if (leasedAt !== undefined && now - leasedAt < this.leaseMs) continue;
       this.leases.set(task.id, now);
+      const status = this.statuses.get(task.id);
+      if (status) Object.assign(status, { phase: "running", attempts: status.attempts + 1, updatedAt: now, progress: { stage: "dispatched" } });
       return task;
     }
     return null;
@@ -102,6 +122,23 @@ export class OfficialApplicationQueue {
    */
   releaseLeases(): void {
     this.leases.clear();
+    for (const task of this.tasks.values()) {
+      const status = this.statuses.get(task.id);
+      // 保留最后一个页面安全点（例如 probe 已完成 3/15）；重连只是执行器换了，
+      // 不是任务从头开始。phase 变回 queued 让下一条连接可重新领取。
+      if (status) Object.assign(status, { phase: "queued", updatedAt: this.now() });
+    }
+  }
+
+  /** 进度不会结掉任务，因而 service worker 重启后仍保留在服务端供诊断和恢复。 */
+  progress(id: string, progress: Record<string, unknown>): boolean {
+    if (!this.tasks.has(id)) return false;
+    const status = this.statuses.get(id);
+    if (!status) return false;
+    status.phase = "running";
+    status.updatedAt = this.now();
+    status.progress = progress;
+    return true;
   }
 
   complete(id: string, result: TaskResult): boolean {
@@ -109,11 +146,22 @@ export class OfficialApplicationQueue {
     this.tasks.delete(id);
     this.leases.delete(id);
     this.results.set(id, result);
+    const status = this.statuses.get(id);
+    if (status) Object.assign(status, {
+      phase: result.ok ? "completed" : "failed",
+      updatedAt: this.now(),
+      progress: { stage: result.ok ? "completed" : "failed", message: result.error },
+    });
     return true;
   }
 
   result(id: string): TaskResult | null {
     return this.results.get(id) ?? null;
+  }
+
+  status(id: string): OfficialTaskStatus | null {
+    const status = this.statuses.get(id);
+    return status ? { ...status, progress: status.progress ? { ...status.progress } : undefined } : null;
   }
 
   requestConfirmation(input: Omit<OfficialApplicationTask, "id" | "kind" | "createdAt">): string {

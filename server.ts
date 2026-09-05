@@ -4024,6 +4024,12 @@ async function startServer() {
     ws.on("message", (raw) => {
       const message = parseClientMessage(raw);
       if (!message) return;
+      if (message.type === "progress") {
+        officialApplicationQueue.progress(message.id, message.progress);
+        const { stage = "working", completed, total, label } = message.progress;
+        console.log(`[official] ${message.id.slice(0, 24)} progress=${String(stage)}${completed !== undefined ? ` ${completed}/${total ?? "?"}` : ""}${label ? ` ${String(label)}` : ""}`);
+        return;
+      }
       // 这条链路（推送 → 开页 → 页面执行 → 回报）在服务端本来完全不可观测，
       // 出问题时分不清「扩展没收到」「页面没执行」还是「结果丢了」。
       const r: any = message.result || {};
@@ -5148,6 +5154,16 @@ async function startServer() {
     const result = officialApplicationQueue.result(String(req.params.taskId));
     if (!result) return res.status(404).json({ ok: false, error: "结果还没产生或任务不存在" });
     res.json({ ok: true, result });
+  });
+
+  /**
+   * 可恢复任务的状态端点。result 只在结束后才有；轮询这个端点可以区分
+   * 「扩展还在探第几个控件」与「扩展掉线、正在等重连」，不再只能干等超时。
+   */
+  app.get("/api/official-applications/:taskId/status", (req: any, res: any) => {
+    const status = officialApplicationQueue.status(String(req.params.taskId));
+    if (!status) return res.status(404).json({ ok: false, error: "任务不存在" });
+    res.json({ ok: true, status });
   });
 
   // 只有用户在对话确认后才能调用；确认令牌单次使用，生成真正的 submit 任务。

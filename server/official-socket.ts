@@ -18,7 +18,9 @@ export const OPEN = 1;
 
 export type TaskClient = { readyState?: number; send(data: string): void };
 
-export type ClientMessage = { type: "result"; id: string; result: any };
+export type ClientMessage =
+  | { type: "result"; id: string; result: any }
+  | { type: "progress"; id: string; progress: Record<string, unknown> };
 
 export function createTaskBroadcaster() {
   const clients = new Set<TaskClient>();
@@ -69,7 +71,12 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
   } catch {
     return null;
   }
-  if (!parsed || parsed.type !== "result" || typeof parsed.id !== "string" || !parsed.id) return null;
+  if (!parsed || typeof parsed.id !== "string" || !parsed.id) return null;
+  if (parsed.type === "progress") {
+    if (!parsed.progress || typeof parsed.progress !== "object" || Array.isArray(parsed.progress)) return null;
+    return { type: "progress", id: parsed.id, progress: parsed.progress };
+  }
+  if (parsed.type !== "result") return null;
   return {
     type: "result",
     id: parsed.id,

@@ -170,5 +170,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
+  if (message?.type === 'OFFICIAL_TASK_PROGRESS') {
+    // 进度是 best-effort：最终 result 才会结掉任务；此处失败不应影响页面执行。
+    connectOfficialSocket();
+    const sent = sendToServer({ type: 'progress', id: message.id, progress: message.progress || {} });
+    sendResponse({ ok: sent });
+    return false;
+  }
   return false;
 });

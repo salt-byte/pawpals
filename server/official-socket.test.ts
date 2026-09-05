@@ -73,6 +73,16 @@ describe("createTaskBroadcaster", () => {
 });
 
 describe("parseClientMessage", () => {
+  it("解析不结掉任务的进度帧", () => {
+    expect(parseClientMessage(JSON.stringify({ type: "progress", id: "official_1", progress: { stage: "probing", completed: 2, total: 15 } }))).toEqual({
+      type: "progress", id: "official_1", progress: { stage: "probing", completed: 2, total: 15 },
+    });
+  });
+
+  it("进度必须是对象，避免垃圾帧污染任务状态", () => {
+    expect(parseClientMessage(JSON.stringify({ type: "progress", id: "official_1", progress: "almost" }))).toBeNull();
+  });
+
   it("解析扩展回报的任务结果", () => {
     const raw = JSON.stringify({ type: "result", id: "official_1", result: { ok: true, provider: "moka" } });
     expect(parseClientMessage(raw)).toEqual({

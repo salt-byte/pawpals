@@ -252,6 +252,15 @@ describe('probeWidgets', () => {
     expect(result.partial).toBe(false);
   });
 
+  it('每个控件完成后上报可恢复进度', async () => {
+    const onProgress = vi.fn();
+    const driver = { probeOptions: vi.fn(async () => ['甲']) };
+    await probeWidgets([target('学历'), target('学位')], { driver, onProgress });
+
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: 'probing', completed: 1, total: 2, label: '学历' }));
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ stage: 'probing', completed: 2, total: 2, label: '学位' }));
+  });
+
   it('只探测指定的签名——服务端通常只需要几个字段的选项', async () => {
     const driver = { probeOptions: vi.fn(async () => ['甲']) };
     const result = await probeWidgets([target('学历'), target('学位')], { driver, signatures: ['sig-学位'] });
@@ -491,4 +500,3 @@ describe('带搜索框的面板：搜而不是枚举', () => {
     expect(result).toMatchObject({ ok: true, value: '研究生' });
   });
 });
-
