@@ -191,7 +191,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // 去——任务可能是在这个页面加载完成之前就推过来的。
     connectOfficialSocket();
     void officialClient.reportContext(message.payload);
-    void withKeepAlive(() => dispatcher.onPageReady(message.origin));
+    // 把上线的那个标签页一并给过去：同一申请页常常开着好几个标签页，按 URL
+    // 挑会挑中前几次留下的死页（见 official-task-router.js）。
+    void withKeepAlive(() => dispatcher.onPageReady(message.origin, sender.tab?.id));
     sendResponse({ ok: true });
     return false;
   }

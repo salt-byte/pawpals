@@ -239,3 +239,68 @@ describe('派发失败时复活标签页', () => {
   });
 });
 
+
+/**
+ * 陈旧标签页。
+ *
+ * 真机症状：同一个申请页开着好几个标签页（前几次自主开页留下的），其中旧的那些
+ * content script 早就随扩展重载失效了。pickTargetTab 按 URL 挑，永远挑中列表里
+ * 第一个——也就是死的那个。发消息被拒 → 任务进待办 → 开新标签页 → 新页上线触发
+ * onPageReady → 又按 URL 重新挑 → 再次挑中死的。循环：标签页越开越多，结果永远
+ * 回不来，服务端看到的是彻底的沉默。
+ *
+ * 修法：谁上线就派给谁。onPageReady 知道是哪个标签页上线的，不该再去猜。
+ */
+describe('派给刚上线的那个标签页', () => {
+  function harness() {
+    const sent = [];
+    const reported = [];
+    return {
+      sent,
+      reported,
+      dispatcher: createOfficialDispatcher({
+        // 两个同 URL 的标签页：1 是陈旧的死页，2 是刚开的活页
+        listTabs: async () => [
+          { id: 1, url: 'https://form.example.com/a' },
+          { id: 2, url: 'https://form.example.com/a' },
+        ],
+        sendToTab: async (tabId, message) => {
+          sent.push(tabId);
+          if (tabId === 1) throw new Error('Could not establish connection');
+          return { ok: true, from: tabId, ...message };
+        },
+        openTab: async () => ({ id: 2 }),
+        reportResult: (id, result) => reported.push({ id, result }),
+        reloadTab: async () => {},
+        sendTimeoutMs: 50,
+      }),
+    };
+  }
+
+  const task = { id: 't1', kind: 'inspect', url: 'https://form.example.com/a' };
+
+  it('第一次派发挑中死页，任务留在待办', async () => {
+    const { dispatcher, reported } = harness();
+    await dispatcher.accept(task);
+    expect(reported).toHaveLength(0);
+    expect(dispatcher.pendingCount()).toBe(1);
+  });
+
+  it('新页上线后派给它本人，而不是重新按 URL 挑', async () => {
+    const { dispatcher, sent, reported } = harness();
+    await dispatcher.accept(task);
+    sent.length = 0;
+    await dispatcher.onPageReady('https://form.example.com', 2);
+    expect(sent).toEqual([2]);
+    expect(reported).toEqual([{ id: 't1', result: { ok: true, from: 2, type: 'OFFICIAL_TASK', task } }]);
+    expect(dispatcher.pendingCount()).toBe(0);
+  });
+
+  it('没给 tabId 时退回原来的按 URL 挑，老调用方不受影响', async () => {
+    const { dispatcher, sent } = harness();
+    await dispatcher.accept(task);
+    sent.length = 0;
+    await dispatcher.onPageReady('https://form.example.com');
+    expect(sent[0]).toBe(1);
+  });
+});

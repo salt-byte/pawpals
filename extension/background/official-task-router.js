@@ -71,10 +71,18 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
   /** 已经为哪些任务刷过页，避免反复刷新用户正在看的页面。 */
   const reloadedFor = new Set();
 
-  /** 尝试把一个任务交给页面。成功返回 true（此时已回报），否则 false。 */
-  async function tryDispatch(task) {
-    const tabId = pickTargetTab(task.url, await listTabs());
-    if (tabId === null) return false;
+  /**
+   * 尝试把一个任务交给页面。成功返回 true（此时已回报），否则 false。
+   *
+   * preferredTabId 是「刚上线的那个标签页」。必须优先用它，不能再按 URL 挑：
+   * 同一个申请页常常开着好几个标签页（前几次自主开页留下的），旧的那些 content
+   * script 早就随扩展重载失效了，而 pickTargetTab 永远返回列表里第一个匹配的
+   * ——也就是死的那个。真机上因此陷入死循环：发消息被拒 → 开新页 → 新页上线 →
+   * 又挑中死页 → 再开新页。标签页越堆越多，结果永远回不来。
+   */
+  async function tryDispatch(task, preferredTabId) {
+    const tabId = preferredTabId ?? pickTargetTab(task.url, await listTabs());
+    if (tabId === null || tabId === undefined) return false;
 
     const TIMEOUT = Symbol('dispatch-timeout');
     let result;
@@ -120,8 +128,12 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
       }
     },
 
-    /** 某个页面的 content script 上线了，把待办里同源的任务补派给它。 */
-    async onPageReady(origin) {
+    /**
+     * 某个页面的 content script 上线了，把待办里同源的任务补派给它。
+     *
+     * tabId 是上线的那个标签页。给了就直接派给它——谁上线就派给谁，不再去猜。
+     */
+    async onPageReady(origin, tabId) {
       for (const task of [...pending.values()]) {
         let taskOrigin;
         try {
@@ -131,7 +143,7 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
           continue;
         }
         if (taskOrigin !== origin) continue;
-        if (await tryDispatch(task)) pending.delete(task.id);
+        if (await tryDispatch(task, tabId)) pending.delete(task.id);
       }
     },
 

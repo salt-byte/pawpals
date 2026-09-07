@@ -109,7 +109,10 @@ const officialTaskHub = createTaskBroadcaster();
  */
 function enqueueOfficialTask(input: Parameters<OfficialApplicationQueue["enqueue"]>[0]) {
   const task = officialApplicationQueue.enqueue(input);
-  officialTaskHub.broadcast(task);
+  // 送达数必须记：这一步之前完全不可观测，任务卡住时分不清「没推出去」
+  // 「推了没人收」还是「收了没执行」。0 是正常情况（扩展离线，靠重连补发）。
+  const delivered = officialTaskHub.broadcast(task);
+  console.log(`[official] 入队 ${task.id.slice(0, 24)} kind=${task.kind} 送达=${delivered}`);
   return task;
 }
 let activeOfficialApplicationPage: { url: string; title: string; provider: string; seenAt: number } | null = null;
