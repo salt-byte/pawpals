@@ -125,3 +125,42 @@ export function buildAgentPrompt(input: {
 
   return blocks.join("\n\n");
 }
+
+/**
+ * 从全量消息里取出某个群最近的对话，转成模型认得的格式。
+ *
+ * 求职群入口此前只传当前这一句，连首席都没有记忆；私聊路径反而是好好建了
+ * 历史的。这里把求职群补齐。
+ *
+ * 跳过空 content：streamAgent 会先塞一条空的占位消息再流式填充，历史里
+ * 混进这种空壳只会浪费 token 并干扰模型。
+ */
+export function buildTurnHistory(
+  messages: { groupId?: string; content?: string; isBot?: boolean; sender?: string }[],
+  groupId: string,
+  limit = 20
+): { role: string; content: string; name?: string }[] {
+  return messages
+    .filter((m) => m.groupId === groupId && typeof m.content === "string" && m.content.trim())
+    .slice(-limit)
+    .map((m) =>
+      m.isBot
+        ? { role: "assistant", content: m.content as string, name: m.sender || "助手" }
+        : { role: "user", content: m.content as string }
+    );
+}
+
+/** 首席在综合时用这个标记申请追加一轮。硬上限一次，由调用方保证。 */
+export const NEED_MORE_TAG = "NEED_MORE::";
+
+/**
+ * 解析首席综合结尾的追加轮申请。
+ *
+ * 这是方案里给一次性计划留的纠错出口——计划出错时不至于毫无补救，
+ * 但也不会滑向「每轮都判断一次」的成本。
+ */
+export function parseNeedMore(reply: string, validAgentIds: string[]): PlanTask[] {
+  const at = reply.indexOf(NEED_MORE_TAG);
+  if (at === -1) return [];
+  return parsePlan(reply.slice(at + NEED_MORE_TAG.length), validAgentIds);
+}
