@@ -164,3 +164,74 @@ export function parseNeedMore(reply: string, validAgentIds: string[]): PlanTask[
   if (at === -1) return [];
   return parsePlan(reply.slice(at + NEED_MORE_TAG.length), validAgentIds);
 }
+
+export type PipelineStage = { agentId: string; task: string; dependsOn?: string[] };
+export type PipelineTemplate = { id: string; match: RegExp; stages: PipelineStage[] };
+
+/**
+ * 求职群的固定流水线。
+ *
+ * 为什么写死而不是每轮问模型：这条赛道的主要链路本来就是固定的（拆 JD →
+ * 改简历 → 投递 → 备面）。每轮花一次模型调用去重新推导同一条链，既费钱，
+ * 又让同一句话两次的编排可能不一样、出问题没法复现。
+ *
+ * 顺序即优先级，第一个命中的模板胜出。apply 必须排在 assess 前面——
+ * 「帮我投这个岗」两边都匹配得上，但用户要的是投递，不是评估。
+ *
+ * 模板覆盖不到的请求会落到模型出计划那条兜底路径，所以这张表不需要穷举。
+ */
+export const JOB_PIPELINES: PipelineTemplate[] = [
+  {
+    id: "interview",
+    match: /面试|模拟面|面经|群面|hr\s*面/i,
+    stages: [{ agentId: "interview-coach", task: "用户说：{{msg}}\n\n带他做面试准备：可能被问什么、怎么答、他现在的短板在哪。" }],
+  },
+  {
+    id: "apply",
+    match: /投递|帮.*投|请.*投|申请这个岗|apply/i,
+    stages: [
+      { agentId: "resume-expert", task: "用户说：{{msg}}\n\n按这次要投的岗位把简历定制一版，说明改了哪里、为什么。" },
+      { agentId: "app-tracker", task: "用户说：{{msg}}\n\n执行投递并记录进度，设置后续跟进。简历专家刚定制的版本见上方伙伴产出。", dependsOn: ["resume-expert"] },
+    ],
+  },
+  {
+    id: "search",
+    match: /搜.*(岗|工作|职位|实习)|找.*(工作|岗|实习)|有什么(岗|职位)|推荐.*岗|招聘/,
+    stages: [
+      { agentId: "job-hunter", task: "用户说：{{msg}}\n\n去搜岗位，给出具体的公司、职位和链接。" },
+      { agentId: "professional-teacher", task: "用户说：{{msg}}\n\n对岗位猎手刚搜到的那批岗位（见上方伙伴产出）逐个分析匹配度并排序，说清楚为什么。", dependsOn: ["job-hunter"] },
+    ],
+  },
+  {
+    id: "resume",
+    match: /改简历|优化简历|简历怎么样|看.*简历|润色.*简历|cover\s*letter/i,
+    stages: [{ agentId: "resume-expert", task: "用户说：{{msg}}\n\n优化简历，指出具体问题和改法。" }],
+  },
+  {
+    id: "assess",
+    match: /这个岗|这份工作|合不合适|匹配度|适合我吗|岗位要求|jd/i,
+    stages: [
+      { agentId: "professional-teacher", task: "用户说：{{msg}}\n\n拆解这个岗位的要求，逐条对照用户档案分析匹配度。" },
+      { agentId: "resume-expert", task: "用户说：{{msg}}\n\n根据专业老师刚做的匹配度分析（见上方伙伴产出），指出简历上还缺什么、该怎么补。", dependsOn: ["professional-teacher"] },
+    ],
+  },
+];
+
+/**
+ * 按用户这句话找固定流水线。命中返回已插值的计划，没命中返回 null
+ * ——调用方据此决定是否要花一次模型调用去出计划。
+ */
+export function matchPipeline(
+  userMsg: string,
+  templates: PipelineTemplate[] = JOB_PIPELINES
+): PlanTask[] | null {
+  for (const tpl of templates) {
+    if (!tpl.match.test(userMsg)) continue;
+    return tpl.stages.map((stage) => ({
+      agentId: stage.agentId,
+      task: stage.task.replaceAll("{{msg}}", userMsg),
+      dependsOn: stage.dependsOn ?? [],
+    }));
+  }
+  return null;
+}

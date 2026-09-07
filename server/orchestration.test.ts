@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parsePlan, batchByDependency, buildAgentPrompt, buildTurnHistory, parseNeedMore } from "./orchestration.ts";
+import { parsePlan, batchByDependency, buildAgentPrompt, buildTurnHistory, parseNeedMore, matchPipeline, JOB_PIPELINES } from "./orchestration.ts";
 
 const VALID = ["job-hunter", "resume-expert", "interview-coach", "app-tracker"];
 
@@ -206,5 +206,69 @@ describe("parseNeedMore", () => {
 
   it("追加任务里不认识的 agentId 同样被丢掉", () => {
     expect(parseNeedMore('NEED_MORE::[{"agentId":"产品经理","task":"随便"}]', VALID2)).toEqual([]);
+  });
+});
+
+describe("matchPipeline", () => {
+  it("面试类请求命中单段流水线", () => {
+    const plan = matchPipeline("帮我准备一下面试");
+    expect(plan).not.toBeNull();
+    expect(plan!.map((t) => t.agentId)).toEqual(["interview-coach"]);
+  });
+
+  it("投递类请求是两段，投递管家依赖简历专家", () => {
+    const plan = matchPipeline("帮我投递这个岗位")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["resume-expert", "app-tracker"]);
+    expect(plan[1].dependsOn).toEqual(["resume-expert"]);
+  });
+
+  it("「帮我投这个岗」命中投递而不是评估 —— 模板顺序决定归属", () => {
+    const plan = matchPipeline("帮我投这个岗")!;
+    expect(plan[0].agentId).toBe("resume-expert");
+  });
+
+  it("搜岗类请求是两段，专业老师依赖岗位猎手", () => {
+    const plan = matchPipeline("帮我搜几个产品岗")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["job-hunter", "professional-teacher"]);
+    expect(plan[1].dependsOn).toEqual(["job-hunter"]);
+  });
+
+  it("改简历类请求命中单段", () => {
+    const plan = matchPipeline("帮我优化简历")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["resume-expert"]);
+  });
+
+  it("评估类请求是两段，简历专家依赖专业老师", () => {
+    const plan = matchPipeline("这个岗我合不合适")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["professional-teacher", "resume-expert"]);
+    expect(plan[1].dependsOn).toEqual(["professional-teacher"]);
+  });
+
+  it("没有模板命中时返回 null，交给模型出计划", () => {
+    expect(matchPipeline("今天天气不错")).toBeNull();
+  });
+
+  it("把用户原话插进任务描述里", () => {
+    const plan = matchPipeline("帮我准备一下面试")!;
+    expect(plan[0].task).toContain("帮我准备一下面试");
+    expect(plan[0].task).not.toContain("{{msg}}");
+  });
+
+  it("每一段的 dependsOn 都是数组，与 parsePlan 的输出形状一致", () => {
+    const plan = matchPipeline("帮我优化简历")!;
+    for (const t of plan) expect(Array.isArray(t.dependsOn)).toBe(true);
+  });
+
+  it("内置模板全部拓扑可解 —— 手写模板里不能有环", () => {
+    for (const tpl of JOB_PIPELINES) {
+      const plan = tpl.stages.map((s) => ({ ...s, dependsOn: s.dependsOn ?? [] }));
+      expect(batchByDependency(plan), `模板 ${tpl.id} 成环`).not.toBeNull();
+    }
+  });
+
+  it("接受自定义模板表，便于扩展和测试", () => {
+    const custom = [{ id: "t", match: /喵/, stages: [{ agentId: "networker", task: "{{msg}}" }] }];
+    expect(matchPipeline("喵喵喵", custom)!.map((t) => t.agentId)).toEqual(["networker"]);
+    expect(matchPipeline("汪汪汪", custom)).toBeNull();
   });
 });
