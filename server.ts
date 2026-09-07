@@ -3399,7 +3399,7 @@ async function runAgentChain(
           { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${sharedProfileCtx}\n\n你的任务：${task}` }
         ];
         const { reply } = await streamAgent(expert, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
-        io.emit("agent_done", { groupId });
+        io.emit("agent_done", { agentName: expert.name, groupId });
         if (reply) expertResults.push({ agentId, reply });
       }));
 
@@ -3446,7 +3446,7 @@ async function runAgentChain(
         { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${profileCtx}\n\n请处理：${userMsg}` }
       ];
       await streamAgent(routeTarget, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
-      io.emit("agent_done", { groupId });
+      io.emit("agent_done", { agentName: routeTarget.name, groupId });
       return;
     }
   }
@@ -3487,7 +3487,7 @@ async function runAgentChain(
           { role: "user", content: `用户原始请求：${taskDesc}${profileCtx}` }],
         depth + 1, io, groupId, allMessages, petName, petPersonality
       );
-      io.emit("agent_done", { groupId });
+      io.emit("agent_done", { agentName: nextAgent.name, groupId });
     }
   }
 
@@ -3502,7 +3502,7 @@ async function runAgentChain(
         [{ role: "user", content: `${agent.name} 刚刚完成了任务。请接住结果、总结给用户、推进下一步。不要重复专家说过的内容。` }],
         0, io, groupId, allMessages, petName, petPersonality
       );
-      io.emit("agent_done", { groupId });
+      io.emit("agent_done", { agentName: petName, groupId });
     }
   }
 }
@@ -3980,7 +3980,7 @@ async function handleSelectedJobsWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { groupId: "job" });
+      io.emit("agent_done", { agentName: agent.name, groupId: "job" });
     },
     readRow: (row) =>
       loadCollaborationBoard().find(
@@ -4147,7 +4147,7 @@ async function handleApplyReadyWorkflow(
       petName,
       petPersonality
     );
-    io.emit("agent_done", { groupId: "job" });
+    io.emit("agent_done", { agentName: appTracker.name, groupId: "job" });
 
     if (shouldRunNetworker) {
       io.emit("agent_thinking", { agentName: networker.name, groupId: "job" });
@@ -4172,7 +4172,7 @@ async function handleApplyReadyWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { groupId: "job" });
+      io.emit("agent_done", { agentName: networker.name, groupId: "job" });
     }
   }
 
@@ -4268,7 +4268,7 @@ async function handlePipelineSignalWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { groupId: "job" });
+      io.emit("agent_done", { agentName: interviewCoach.name, groupId: "job" });
     }
     return true;
   }
@@ -5092,19 +5092,12 @@ async function startServer() {
             for (const agent of jobAgentsWithPetName) {
               io.emit("agent_thinking", { agentName: agent.name, groupId: msg.groupId });
               await runAgentChain(agent, thread, MAX_CHAIN_DEPTH, io, msg.groupId, messages, pn, pp);
-              io.emit("agent_done", { groupId: msg.groupId });
+              io.emit("agent_done", { agentName: agent.name, groupId: msg.groupId });
             }
           } else {
-            const targetAgent = detectTargetAgent(msg.content);
-            const resolvedAgent = targetAgent.id === "career-planner"
-              ? { ...targetAgent, name: pn, avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}` }
-              : targetAgent;
-            await runAgentChain(
-              resolvedAgent,
-              [{ role: "user", content: msg.content }],
-              0, io, msg.groupId, messages, pn, pp
-            );
-            io.emit("agent_done", { groupId: msg.groupId });
+            // 新编排：出计划 → 分批执行 → 综合。detectTargetAgent 的显式 @ 判断
+            // 已收进 runOrchestratedTurn（用 detectExplicitAgentId），不再在这里做一遍。
+            await runOrchestratedTurn(io, msg.groupId, msg.content, messages, pn, pp);
           }
         }, 800);
       } else {
@@ -5615,7 +5608,7 @@ async function startServer() {
           setTimeout(async () => {
             io.emit("agent_thinking", { agentName: jobHunter.name, groupId: "job" });
             const searchResultText = await executeTool("search_jobs", resumeTask);
-            io.emit("agent_done", { groupId: "job" });
+            io.emit("agent_done", { agentName: jobHunter.name, groupId: "job" });
             if (searchResultText.includes("NEED_LOGIN")) {
               bossLoginPending = true;
               bossLoginPlatform = "boss";
