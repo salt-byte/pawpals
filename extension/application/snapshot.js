@@ -112,7 +112,13 @@ export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEX
   for (const el of natives) {
     if (out.length >= maxControls) return out;
     const type = (el.getAttribute('type') || el.tagName.toLowerCase()).toLowerCase();
-    const context = contextOf(el, contextLimit);
+    // 周围没有文案时退回控件自身的元数据。这是机械取值——aria-label / placeholder
+    // / name 是元素自己的属性，不是「哪个兄弟节点是标签」那种猜测。真机上 39 个
+    // 控件里有 19 个周围抓不到文案，空着等于模型看不见它们。
+    const context = contextOf(el, contextLimit)
+      || tidy(el.getAttribute('aria-label'))
+      || tidy(el.getAttribute('placeholder'))
+      || tidy(el.getAttribute('name'));
     out.push({ el, control: {
       // 句柄不含完整上下文——上下文会随页面别处的改动而变。只取第一段文字做区分，
       // 这是机械取值，不是"这段是标签"的判断。
@@ -136,7 +142,29 @@ export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEX
     } });
   }
 
-  return out;
+  return dedupeHandles(out);
+}
+
+/**
+ * 句柄去重。
+ *
+ * 真机：帆软那页三个「意向」字段的 name/id 都是空、上下文第一个词又都一样，
+ * 于是拿到同一个句柄，模型作答后全被判 ambiguous_signature，过门 0——整条链路
+ * 因为句柄不唯一而作废。
+ *
+ * 撞车的按文档顺序加序号。本来就唯一的不加，保持稳定。
+ */
+function dedupeHandles(entries) {
+  const seen = new Map();
+  for (const entry of entries) seen.set(entry.control.handle, (seen.get(entry.control.handle) ?? 0) + 1);
+  const used = new Map();
+  return entries.map((entry) => {
+    const base = entry.control.handle;
+    if ((seen.get(base) ?? 0) <= 1) return entry;
+    const n = (used.get(base) ?? 0) + 1;
+    used.set(base, n);
+    return { ...entry, control: { ...entry.control, handle: `${base}#${n}` } };
+  });
 }
 
 /** 只要控件描述，不要元素。给服务端和模型看的就是这个。 */

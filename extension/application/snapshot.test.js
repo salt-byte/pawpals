@@ -165,3 +165,55 @@ describe('fillByHandle：按快照句柄填写', () => {
   });
 });
 
+/**
+ * 真机：帆软那页三个「意向」字段的 name/id 都是空，上下文第一个词又都一样，
+ * 于是拿到同一个句柄，模型作答后全被判 ambiguous_signature，过门 0。
+ * 句柄必须唯一，否则整条链路作废。
+ */
+describe('句柄必须唯一', () => {
+  const widget = (text) =>
+    `<div class="fx-field"><div class="field-name">${text}</div>` +
+    '<div class="field-component"><div class="x-combo"><div class="value-wrapper"></div></div></div></div>';
+
+  it('多个控件的基础句柄相同时自动加序号区分', () => {
+    document.body.innerHTML = widget('意向 岗位大类') + widget('意向 岗位') + widget('意向 团队');
+    const handles = snapshotControls(document).map((c) => c.handle);
+    expect(new Set(handles).size).toBe(handles.length);
+  });
+
+  it('加了序号也仍然能反查回正确的元素', () => {
+    document.body.innerHTML = widget('意向 A') + widget('意向 B');
+    const [a, b] = snapshotControls(document);
+    const containers = [...document.querySelectorAll('.fx-field')];
+    expect(elementForHandle(document, a.handle)).toBe(containers[0]);
+    expect(elementForHandle(document, b.handle)).toBe(containers[1]);
+  });
+
+  it('本来就唯一的句柄不加序号，保持稳定', () => {
+    document.body.innerHTML = '<div><div>邮箱</div><input type="text" name="email"></div>';
+    expect(snapshotControls(document)[0].handle).not.toContain('#');
+  });
+});
+
+describe('周围没有文案时，退回控件自身的元数据', () => {
+  it('用 aria-label', () => {
+    document.body.innerHTML = '<div><div><input type="text" aria-label="手机号"></div></div>';
+    expect(snapshotControls(document)[0].context).toContain('手机号');
+  });
+
+  it('用 placeholder', () => {
+    document.body.innerHTML = '<div><div><input type="text" placeholder="请输入邮箱"></div></div>';
+    expect(snapshotControls(document)[0].context).toContain('邮箱');
+  });
+
+  it('用 name——比空着强，模型至少有个线索', () => {
+    document.body.innerHTML = '<div><div><input type="text" name="graduationYear"></div></div>';
+    expect(snapshotControls(document)[0].context).toContain('graduationYear');
+  });
+
+  it('周围有文案时优先用文案，不用元数据', () => {
+    document.body.innerHTML = '<div><div>邮箱</div><input type="text" name="e" placeholder="p"></div>';
+    expect(snapshotControls(document)[0].context).toContain('邮箱');
+  });
+});
+
