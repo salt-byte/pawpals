@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parsePlan, batchByDependency } from "./orchestration.ts";
+import { parsePlan, batchByDependency, buildAgentPrompt } from "./orchestration.ts";
 
 const VALID = ["job-hunter", "resume-expert", "interview-coach", "app-tracker"];
 
@@ -82,5 +82,62 @@ describe("batchByDependency", () => {
 
   it("空计划返回空批次", () => {
     expect(batchByDependency([])).toEqual([]);
+  });
+});
+
+describe("buildAgentPrompt", () => {
+  const base = { history: [], profile: "", turnLog: [], task: "帮我改简历" };
+
+  it("任务本身一定在", () => {
+    expect(buildAgentPrompt(base)).toContain("帮我改简历");
+  });
+
+  it("把本轮伙伴的产出拼进去 —— 这是「协作」的唯一落点", () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      turnLog: [{ agentId: "job-hunter", agentName: "岗位猎手", task: "搜岗", reply: "找到 3 个岗位：A/B/C" }],
+    });
+    expect(prompt).toContain("岗位猎手");
+    expect(prompt).toContain("找到 3 个岗位：A/B/C");
+  });
+
+  it("多条产出按顺序全部拼进去", () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      turnLog: [
+        { agentId: "job-hunter", agentName: "岗位猎手", task: "搜岗", reply: "岗位 A" },
+        { agentId: "resume-expert", agentName: "简历专家", task: "改简历", reply: "简历 v2" },
+      ],
+    });
+    expect(prompt.indexOf("岗位 A")).toBeLessThan(prompt.indexOf("简历 v2"));
+  });
+
+  it("带上真实对话历史，用户和助手都要区分得出来", () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      history: [
+        { role: "user", content: "我想找产品岗" },
+        { role: "assistant", content: "好的，我先了解一下你的背景", name: "团团" },
+      ],
+    });
+    expect(prompt).toContain("我想找产品岗");
+    expect(prompt).toContain("团团");
+  });
+
+  it("档案为空时不留下空标题", () => {
+    expect(buildAgentPrompt(base)).not.toContain("【用户档案与简历】");
+  });
+
+  it("TurnLog 为空时不留下空标题", () => {
+    expect(buildAgentPrompt(base)).not.toContain("【本轮伙伴已完成的工作】");
+  });
+
+  it("历史为空时不留下空标题", () => {
+    expect(buildAgentPrompt(base)).not.toContain("【对话记录】");
+  });
+
+  it("有档案时把档案原文拼进去", () => {
+    const prompt = buildAgentPrompt({ ...base, profile: "方向: AI 产品经理" });
+    expect(prompt).toContain("方向: AI 产品经理");
   });
 });

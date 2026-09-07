@@ -79,3 +79,49 @@ export function parsePlan(raw: string, validAgentIds: string[]): PlanTask[] {
 
   return batchByDependency(tasks) === null ? [] : tasks;
 }
+
+/** 本轮里某个 agent 干了什么、产出了什么。turn 内所有 agent 都看得见。 */
+export type TurnEntry = {
+  agentId: string;
+  agentName: string;
+  task: string;
+  reply: string;
+};
+
+/**
+ * 所有 agent 的 prompt 都从这里出——包括首席。
+ *
+ * 改造前有三份各自为政的拼法（并行专家一份、路由单专家一份、首席收尾一份），
+ * 「首席接话时手里是空的」那个 bug 就是这么来的：收尾那份压根没拼专家产出。
+ * 收口成一份之后，谁也不可能再拿不到该拿的上下文。
+ */
+export function buildAgentPrompt(input: {
+  history: { role: string; content: string; name?: string }[];
+  profile: string;
+  turnLog: TurnEntry[];
+  task: string;
+}): string {
+  const blocks: string[] = [];
+
+  if (input.history.length > 0) {
+    const lines = input.history.map((m) =>
+      m.role === "user" ? `用户：${m.content}` : `${m.name || "助手"}：${m.content}`
+    );
+    blocks.push(`【对话记录】\n${lines.join("\n")}`);
+  }
+
+  if (input.profile.trim()) {
+    blocks.push(`【用户档案与简历】\n${input.profile.trim()}`);
+  }
+
+  if (input.turnLog.length > 0) {
+    const lines = input.turnLog.map(
+      (e) => `▸ ${e.agentName}（任务：${e.task}）\n${e.reply}`
+    );
+    blocks.push(`【本轮伙伴已完成的工作】\n${lines.join("\n\n")}`);
+  }
+
+  blocks.push(`【你的任务】\n${input.task}`);
+
+  return blocks.join("\n\n");
+}
