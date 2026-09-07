@@ -753,7 +753,8 @@ export default function App() {
   const [setupValidating, setSetupValidating] = useState(false);
   const [bootLogs, setBootLogs] = useState<string[]>([]);
   const [toolActivities, setToolActivities] = useState<ToolActivityEvent[]>([]);
-  const [agentThinking, setAgentThinking] = useState<{ agentName: string; groupId: string } | null>(null);
+  // 并行编排下会有多个 agent 同时思考，所以是集合而不是单值。
+  const [thinkingAgents, setThinkingAgents] = useState<{ agentName: string; groupId: string }[]>([]);
 
   // User State
   const [userProfile, setUserProfile] = useState<UserProfile>({
@@ -938,10 +939,19 @@ export default function App() {
       }
     });
     socketRef.current.on('agent_thinking', ({ agentName, groupId }: { agentName: string; groupId: string }) => {
-      setAgentThinking({ agentName, groupId });
+      setThinkingAgents(prev =>
+        prev.some(a => a.agentName === agentName && a.groupId === groupId)
+          ? prev
+          : [...prev, { agentName, groupId }]
+      );
     });
-    socketRef.current.on('agent_done', () => {
-      setAgentThinking(null);
+    socketRef.current.on('agent_done', ({ agentName, groupId }: { agentName?: string; groupId?: string }) => {
+      // 不带 agentName 表示「整轮结束」——workflow 的兜底收尾走这条，只清这个群的，别的群不受影响。
+      setThinkingAgents(prev =>
+        agentName
+          ? prev.filter(a => !(a.agentName === agentName && a.groupId === groupId))
+          : prev.filter(a => a.groupId !== groupId)
+      );
     });
     socketRef.current.on('boss_login_result', ({ ok }: { ok: boolean }) => {
       setBossLoginStatus(ok ? 'ok' : 'error');
@@ -2530,17 +2540,19 @@ export default function App() {
                       </div>
                       </React.Fragment>
                     )})}
-                    {/* Agent thinking indicator — centered pill style */}
-                    {agentThinking && agentThinking.groupId === activeChat?.id && (
-                      <div className="text-center">
-                        <span className="bg-white/50 px-3 py-1 rounded-full text-[10px] text-pet-brown/40 tracking-widest inline-flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'0ms'}}/>
-                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'150ms'}}/>
-                          <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'300ms'}}/>
-                          {agentThinking.agentName} 正在思考
-                        </span>
-                      </div>
-                    )}
+                    {/* Agent thinking indicator — centered pill style，并行时会同时出现多个 */}
+                    {thinkingAgents
+                      .filter(a => a.groupId === activeChat?.id)
+                      .map(a => (
+                        <div key={`${a.agentName}-${a.groupId}`} className="text-center">
+                          <span className="bg-white/50 px-3 py-1 rounded-full text-[10px] text-pet-brown/40 tracking-widest inline-flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'0ms'}}/>
+                            <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'150ms'}}/>
+                            <span className="w-1.5 h-1.5 rounded-full bg-pet-brown/30 animate-bounce" style={{animationDelay:'300ms'}}/>
+                            {a.agentName} 正在思考
+                          </span>
+                        </div>
+                      ))}
                   </div>
 
                   <footer className="p-4 md:p-6 bg-white/50 pb-20 md:pb-6">
