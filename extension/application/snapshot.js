@@ -66,17 +66,72 @@ function visibleText(container, limit) {
  * 向上走到**第一个有文案的祖先**就停。这是机械规则，不是猜测：再往上只会把无关
  * 内容圈进来，而那会让句柄跟着页面别处的变动一起变，稳定性就没了。
  */
-function contextOf(el, limit) {
+/** 标题节点长什么样。和 form.js 用同一套 hint——同一件事不该有两套判断。 */
+const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
+/** 找标题时最多看多少个同级节点。字段容器只有几个孩子；上限是为了挡住 body。 */
+const SIBLING_SCAN_CAP = 50;
+
+/**
+ * 取一个节点的文字。
+ *
+ * visibleText 只扫**后代叶子**，对「自己就是叶子」的标题节点（<div class=
+ * "field-name">最高学历</div>）会返回空串。标题恰恰基本都是叶子，所以必须分开处理。
+ */
+const textOf = (node, limit, cache) => {
+  // 同一个容器在一次快照里会被每个控件各扫一遍——400 个 input 都挂在 body 下时
+  // 就是 400 × 整棵树。缓存只活在单次快照内，不跨调用，所以页面重渲染不会读到旧值。
+  const hit = cache?.get(node);
+  if (hit !== undefined) return hit;
+  const text = node.firstElementChild ? visibleText(node, limit) : tidy(node.textContent).slice(0, limit);
+  cache?.set(node, text);
+  return text;
+};
+
+/** 安全地 querySelector：适配器选择器将来是服务端下发的不受信数据，可能不合法。 */
+function safeQuery(root, selector) {
+  if (!selector) return null;
+  try { return root.querySelector(selector); } catch { return null; }
+}
+
+/**
+ * 控件的原文上下文——模型认字段全靠它。
+ *
+ * 三段式，优先级从精确到宽松：
+ *   1. 站点适配器给的标题选择器（第一层，命中已知平台时最准）
+ *   2. 带标题类名的节点（通用启发式，和 form.js 同一套 hint）
+ *   3. 第一个有文字的祖先（兜底，也是这里原本唯一的做法）
+ *
+ * 为什么必须有 1、2：原来只有第 3 条，它停在**第一个有文字的祖先**上。简道云
+ * 的结构是 .fx-field > [.field-name 「最高学历」, .field-component > [input,
+ * .tip 「必填，请如实填写…」]]——input 的父级 .field-component 有文字（那句
+ * 提示），于是 context 变成「必填，请如实填写…」，走到不了外面那层真正的标题。
+ * 模型因此看到一堆长得一模一样的校验提示，认不出这是哪个字段。
+ */
+function contextOf(el, limit, labelSelector, cache) {
+  let fallback = '';
   let container = el.parentElement;
   for (let depth = 0; depth < CONTAINER_DEPTH && container; depth += 1) {
-    const text = visibleText(container, limit);
-    if (text) return text;
-    // 命中容器判断但自身没文字时**继续往上**，不能提前返回空串：简道云在真正的
-    // .fx-field 里还套了一层 .field-component，class 同样含 field 却没有文案，
-    // 提前返回会让 39 个控件里 17 个的原文变成空，模型直接看不见它们。
+    const hit = safeQuery(container, labelSelector);
+    const hitText = hit ? textOf(hit, limit, cache) : '';
+    if (hitText) return hitText;
+
+    // 用普通循环、并且封顶：不能 [...container.children] 展开。真实的字段容器
+    // 只有几个孩子，而向上走会走到 body——把 body 的几百个孩子每个控件展开一遍，
+    // 就是又一次 O(n²)（400 个 input 的用例从 298ms 涨到 1686ms 就是这么来的）。
+    const kids = container.children;
+    const scan = Math.min(kids.length, SIBLING_SCAN_CAP);
+    for (let i = 0; i < scan; i += 1) {
+      const node = kids[i];
+      if (!LABEL_CLASS_HINT.test(String(node.className || ''))) continue;
+      const text = textOf(node, limit, cache);
+      if (text) return text;
+    }
+
+    // 记下最内层那个有文字的祖先当兜底，但不立刻返回——外面可能还有真正的标题
+    if (!fallback) fallback = textOf(container, limit, cache);
     container = container.parentElement;
   }
-  return '';
+  return fallback;
 }
 
 const hasValueArea = (container) =>
@@ -105,8 +160,15 @@ function widgetContainers(root) {
  * 填写时必须按同一套句柄定位，否则模型按快照作答、填写却按另一套签名找元素，
  * 永远对不上号。所以快照要同时是「采集」和「填写」的唯一来源。
  */
-export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEXT_LIMIT, maxControls = DEFAULT_MAX_CONTROLS } = {}) {
+export function snapshotEntries(root = document, {
+  contextLimit = DEFAULT_CONTEXT_LIMIT,
+  maxControls = DEFAULT_MAX_CONTROLS,
+  // 站点适配器给的标题选择器（见 adapters.js）。不给就走通用启发式。
+  labelSelector = '',
+} = {}) {
   const out = [];
+  /** 单次快照内的文本缓存，见 textOf。 */
+  const textCache = new Map();
 
   const natives = [...root.querySelectorAll('input, textarea, select')].filter(
     (el) => !el.disabled && !SKIP_TYPES.has((el.getAttribute('type') || '').toLowerCase())
@@ -117,7 +179,7 @@ export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEX
     // 周围没有文案时退回控件自身的元数据。这是机械取值——aria-label / placeholder
     // / name 是元素自己的属性，不是「哪个兄弟节点是标签」那种猜测。真机上 39 个
     // 控件里有 19 个周围抓不到文案，空着等于模型看不见它们。
-    const context = contextOf(el, contextLimit)
+    const context = contextOf(el, contextLimit, labelSelector, textCache)
       || tidy(el.getAttribute('aria-label'))
       || tidy(el.getAttribute('placeholder'))
       || tidy(el.getAttribute('name'));
@@ -134,7 +196,7 @@ export function snapshotEntries(root = document, { contextLimit = DEFAULT_CONTEX
 
   for (const container of widgetContainers(root)) {
     if (out.length >= maxControls) return out;
-    const context = contextOf(container.firstElementChild ?? container, contextLimit);
+    const context = contextOf(container.firstElementChild ?? container, contextLimit, labelSelector, textCache);
     out.push({ el: container, control: {
       handle: fieldSignature({ name: '', id: container.id, type: 'widget', label: context.split(' ')[0] || '' }),
       type: 'widget',
@@ -175,8 +237,10 @@ export function snapshotControls(root = document, opts = {}) {
 }
 
 /** 按句柄反查元素。找不到返回 null——绝不退而求其次去猜别的控件。 */
-export function elementForHandle(root = document, handle) {
-  const hit = snapshotEntries(root).find((entry) => entry.control.handle === handle);
+export function elementForHandle(root = document, handle, opts = {}) {
+  // opts 必须和采集时用的一致（尤其 labelSelector）：句柄由 context 派生，两边
+  // 用不同的选项就会算出两套句柄，模型作答后一个都定位不到。
+  const hit = snapshotEntries(root, opts).find((entry) => entry.control.handle === handle);
   return hit ? hit.el : null;
 }
 
@@ -191,13 +255,14 @@ export function elementForHandle(root = document, handle) {
  *   widget      交回上层用驱动器点开面板选中——这里不硬填
  *   文件框      永远跳过，文件由独立的 upload 任务处理
  */
-export function fillByHandle(root = document, values = []) {
+export function fillByHandle(root = document, values = [], opts = {}) {
   const filled = [];
   const skipped = [];
   const widgets = [];
   if (!Array.isArray(values) || values.length === 0) return { filled, skipped, widgets };
 
-  const entries = snapshotEntries(root);
+  // 同上：采集和填写必须用同一套选项，否则句柄对不上。
+  const entries = snapshotEntries(root, opts);
   for (const item of values) {
     const hit = entries.find((entry) => entry.control.handle === item.signature);
     if (!hit) { skipped.push({ signature: item.signature, reason: 'not_found' }); continue; }

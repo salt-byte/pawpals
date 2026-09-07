@@ -5,6 +5,7 @@ import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { waitForFormReady } from '../application/ready.js';
 import { snapshotControls, elementForHandle, fillByHandle } from '../application/snapshot.js';
+import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
@@ -45,6 +46,18 @@ const widgetDriver = createPageWidgetDriver({
   },
 });
 import { sendToBackground } from './bg-bridge.js';
+
+/**
+ * 站点适配器：三层里的第一层。命中已知平台就用确定的选择器，不必每次让模型
+ * 现场推理；没命中就退回通用启发式，行为和加它之前完全一致。
+ */
+const adapters = createAdapterRegistry();
+const siteSelectors = () => adapters.selectorsFor(location.href);
+/**
+ * 快照选项。采集（inspect）和填写（fill）必须用同一份——句柄是从 context 派生的，
+ * 两边用不同的 labelSelector 会算出两套句柄，模型作答后一个都定位不到。
+ */
+const snapOpts = () => ({ labelSelector: siteSelectors().labelSelector });
 
 /**
  * 页面侧的执行器。这里**不碰网络**——MV3 的 content script 跨域 fetch 走页面
@@ -105,13 +118,16 @@ async function execute(task) {
   const fields = collectApplicationFields(document);
   if (task.kind === 'inspect') {
     reportTaskProgress(task, { stage: 'inspecting' });
-    const provider = detectApplicationProvider(location.href);
+    // provider 以适配器为准：它是真机抓过 DOM 才收录的，比 URL 启发式可靠
+    const provider = siteSelectors().provider !== 'generic'
+      ? siteSelectors().provider
+      : detectApplicationProvider(location.href);
     const warnings = formWarnings(fields, document);
     await remember({ url: location.href, provider, fields });
     // 快照与 fields 并存：fields 是旧的启发式解析，snapshot 是给模型看的原文。
     // 模型按 snapshot 的句柄作答，填写也按同一套句柄定位——两边必须同源。
     return { ok: true, provider, url: location.href, title: document.title, fields,
-      snapshot: snapshotControls(document),
+      snapshot: snapshotControls(document, snapOpts()),
       warnings, formReady: readiness.ready, hasSubmit: Boolean(findSubmitControl(document)) };
   }
   if (task.kind === 'upload') {
@@ -130,9 +146,9 @@ async function execute(task) {
     const bySnapshot = [];
     const rest = [];
     for (const item of values) {
-      (elementForHandle(document, item.signature) ? bySnapshot : rest).push(item);
+      (elementForHandle(document, item.signature, snapOpts()) ? bySnapshot : rest).push(item);
     }
-    const snap = fillByHandle(document, bySnapshot);
+    const snap = fillByHandle(document, bySnapshot, snapOpts());
     const legacy = fillApplicationFields(document, rest);
     const filled = [...snap.filled, ...legacy.filled];
     const skipped = [...snap.skipped, ...legacy.skipped];
@@ -155,7 +171,7 @@ async function execute(task) {
     const widgets = await applyWidgetValues(document, widgetTargets, {
       driver: widgetDriver,
       // 快照句柄优先；找不到再退回旧签名，迁移期两套并存
-      findContainer: (signature) => elementForHandle(document, signature) || widgetContainerFor(document, signature),
+      findContainer: (signature) => elementForHandle(document, signature, snapOpts()) || widgetContainerFor(document, signature),
     });
 
     const warnings = formWarnings(collectApplicationFields(document), document);

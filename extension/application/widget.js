@@ -1,4 +1,5 @@
 import { widgetContainerFor } from './form.js';
+import { createAdapterRegistry } from './adapters.js';
 /**
  * 驱动纯 div 模拟的下拉/多选控件。
  *
@@ -40,7 +41,10 @@ const MAX_NODES_PER_PANEL = 2000;
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
-export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisible, root = document }) {
+export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisible, root = document,
+  // 站点适配器可以收窄它（见 adapters.js）。简道云的面板是 .x-popup，用通用那
+  // 一长串会连带匹配到无关容器，反而更差。没传就是原来的通用行为。
+  panelSelector = PANEL_SELECTOR } = {}) {
   /**
    * 当前可见的、像选项的元素。用于点开前后求差。
    *
@@ -56,7 +60,7 @@ export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisib
    * PANEL_SELECTOR，不去重就会把同一批选项数两遍。
    */
   const panelNodes = () => {
-    const all = [...root.querySelectorAll(PANEL_SELECTOR)].filter(isVisible);
+    const all = [...root.querySelectorAll(panelSelector || PANEL_SELECTOR)].filter(isVisible);
     const set = new Set(all);
     return all.filter((panel) => {
       for (let node = panel.parentElement; node; node = node.parentElement) {
@@ -303,7 +307,18 @@ const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox
  * 有效，控件在滚动区外时会命中别的元素或返回 null。真机上这一条决定成败——
  * 加之前只有恰好在屏幕上的两个字段能探测成功。
  */
-export function createPageWidgetDriver({ click, type, root = document } = {}) {
+const adapters = createAdapterRegistry();
+
+/** 当前页面命中的站点适配器给出的面板选择器；没命中就是通用那串。 */
+function pageSelectors(root) {
+  try {
+    return adapters.selectorsFor(root?.location?.href || '');
+  } catch {
+    return { provider: 'generic', panel: PANEL_SELECTOR };
+  }
+}
+
+export function createPageWidgetDriver({ click, type, root = document, panelSelector } = {}) {
   const valueAreaOf = (container) =>
     [...container.querySelectorAll('*')].find(
       (node) => VALUE_AREA_HINT.test(String(node.className || '')) && node.getBoundingClientRect().height > 0
@@ -313,6 +328,8 @@ export function createPageWidgetDriver({ click, type, root = document } = {}) {
     click,
     type,
     root,
+    // 适配器命中就用它的面板选择器（0 延迟、0 token 的第一层），没命中退回通用
+    panelSelector: panelSelector || pageSelectors(root).panel,
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     isVisible: (el) => el.offsetParent !== null && el.getBoundingClientRect().height > 0,
     elementAtCenter: (container) => {
