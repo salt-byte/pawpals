@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields } from "./apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen } from "./apply-orchestrator.ts";
 
 const field = (over: any = {}) => ({
   signature: `sig-${over.label ?? "x"}`, label: "字段", kind: "custom",
@@ -117,3 +117,47 @@ describe("超长选项字段不进模型", () => {
   });
 });
 
+
+/**
+ * 分轮填写。
+ *
+ * 级联下拉（帆软的「意向岗位」依赖「意向岗位大类」）不该靠手写规则识别。页面
+ * 自己就写着「请先选择【意向岗位大类】，再选择具体岗位~」，这句话本来就在快照
+ * 的 context 里，模型看得见——缺的只是「做一步、再看一眼页面」的机会。
+ *
+ * 所以改成分轮：填完重新采一次页面，新出现的字段和新解锁的选项进入下一轮。
+ * 级联因此自然解决，而且不需要任何关于级联的代码——换一家表单、换一种依赖
+ * 关系同样有效。
+ */
+describe("shouldRunAnotherRound", () => {
+  it("这一轮填进去了东西，就再看一眼页面", () => {
+    expect(shouldRunAnotherRound({ round: 1, filledThisRound: 3, maxRounds: 4 })).toBe(true);
+  });
+
+  it("一个都没填进去就停——页面不会因为再问一遍而变化", () => {
+    expect(shouldRunAnotherRound({ round: 1, filledThisRound: 0, maxRounds: 4 })).toBe(false);
+  });
+
+  it("到了轮数上限就停，别在页面上无限循环", () => {
+    expect(shouldRunAnotherRound({ round: 4, filledThisRound: 5, maxRounds: 4 })).toBe(false);
+  });
+});
+
+describe("stillOpen", () => {
+  const f = (over: any) => ({ signature: `s-${over.label}`, type: "text", ...over });
+
+  it("已经填过的字段不再进下一轮", () => {
+    const fields = [f({ label: "姓名" }), f({ label: "手机" })];
+    expect(stillOpen(fields, ["s-姓名"]).map((x: any) => x.label)).toEqual(["手机"]);
+  });
+
+  it("安全闸字段永远不进——分轮不能成为绕过闸门的路子", () => {
+    const fields = [f({ label: "简历", kind: "resume" }), f({ label: "手机" })];
+    expect(stillOpen(fields, []).map((x: any) => x.label)).toEqual(["手机"]);
+  });
+
+  it("上一轮填过的这一轮又出现（页面重渲染换了句柄），按没填算", () => {
+    const fields = [f({ label: "意向岗位" })];
+    expect(stillOpen(fields, ["s-别的字段"]).map((x: any) => x.label)).toEqual(["意向岗位"]);
+  });
+});

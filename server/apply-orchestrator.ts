@@ -118,3 +118,35 @@ export function manualFields(fields: Field[] = []): Field[] {
     (field) => field.type === "widget" && !field.truncated && !(field.options?.length) && !isGated(field)
   );
 }
+
+/**
+ * 还要不要再看一眼页面。
+ *
+ * 级联下拉不该靠手写规则识别。帆软的「意向岗位」依赖「意向岗位大类」，页面自己
+ * 就写着「请先选择【意向岗位大类】，再选择具体岗位~」——这句话本来就在快照的
+ * context 里，模型看得见。缺的不是它的判断力，是「做一步、再看一眼页面」的机会：
+ * 原先的流程是一次性的（采一次、探一次、问一次、填一次，结束），模型没有观察
+ * 自己动作后果的余地。
+ *
+ * 分轮之后级联自然解决，而且不需要任何关于级联的代码——换一家表单、换一种依赖
+ * 关系同样有效。
+ *
+ * 停止条件是「这一轮一个都没填进去」：页面不会因为把同样的问题再问一遍就变化，
+ * 继续只是白烧 token。轮数上限是防呆，不是主要的停止手段。
+ */
+export function shouldRunAnotherRound(input: { round: number; filledThisRound: number; maxRounds: number }): boolean {
+  const { round, filledThisRound, maxRounds } = input;
+  if (round >= maxRounds) return false;
+  return filledThisRound > 0;
+}
+
+/**
+ * 这一轮还该问的字段：已经填成功的除外，安全闸字段永远除外。
+ *
+ * 最后这条要紧：分轮不能成为绕过闸门的路子——简历、人机验证、敏感人口统计
+ * 在每一轮里都同样不交给模型。
+ */
+export function stillOpen(fields: Field[] = [], filledSignatures: string[] = []): Field[] {
+  const done = new Set(filledSignatures);
+  return fields.filter((field) => !isGated(field) && !done.has(field.signature));
+}

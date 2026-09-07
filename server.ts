@@ -26,7 +26,7 @@ import { pickAutofillValue , parseAutofillProfile } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
 import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields } from "./server/apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen } from "./server/apply-orchestrator.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
 import { runTailorPipeline, type TailorDeps } from "./server/tailor-pipeline.ts";
@@ -2505,83 +2505,54 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       const profileText = readAutofillProfileText();
 
       /**
-       * 字段来源：快照优先。
+       * 分轮填写：填一步，重新看一眼页面，再填下一步。
        *
-       * 旧的 plan.fields 是启发式解析的产物，真机上 39 个字段里 16 个取不到
-       * label；快照给的是控件周围的**页面原文**，模型据此自己判断这个框要什么。
-       * 两者都在（inspect 一并带回），快照有内容就用快照，句柄字段补一个
-       * signature 别名，让下游校验和填写共用同一套寻址。
+       * 原先是一次性的——采一次、探一次、问一次、填一次，结束。级联下拉因此必然
+       * 失败：帆软的「意向岗位」要先选「意向岗位大类」才会有选项，而在一次性流程
+       * 里，选完大类已经没有下一步了。
+       *
+       * 修法不是去写「识别级联」的规则。页面自己就写着「请先选择【意向岗位大类】，
+       * 再选择具体岗位~」，这句话本来就在快照的 context 里，模型看得见——缺的是
+       * 「做一步、观察后果、再做下一步」的机会，是我把流程写死了。分轮之后级联
+       * 自然解决，且不需要任何关于级联的代码，换一家表单同样有效。
+       *
+       * 每一轮的安全闸原封不动：stillOpen 永远排除简历/验证/敏感字段，值仍然要过
+       * 出处和选项两道校验。模型决定做什么，代码决定什么被允许。
        */
-      const snapshot: any[] = Array.isArray(inspection.snapshot) ? inspection.snapshot : [];
-      const usingSnapshot = snapshot.length > 0;
-      let planFields: any[] = usingSnapshot
-        // label 是下游（widgetsToProbe / retryTargets）认字段的键，快照里它叫
-        // context。不补这个别名，probe 会因为「没有标签的容器多半不是真字段」
-        // 把所有控件都过滤掉——真机上表现为「待探 0 个」，探测整段静默失效。
-        ? snapshot.map((control: any) => ({ ...control, signature: control.handle, label: control.context }))
-        : plan.fields;
-
-      /**
-       * 先让模型看到页面，再让它作答。
-       *
-       * 自定义控件的选项是点开才渲染的，inspect 采不到。不先探就问，模型只能凭
-       * 常识猜——真机上它把学历和学位都答成「硕士」，概念上没错，但两个选项列表
-       * 里都没有这个词，执行时整片被拒。
-       *
-       * 必须分批：单个控件真机约 2.8 秒，而派发层的等待上限是 20 秒（标签页被
-       * 丢弃时 sendMessage 会挂住不返回，那个上限是用来接住它的）。15 个一次探
-       * 完要 40 秒，会先被判成传输超时、触发刷新页面，白跑一趟。
-       */
-      const probeTargets = widgetsToProbe(planFields);
-      const PROBE_BATCH = 5;
-      for (let i = 0; i < probeTargets.length; i += PROBE_BATCH) {
-        const batch = probeTargets.slice(i, i + PROBE_BATCH);
-        const probeTask = enqueueOfficialTask({
-          kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
-          payload: { signatures: batch, budgetMs: 15000 },
-        });
-        const probed = await waitForOfficialTask(probeTask.id, 30_000);
-        if (Array.isArray(probed?.probed)) planFields = mergeProbedOptions(planFields, probed.probed);
-      }
-
-      // 选项被截断的控件（全国高校这类可搜索下拉）不进 prompt——列表既不完整也
-      // 撑爆请求，但要单独告诉用户还剩哪几个框等他自己选。
-      const fields = fieldsForModel(planFields);
-      const needsUser = manualFields(planFields);
-
-      // 先让模型按 label 取值——国内校招表单的字段（学历、专业、期望薪资）
-      // 在扩展侧几乎全被判成 custom，正则路径一个都填不了。模型给的每一项都
-      // 要过 validateAutofillPlan 的四道机械校验，其中 source 必须能在档案原文
-      // 里逐字找到，编造的值进不来。
-      let values: Array<{ signature: string; value: string }> = [];
+      const MAX_ROUNDS = 4;
+      const filledSignatures: string[] = [];
+      const filledLabels: string[] = [];
+      let planFields: any[] = [];
+      let usingSnapshot = false;
       let rejected: Array<{ signature: string; reason: string }> = [];
-      if (profileText) {
+      let needsUser: any[] = [];
+      let skippedCount = 0;
+      let lastInspection: any = inspection;
+
+      const labelOf = (signature: string) => {
+        const hit = planFields.find((f: any) => f.signature === signature || f.handle === signature);
+        return String(hit?.context || hit?.label || signature).slice(0, 20);
+      };
+
+      const askModel = async (ask: any[]) => {
+        if (!ask.length || !profileText) return { values: [], rejected: [] };
         try {
           const raw = await chatExtractJson<{ values?: unknown }>(
             "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
             usingSnapshot
-              ? buildAutofillPrompt({ controls: fields as any, profileText, ctx: fillCtx })
-              : buildAutofillPrompt({ fields, profileText, ctx: fillCtx }),
+              ? buildAutofillPrompt({ controls: ask as any, profileText, ctx: fillCtx })
+              : buildAutofillPrompt({ fields: ask, profileText, ctx: fillCtx }),
             // 纯映射任务不需要推理。推理 token 会算进 max_tokens，字段一多就把
             // 预算吃光、content 返回空（真机上 8 个字段时就这样）。
             { max_tokens: 4000, reasoning_effort: "minimal" }
           );
-          ({ values, rejected } = validateAutofillPlan(raw?.values, planFields, profileText));
+          return validateAutofillPlan(raw?.values, planFields, profileText);
         } catch (error) {
-          console.warn("[autofill] LLM 取值失败，回退到确定性映射:", error);
+          console.warn("[autofill] LLM 取值失败:", error);
+          return { values: [], rejected: [] };
         }
-      }
+      };
 
-      // 兜底：模型不可用、或一项都没通过校验时，仍按 kind 把已知字段填上。
-      // 宁可少填几个框，也不能因为一次 LLM 故障就整个投递流程停摆。
-      if (values.length === 0) {
-        const profile = extractAutofillProfile();
-        values = fields
-          .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
-          .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, fillCtx) }))
-          .filter((item: any) => item.value);
-      }
-      /** 填一轮，返回这一轮的执行结果。 */
       const runFill = async (batch: Array<{ signature: string; value: string }>) => {
         const fillTask = enqueueOfficialTask({
           kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""), payload: { values: batch },
@@ -2589,53 +2560,108 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         return waitForOfficialTask(fillTask.id);
       };
 
-      let filledCount = 0;
-      let skippedCount = 0;
-      const filledLabels: string[] = [];
-      const labelOf = (signature: string) => {
-        const hit = planFields.find((f: any) => f.signature === signature || f.handle === signature);
-        return String(hit?.context || hit?.label || signature).slice(0, 20);
-      };
-      if (values.length) {
-        const filled = await runFill(values);
-        if (!filled?.ok) return `[ERR] 官网表单填写失败：${filled?.error || "未知错误"}`;
-        // 报实际填进去的数量，不是尝试数——签名找不到或有歧义的字段会被跳过。
-        filledCount = Array.isArray(filled.filled) ? filled.filled.length : 0;
-        for (const sig of filled.filled ?? []) filledLabels.push(labelOf(String(sig)));
+      for (let round = 1; round <= MAX_ROUNDS; round += 1) {
+        // 每轮重新采一次页面：上一轮填完之后，级联的子控件才会出现或解锁。
+        // 第一轮直接用进来时那次 inspect 的结果，不多跑一次。
+        if (round > 1) {
+          const again = enqueueOfficialTask({
+            kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
+          });
+          const fresh = await waitForOfficialTask(again.id);
+          if (fresh?.ok) lastInspection = fresh;
+        }
+
+        const snapshot: any[] = Array.isArray(lastInspection.snapshot) ? lastInspection.snapshot : [];
+        usingSnapshot = snapshot.length > 0;
+        // label 是下游（widgetsToProbe / retryTargets）认字段的键，快照里它叫
+        // context。不补这个别名，「没有标签的容器多半不是真字段」这条过滤会把所有
+        // 控件都滤掉——真机上表现为「待探 0 个」，探测整段静默失效。
+        planFields = usingSnapshot
+          ? snapshot.map((c: any) => ({ ...c, signature: c.handle, label: c.context }))
+          : plan.fields;
+
+        const open = stillOpen(planFields, filledSignatures);
+        if (!open.length) break;
 
         /**
-         * 值不在选项里而被执行侧拒掉的，带着**真实选项**重问一次。
+         * 先让模型看到页面，再让它作答。
          *
-         * 这一步的存在是为了不把模型该干的事推给人：真机上模型把学历答成
-         * 「硕士」，选项里写的是「研究生」——它自己完全能解决，缺的只是选项。
-         * 只重试带回了真实选项的 option_not_found；签名定位不到那类换个值也
-         * 定位不到，不重试。
+         * 自定义控件的选项是点开才渲染的，inspect 采不到。不先探就问，模型只能凭
+         * 常识猜——真机上它把学历和学位都答成「硕士」，概念上没错，但两个选项列表
+         * 里写的都是「研究生」，执行时整片被拒。
+         *
+         * 必须分批：单个控件真机约 2.8 秒。派发层会按任务自己声明的 budgetMs 等，
+         * 但一次探太多仍然会拖长整轮。
          */
-        const retryable = retryTargets(filled.skipped ?? [], planFields);
-        if (retryable.length && profileText) {
-          try {
-            const raw2 = await chatExtractJson<{ values?: unknown }>(
-              "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
-              usingSnapshot
-                ? buildAutofillPrompt({ controls: retryable as any, profileText, ctx: fillCtx })
-                : buildAutofillPrompt({ fields: retryable, profileText, ctx: fillCtx }),
-              { max_tokens: 2000, reasoning_effort: "minimal" }
-            );
-            const retryPlan = validateAutofillPlan(raw2?.values, retryable, profileText);
-            if (retryPlan.values.length) {
-              const again = await runFill(retryPlan.values);
-              filledCount += Array.isArray(again?.filled) ? again.filled.length : 0;
-              for (const sig of again?.filled ?? []) filledLabels.push(labelOf(String(sig)));
+        const probeList = widgetsToProbe(open);
+        for (let i = 0; i < probeList.length; i += 5) {
+          const probeTask = enqueueOfficialTask({
+            kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
+            payload: { signatures: probeList.slice(i, i + 5), budgetMs: 15000 },
+          });
+          const probed = await waitForOfficialTask(probeTask.id, 40_000);
+          if (Array.isArray(probed?.probed)) planFields = mergeProbedOptions(planFields, probed.probed);
+        }
+
+        const refreshed = stillOpen(planFields, filledSignatures);
+        const ask = fieldsForModel(refreshed);
+        needsUser = manualFields(refreshed);
+
+        const attempt = await askModel(ask);
+        rejected = attempt.rejected;
+
+        /**
+         * 兜底：模型不可用、或一项都没通过校验时，仍按 kind 把已知字段填上。
+         * 宁可少填几个框，也不能因为一次 LLM 故障就整个投递流程停摆。
+         *
+         * 只在第一轮兜底：后面几轮靠的就是模型对新出现字段的判断，确定性映射
+         * 在那里给不出新东西，重复跑只是白费。
+         */
+        if (!attempt.values.length && round === 1) {
+          const profile = extractAutofillProfile();
+          attempt.values = ask
+            .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
+            .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, fillCtx) }))
+            .filter((item: any) => item.value);
+        }
+
+        let filledThisRound = 0;
+        if (attempt.values.length) {
+          const filled = await runFill(attempt.values);
+          if (filled?.ok) {
+            for (const sig of filled.filled ?? []) {
+              filledSignatures.push(String(sig));
+              filledLabels.push(labelOf(String(sig)));
+              filledThisRound += 1;
             }
-          } catch (error) {
-            console.warn("[autofill] 带选项重问失败:", error);
+            skippedCount += (filled.skipped?.length ?? 0) + (filled.lost?.length ?? 0);
+
+            /**
+             * 值不在选项里而被执行侧拒掉的，带着**真实选项**重问一次。
+             *
+             * 这一步是为了不把模型该干的事推给人：真机上它把学历答成「硕士」，
+             * 选项里写的是「研究生」——它自己完全能解决，缺的只是选项。
+             */
+            const retryable = retryTargets(filled.skipped ?? [], planFields);
+            if (retryable.length) {
+              const second = await askModel(retryable);
+              if (second.values.length) {
+                const again = await runFill(second.values);
+                for (const sig of again?.filled ?? []) {
+                  filledSignatures.push(String(sig));
+                  filledLabels.push(labelOf(String(sig)));
+                  filledThisRound += 1;
+                }
+              }
+            }
           }
         }
 
-        // skipped：签名没定位到；lost：填进去了但被页面自己的校验清掉了。
-        skippedCount = (Array.isArray(filled.skipped) ? filled.skipped.length : 0)
-          + (Array.isArray(filled.lost) ? filled.lost.length : 0);
+        console.log(`[apply] 第 ${round} 轮：字段 ${planFields.length} 待填 ${open.length} 探 ${probeList.length} 本轮填进 ${filledThisRound}`);
+        if (!shouldRunAnotherRound({ round, filledThisRound, maxRounds: MAX_ROUNDS })) break;
       }
+
+      const filledCount = filledSignatures.length;
 
       const confirmationId = officialApplicationQueue.requestConfirmation({
         url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
