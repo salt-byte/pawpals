@@ -75,3 +75,38 @@ describe('句柄同源', () => {
     expect(root.querySelector('input').value).toBe('研究生');
   });
 });
+
+/**
+ * probe 必须和 inspect/fill 用同一套寻址。
+ *
+ * 原先 probe 走 form.js 的签名、快照走 handle，探回来的选项按签名标记、字段表
+ * 按句柄索引，选项并不回字段表——模型永远在不知道有哪些选项的情况下作答，然后
+ * 被「值必须命中 options」挡掉。
+ */
+describe('widgetTargets', () => {
+  const markup = `
+    <div class="fx-field">
+      <div class="field-name">学历</div>
+      <div class="field-component"><div class="x-combo-value">请选择</div></div>
+    </div>
+    <div class="fx-field">
+      <div class="field-name">姓名</div>
+      <div class="field-component"><input name="n" /></div>
+    </div>`;
+
+  it('只挑 widget，带上容器元素', async () => {
+    const { widgetTargets } = await import('./snapshot.js');
+    const targets = widgetTargets(html(markup));
+    expect(targets).toHaveLength(1);
+    expect(targets[0].container).not.toBeNull();
+  });
+
+  it('签名就是快照句柄——探回来的选项才并得回字段表', async () => {
+    const { widgetTargets } = await import('./snapshot.js');
+    const root = html(markup);
+    const opts = { labelSelector: '.field-name' };
+    const widget = snapshotControls(root, opts).find((c) => c.type === 'widget');
+    expect(widgetTargets(root, opts)[0].field.signature).toBe(widget.handle);
+    expect(widgetTargets(root, opts)[0].field.label).toBe('学历');
+  });
+});

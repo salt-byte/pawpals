@@ -282,3 +282,22 @@ export function fillByHandle(root = document, values = [], opts = {}) {
   return { filled, skipped, widgets };
 }
 
+
+/**
+ * 快照里的 widget 及其容器元素，直接喂给 probeWidgets。
+ *
+ * 为什么必须有它：probe 原先走 collectWidgetTargets（form.js 的签名），而
+ * inspect 和 fill 走快照句柄——两套寻址。探回来的选项按签名标记，字段表按句柄
+ * 索引，于是选项**并不回字段表**，模型永远在不知道有哪些选项的情况下作答。
+ * 快照是采集和填写的唯一来源，探测也必须用同一套。
+ *
+ * 形状对齐 probeWidgets 的 targets：{ field: { signature, label }, container }。
+ */
+export function widgetTargets(root = document, opts = {}) {
+  return snapshotEntries(root, opts)
+    .filter((entry) => entry.control.type === 'widget')
+    .map((entry) => ({
+      field: { signature: entry.control.handle, label: entry.control.context },
+      container: entry.el,
+    }));
+}

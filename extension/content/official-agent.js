@@ -4,7 +4,7 @@ import { mergeSiteMemory, siteKey } from '../application/site-memory.js';
 import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { waitForFormReady } from '../application/ready.js';
-import { snapshotControls, elementForHandle, fillByHandle } from '../application/snapshot.js';
+import { snapshotControls, elementForHandle, fillByHandle, widgetTargets } from '../application/snapshot.js';
 import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
@@ -190,7 +190,11 @@ async function execute(task) {
     // 服务端拿到之后才能让模型在合法值里选，而不是自由发挥。
     //
     // 带边界：单个控件真机实测约 2.8 秒，全量探完会让任务超时并把队列堵死。
-    const { probed, partial } = await probeWidgets(collectWidgetTargets(document), {
+    // 目标来自**快照**，不是 form.js 的签名表：inspect 和 fill 都按快照句柄
+    // 寻址，探测再用另一套签名的话，探回来的选项并不回字段表，模型就永远在
+    // 不知道有哪些选项的情况下作答。快照没有 widget 时退回旧路径。
+    const targets = widgetTargets(document, snapOpts());
+    const { probed, partial } = await probeWidgets(targets.length ? targets : collectWidgetTargets(document), {
       driver: widgetDriver,
       signatures: task.payload?.signatures,
       budgetMs: Number(task.payload?.budgetMs) || 20000,

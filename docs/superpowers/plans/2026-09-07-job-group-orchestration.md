@@ -4,7 +4,7 @@
 
 **Goal:** 让求职群的多 agent 协作真正发生——专家之间看得见彼此的产出，首席拿着全部产出做真正的综合。
 
-**Architecture:** 一次用户提问 = 一个 turn。首席一次性出计划（谁做什么、谁依赖谁），按拓扑分批执行（同批并行、批间串行），每批产出写进共享的 TurnLog，后续批次和最终综合都能看见完整 TurnLog。所有 agent 的 prompt 由同一个函数拼装。纯逻辑放 `server/orchestration.ts` 并单测，`server.ts` 只留 IO 编排。
+**Architecture:** 一次用户提问 = 一个 turn。先查固定流水线模板；模板不命中时，才由首席花一次模型调用出计划（谁做什么、谁依赖谁），按拓扑分批执行（同批并行、批间串行），每批产出写进共享的 TurnLog，后续批次和最终综合都能看见完整 TurnLog。所有 agent 的 prompt 由同一个函数拼装。纯逻辑放 `server/orchestration.ts` 并单测，`server.ts` 只留 IO 编排。
 
 **Tech Stack:** TypeScript (ESM, `type: module`)、vitest（`environment: jsdom`, `globals: false`——测试文件必须显式 import）、Socket.IO、React 19。
 
@@ -27,7 +27,7 @@
 
 | 文件 | 责任 |
 |---|---|
-| `server/orchestration.ts`（新建） | 纯函数：计划解析、拓扑分批、prompt 拼装、历史提取、追加轮信号解析。零副作用、零依赖。 |
+| `server/orchestration.ts`（新建） | 纯函数：计划解析、拓扑分批、prompt 拼装、历史提取、追加轮信号解析、**固定流水线模板与匹配**。零副作用、零依赖。 |
 | `server/orchestration.test.ts`（新建） | 上述纯函数的单测。 |
 | `server.ts`（修改） | 新增 `runOrchestratedTurn()`；把求职群主入口从 `runAgentChain` 切过去；`agent_done` 补上 `agentName`。 |
 | `src/App.tsx`（修改） | `agentThinking` 由单值改为集合，按 agentName 增删。 |
@@ -567,7 +567,200 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: 在 server.ts 里实现 runOrchestratedTurn（先不接入口）
+### Task 4: 固定流水线模板与匹配
+
+产品决策：**常见意图走写死的流水线，模板都不命中时才花钱让模型出计划。** 求职这条赛道的主要链路是固定的（拆 JD → 改简历 → 投递 → 备面），每轮都让模型重新推导一遍既费钱又不可复现。模板层是纯函数，可以直接单测；模型出计划保留为兜底，负责应付模板覆盖不到的请求。
+
+**Files:**
+- Modify: `server/orchestration.ts`
+- Test: `server/orchestration.test.ts`
+
+**Interfaces:**
+- Consumes: Task 1 的 `PlanTask`、`batchByDependency`
+- Produces:
+  - `type PipelineStage = { agentId: string; task: string; dependsOn?: string[] }`
+  - `type PipelineTemplate = { id: string; match: RegExp; stages: PipelineStage[] }`
+  - `JOB_PIPELINES: PipelineTemplate[]`
+  - `matchPipeline(userMsg: string, templates?: PipelineTemplate[]): PlanTask[] | null` —— 命中返回已插值的计划，未命中返回 `null`
+
+- [ ] **Step 1: 写失败的测试**
+
+追加到 `server/orchestration.test.ts`（顶部 import 补上 `matchPipeline, JOB_PIPELINES`）：
+
+```ts
+describe("matchPipeline", () => {
+  it("面试类请求命中单段流水线", () => {
+    const plan = matchPipeline("帮我准备一下面试");
+    expect(plan).not.toBeNull();
+    expect(plan!.map((t) => t.agentId)).toEqual(["interview-coach"]);
+  });
+
+  it("投递类请求是两段，投递管家依赖简历专家", () => {
+    const plan = matchPipeline("帮我投递这个岗位")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["resume-expert", "app-tracker"]);
+    expect(plan[1].dependsOn).toEqual(["resume-expert"]);
+  });
+
+  it("「帮我投这个岗」命中投递而不是评估 —— 模板顺序决定归属", () => {
+    const plan = matchPipeline("帮我投这个岗")!;
+    expect(plan[0].agentId).toBe("resume-expert");
+  });
+
+  it("搜岗类请求是两段，专业老师依赖岗位猎手", () => {
+    const plan = matchPipeline("帮我搜几个产品岗")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["job-hunter", "professional-teacher"]);
+    expect(plan[1].dependsOn).toEqual(["job-hunter"]);
+  });
+
+  it("改简历类请求命中单段", () => {
+    const plan = matchPipeline("帮我优化简历")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["resume-expert"]);
+  });
+
+  it("评估类请求是两段，简历专家依赖专业老师", () => {
+    const plan = matchPipeline("这个岗我合不合适")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["professional-teacher", "resume-expert"]);
+    expect(plan[1].dependsOn).toEqual(["professional-teacher"]);
+  });
+
+  it("没有模板命中时返回 null，交给模型出计划", () => {
+    expect(matchPipeline("今天天气不错")).toBeNull();
+  });
+
+  it("把用户原话插进任务描述里", () => {
+    const plan = matchPipeline("帮我准备一下面试")!;
+    expect(plan[0].task).toContain("帮我准备一下面试");
+    expect(plan[0].task).not.toContain("{{msg}}");
+  });
+
+  it("每一段的 dependsOn 都是数组，与 parsePlan 的输出形状一致", () => {
+    const plan = matchPipeline("帮我优化简历")!;
+    for (const t of plan) expect(Array.isArray(t.dependsOn)).toBe(true);
+  });
+
+  it("内置模板全部拓扑可解 —— 手写模板里不能有环", () => {
+    for (const tpl of JOB_PIPELINES) {
+      const plan = tpl.stages.map((s) => ({ ...s, dependsOn: s.dependsOn ?? [] }));
+      expect(batchByDependency(plan), `模板 ${tpl.id} 成环`).not.toBeNull();
+    }
+  });
+
+  it("接受自定义模板表，便于扩展和测试", () => {
+    const custom = [{ id: "t", match: /喵/, stages: [{ agentId: "networker", task: "{{msg}}" }] }];
+    expect(matchPipeline("喵喵喵", custom)!.map((t) => t.agentId)).toEqual(["networker"]);
+    expect(matchPipeline("汪汪汪", custom)).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `npx vitest run server/orchestration.test.ts`
+Expected: FAIL —— `matchPipeline is not a function`
+
+- [ ] **Step 3: 写最小实现**
+
+追加到 `server/orchestration.ts`：
+
+```ts
+export type PipelineStage = { agentId: string; task: string; dependsOn?: string[] };
+export type PipelineTemplate = { id: string; match: RegExp; stages: PipelineStage[] };
+
+/**
+ * 求职群的固定流水线。
+ *
+ * 为什么写死而不是每轮问模型：这条赛道的主要链路本来就是固定的（拆 JD →
+ * 改简历 → 投递 → 备面）。每轮花一次模型调用去重新推导同一条链，既费钱，
+ * 又让同一句话两次的编排可能不一样、出问题没法复现。
+ *
+ * 顺序即优先级，第一个命中的模板胜出。apply 必须排在 assess 前面——
+ * 「帮我投这个岗」两边都匹配得上，但用户要的是投递，不是评估。
+ *
+ * 模板覆盖不到的请求会落到模型出计划那条兜底路径，所以这张表不需要穷举。
+ */
+export const JOB_PIPELINES: PipelineTemplate[] = [
+  {
+    id: "interview",
+    match: /面试|模拟面|面经|群面|hr\s*面/i,
+    stages: [{ agentId: "interview-coach", task: "用户说：{{msg}}\n\n带他做面试准备：可能被问什么、怎么答、他现在的短板在哪。" }],
+  },
+  {
+    id: "apply",
+    match: /投递|帮.*投|请.*投|申请这个岗|apply/i,
+    stages: [
+      { agentId: "resume-expert", task: "用户说：{{msg}}\n\n按这次要投的岗位把简历定制一版，说明改了哪里、为什么。" },
+      { agentId: "app-tracker", task: "用户说：{{msg}}\n\n执行投递并记录进度，设置后续跟进。简历专家刚定制的版本见上方伙伴产出。", dependsOn: ["resume-expert"] },
+    ],
+  },
+  {
+    id: "search",
+    match: /搜.*(岗|工作|职位|实习)|找.*(工作|岗|实习)|有什么(岗|职位)|推荐.*岗|招聘/,
+    stages: [
+      { agentId: "job-hunter", task: "用户说：{{msg}}\n\n去搜岗位，给出具体的公司、职位和链接。" },
+      { agentId: "professional-teacher", task: "用户说：{{msg}}\n\n对岗位猎手刚搜到的那批岗位（见上方伙伴产出）逐个分析匹配度并排序，说清楚为什么。", dependsOn: ["job-hunter"] },
+    ],
+  },
+  {
+    id: "resume",
+    match: /改简历|优化简历|简历怎么样|看.*简历|润色.*简历|cover\s*letter/i,
+    stages: [{ agentId: "resume-expert", task: "用户说：{{msg}}\n\n优化简历，指出具体问题和改法。" }],
+  },
+  {
+    id: "assess",
+    match: /这个岗|这份工作|合不合适|匹配度|适合我吗|岗位要求|jd/i,
+    stages: [
+      { agentId: "professional-teacher", task: "用户说：{{msg}}\n\n拆解这个岗位的要求，逐条对照用户档案分析匹配度。" },
+      { agentId: "resume-expert", task: "用户说：{{msg}}\n\n根据专业老师刚做的匹配度分析（见上方伙伴产出），指出简历上还缺什么、该怎么补。", dependsOn: ["professional-teacher"] },
+    ],
+  },
+];
+
+/**
+ * 按用户这句话找固定流水线。命中返回已插值的计划，没命中返回 null
+ * ——调用方据此决定是否要花一次模型调用去出计划。
+ */
+export function matchPipeline(
+  userMsg: string,
+  templates: PipelineTemplate[] = JOB_PIPELINES
+): PlanTask[] | null {
+  for (const tpl of templates) {
+    if (!tpl.match.test(userMsg)) continue;
+    return tpl.stages.map((stage) => ({
+      agentId: stage.agentId,
+      task: stage.task.replaceAll("{{msg}}", userMsg),
+      dependsOn: stage.dependsOn ?? [],
+    }));
+  }
+  return null;
+}
+```
+
+注意：`JOB_PIPELINES` 里的正则**不要**带 `g` 标志。带 `g` 的正则 `.test()` 有粘性 `lastIndex`，同一个模板第二次匹配同一句话会返回 false——这是个很难查的间歇性 bug。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npx vitest run server/orchestration.test.ts`
+Expected: PASS，43 个用例全绿（Task 1–3 的 32 个 + 本任务 11 个）
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add server/orchestration.ts server/orchestration.test.ts
+git commit -m "feat(orchestration): 固定流水线模板与匹配
+
+求职这条赛道的主要链路本来就是固定的，每轮花一次模型调用重新推导同一条
+链既费钱、又让同一句话两次的编排不可复现。常见意图走写死的模板，模型出
+计划降级为兜底。
+
+模板顺序即优先级：apply 排在 assess 前面，因为「帮我投这个岗」两边都匹配
+得上，而用户要的是投递。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 5: 在 server.ts 里实现 runOrchestratedTurn（先不接入口）
 
 本任务写出完整编排但**不切换入口**——这样评审可以单独否决编排逻辑而不牵连入口切换，反之亦然。本任务结束时 `runOrchestratedTurn` 是暂时无人调用的死代码，这是刻意的。
 
@@ -575,7 +768,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `server.ts`（在 `runAgentChain` 函数定义之后追加，即约 `server.ts:3410` 之后）
 
 **Interfaces:**
-- Consumes: Task 1–3 的 `parsePlan`、`batchByDependency`、`buildAgentPrompt`、`buildTurnHistory`、`parseNeedMore`、`NEED_MORE_TAG`、`PlanTask`、`TurnEntry`；已有的 `streamAgent`、`JOB_AGENTS`、`agentByName`、`chatCompletion`、`CAREER_DIR`、`detectExplicitAgentId`
+- Consumes: Task 1–4 的 `parsePlan`、`batchByDependency`、`buildAgentPrompt`、`buildTurnHistory`、`parseNeedMore`、`matchPipeline`、`NEED_MORE_TAG`、`PlanTask`、`TurnEntry`；已有的 `streamAgent`、`JOB_AGENTS`、`agentByName`、`chatCompletion`、`CAREER_DIR`、`detectExplicitAgentId`
 - Produces: `runOrchestratedTurn(io, groupId, userMsg, allMessages, petName, petPersonality): Promise<void>`
 
 - [ ] **Step 1: 加 import**
@@ -589,6 +782,7 @@ import {
   buildAgentPrompt,
   buildTurnHistory,
   parseNeedMore,
+  matchPipeline,
   NEED_MORE_TAG,
   type PlanTask,
   type TurnEntry,
@@ -620,7 +814,8 @@ function planCandidates() {
 }
 
 /**
- * 首席一次性出计划。返回空数组表示不需要专家、首席自己答。
+ * 首席一次性出计划。**这是兜底路径**——固定流水线模板都不命中时才走到这里。
+ * 返回空数组表示不需要专家、首席自己答。
  *
  * 出错、超时、模型胡说八道一律返回空数组：编排不能因为计划这一步失败就
  * 整个哑掉，降级成「首席自己回答」始终是可用的。
@@ -782,7 +977,9 @@ async function runOrchestratedTurn(
   } else if (explicitId === "career-planner") {
     plan = [];
   } else {
-    plan = await requestPlan(userMsg, history, petName);
+    // 先查固定流水线：命中就省掉出计划那次模型调用，而且同一句话每次的编排都一样。
+    // 模板覆盖不到的请求才落到模型出计划。
+    plan = matchPipeline(userMsg) ?? await requestPlan(userMsg, history, petName);
   }
 
   // 没有专家要派：首席直接回答，带完整历史。
@@ -884,14 +1081,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: 切换求职群主入口
+### Task 6: 切换求职群主入口
 
 **Files:**
 - Modify: `server.ts:4744-4755`（`else` 分支，即 `const targetAgent = detectTargetAgent(msg.content);` 那一段）
 - Modify: `server.ts` 中求职群相关的 `io.emit("agent_done", ...)`——补上 `agentName`
 
 **Interfaces:**
-- Consumes: Task 4 的 `runOrchestratedTurn`
+- Consumes: Task 5 的 `runOrchestratedTurn`
 - Produces: `agent_done` 事件的载荷从 `{ groupId }` 变为 `{ groupId, agentName? }`
 
 - [ ] **Step 1: 换掉入口分支**
@@ -932,7 +1129,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - `server.ts:3298`、`3345`、`3386`、`3401`、`3630`、`3797`、`3822`、`3918`：把 `io.emit("agent_done", { groupId })` 改成带上对应那次 `agent_thinking` 用的同一个名字，例如 `io.emit("agent_done", { agentName: expert.name, groupId })`。
 - `server.ts:4722`、`4726`、`4730`、`4734`、`4742`、`4754`：这些是 workflow 提前返回和 `@all` 的收尾。`@all`（4742）改成 `io.emit("agent_done", { agentName: agent.name, groupId: msg.groupId })`；其余几处是「整轮结束」的兜底，保持不带 agentName。
 
-前端会把不带 agentName 的 `agent_done` 当成「全部清空」，正好覆盖这些兜底场景（见 Task 6）。
+前端会把不带 agentName 的 `agent_done` 当成「全部清空」，正好覆盖这些兜底场景（见 Task 7）。
 
 - [ ] **Step 3: 类型检查**
 
@@ -974,7 +1171,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: 前端思考指示器改成集合
+### Task 7: 前端思考指示器改成集合
 
 并行成为常态之后，单槽位的指示器会表现为「闪来闪去然后消失」——多个专家同时思考只显示最后一个，任一先完成就清空全部。
 
@@ -983,7 +1180,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `src/App.tsx` 中 `agentThinking` 的 state 声明与第 2533 行附近的渲染
 
 **Interfaces:**
-- Consumes: Task 5 的 `agent_done` 载荷 `{ groupId, agentName? }`
+- Consumes: Task 6 的 `agent_done` 载荷 `{ groupId, agentName? }`
 - Produces: 无（终点任务）
 
 - [ ] **Step 1: 改 state 声明**
@@ -1066,7 +1263,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 全部任务完成后逐条确认：
 
-- [ ] 「帮我看看这个岗我合不合适」这类不含双领域关键词的提问能按需触发多专家（改造前 `needsMultiAgent` 正则永不匹配）
+- [ ] 「帮我看看这个岗我合不合适」这类不含双领域关键词的提问能按需触发多专家（改造前 `needsMultiAgent` 正则永不匹配）——现在由 assess 模板直接命中，零模型调用
+- [ ] 模板命中时服务端日志里没有出计划那次调用；模板不命中时才有
 - [ ] 后跑的专家 prompt 里含有先跑完专家的产出 —— 由 `buildAgentPrompt` 的单测保证
 - [ ] 首席综合时 prompt 内含专家产出与对话历史 —— 由 `buildAgentPrompt` 的单测 + 手动观察首席收尾内容保证
 - [ ] 并行时前端同时显示多个专家在思考，各自完成各自消失
@@ -1078,8 +1276,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 每个任务独立提交，回退用 `git revert <sha>`。
 
-- Task 6 出问题：单独 revert，服务端不受影响（多发的 `agentName` 字段旧前端会忽略）。
-- Task 5 出问题：单独 revert 即可退回旧的 `runAgentChain` 入口，Task 1–4 全是新增代码、不影响任何现有路径。
-- Task 1–4 出问题：直接 revert，因为它们没有被任何现有路径调用。
+- Task 7 出问题：单独 revert，服务端不受影响（多发的 `agentName` 字段旧前端会忽略）。
+- Task 6 出问题：单独 revert 即可退回旧的 `runAgentChain` 入口，Task 1–5 全是新增代码、不影响任何现有路径。
+- Task 1–5 出问题：直接 revert，因为它们没有被任何现有路径调用。
 
-换句话说，**Task 5 是唯一一处真正改变现有行为的提交**，其余都是纯新增。
+换句话说，**Task 6 是唯一一处真正改变现有行为的提交**，其余都是纯新增。
