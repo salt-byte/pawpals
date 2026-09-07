@@ -90,23 +90,30 @@ describe("retryTargets", () => {
 });
 
 describe("超长选项字段不进模型", () => {
-  it("选项被截断的字段排除在待问列表外——列表对模型没有意义，反而撑爆请求", () => {
+  it("选项被截断的字段照样问模型，只是去掉 options 改走搜索", () => {
     const fields = [
       field({ label: "学历", type: "widget", options: ["本科", "研究生"] }),
       field({ label: "本科学校", type: "widget", options: ["清华大学"], truncated: true }),
     ];
-    expect(fieldsForModel(fields).map((f: any) => f.label)).toEqual(["学历"]);
+    const asked = fieldsForModel(fields);
+    expect(asked.map((f: any) => f.label)).toEqual(["学历", "本科学校"]);
+    // options 必须去掉：留着截断后的列表，会让「值必须命中 options」把正确答案判成越界
+    expect(asked[1].options).toBeUndefined();
+    expect((asked[1] as any).searchable).toBe(true);
   });
 
-  it("这些字段单列出来，交给用户手动选而不是假装填了", () => {
-    const fields = [field({ label: "本科学校", type: "widget", options: ["清华大学"], truncated: true })];
-    expect(manualFields(fields).map((f: any) => f.label)).toEqual(["本科学校"]);
+  it("没截断的字段原样透传", () => {
+    const fields = [field({ label: "学历", type: "widget", options: ["本科", "研究生"] })];
+    expect(fieldsForModel(fields)[0]).toEqual(fields[0]);
   });
 
-  it("正常字段既进模型也不出现在手动列表里", () => {
-    const fields = [field({ label: "姓名", type: "text" })];
-    expect(fieldsForModel(fields)).toHaveLength(1);
-    expect(manualFields(fields)).toEqual([]);
+  it("探不到选项、又不能搜的控件才算要用户自己来", () => {
+    const fields = [
+      field({ label: "本科学校", type: "widget", options: ["清华大学"], truncated: true }),
+      field({ label: "意向团队", type: "widget", options: [] }),
+      field({ label: "学历", type: "widget", options: ["本科"] }),
+    ];
+    expect(manualFields(fields).map((f: any) => f.label)).toEqual(["意向团队"]);
   });
 });
 

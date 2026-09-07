@@ -18,6 +18,7 @@
  */
 
 import { fieldSignature } from './schema.js';
+import { gridHeaderFor } from './grid.js';
 import { nativeSetValue } from '../act/synthetic.js';
 
 /** 这些标签的文字是代码不是文案，绝不能进快照——否则页面令牌会被送进模型。 */
@@ -108,6 +109,15 @@ function safeQuery(root, selector) {
  * 模型因此看到一堆长得一模一样的校验提示，认不出这是哪个字段。
  */
 function contextOf(el, limit, labelSelector, cache) {
+  // 表格里的格子：标签在列头上，周围一个字都没有。必须先走这条，否则向上找
+  // 标题会走到整张子表单的标题、或者行号「1」上——真机上四张经历表因此全空。
+  const column = gridHeaderFor(el);
+  if (column) {
+    // 拼上这张表自己的名字：四张表都有「开始时间」，光给列名分不清是哪张。
+    const table = tableLabelOf(el, limit, cache);
+    return table ? `${table} · ${column}` : column;
+  }
+
   let fallback = '';
   let container = el.parentElement;
   for (let depth = 0; depth < CONTAINER_DEPTH && container; depth += 1) {
@@ -132,6 +142,25 @@ function contextOf(el, limit, labelSelector, cache) {
     container = container.parentElement;
   }
   return fallback;
+}
+
+/**
+ * 子表单自己的标题（「获奖经历」「社团干部经历」）。
+ *
+ * 从格子往上走，找第一个带标题类名、又不在表格内部的节点。找不到就返回空——
+ * 只给列名也比给错强。
+ */
+function tableLabelOf(el, limit, cache) {
+  for (let node = el?.parentElement, depth = 0; node && depth < 10; node = node.parentElement, depth += 1) {
+    for (const child of node.children) {
+      if (!LABEL_CLASS_HINT.test(String(child.className || ''))) continue;
+      if (child.contains(el)) continue;
+      const text = textOf(child, limit, cache);
+      // 列头本身也带 title 类名，用「不包含当前格子」还不够，再挡掉表头区
+      if (text && !/^[*＊]/.test(text)) return text;
+    }
+  }
+  return '';
 }
 
 const hasValueArea = (container) =>

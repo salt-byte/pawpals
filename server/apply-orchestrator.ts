@@ -86,21 +86,35 @@ export function retryTargets(
 /**
  * 交给模型作答的字段。
  *
- * 选项被截断的字段排除在外：那是「可搜索」而不是「可枚举」的控件（全国高校、
- * 全国城市这类），截断后的列表既不完整、也对模型没有帮助，完整列表又会把请求
- * 撑爆——真机上两个学校字段合计 5208 个选项，直接 fetch failed。
+ * 选项被截断的字段（全国高校、全国城市这类）**不再排除**，而是把 options 去掉、
+ * 标成 searchable 后照样问模型。
+ *
+ * 原先是排除的，理由是「截断后的列表既不完整、也对模型没有帮助，完整列表又会
+ * 把请求撑爆」——真机上两个学校字段合计 5208 个选项，直接 fetch failed。这个
+ * 理由只对「枚举」成立。而驱动器早就有搜索分支：面板里有搜索框时先打字过滤再
+ * 选中，一步到位。既然能搜，就不该因为「列表太长」把字段整个丢给用户——档案里
+ * 写着清华大学，模型给得出，驱动器搜得到。
+ *
+ * options 必须去掉：留着截断后的 60 项，会让「值必须命中 options」这道校验把
+ * 正确答案judge成越界。去掉之后走的是「引用必须在档案原文里」那条更合适的路。
  */
 export function fieldsForModel(fields: Field[] = []): Field[] {
-  return fields.filter((field) => !field.truncated);
+  return fields.map((field) => {
+    if (!field.truncated) return field;
+    const { options: _dropped, ...rest } = field;
+    return { ...rest, searchable: true };
+  });
 }
 
 /**
- * 只能由用户自己选的字段。
+ * 只能由用户自己处理的字段。
  *
- * 现在只有「选项太多、需要搜索」这一类。单独列出来上报，而不是假装填了或者
- * 静默跳过——用户得知道哪几个框还等着他。
+ * 选项探测失败、又不是可搜索控件的——我们既不知道有哪些值可选，也没有搜索框可
+ * 用，让模型猜只会填错。单独列出来上报，而不是假装填了或静默跳过：用户得知道
+ * 哪几个框还等着他。
  */
 export function manualFields(fields: Field[] = []): Field[] {
-  return fields.filter((field) => Boolean(field.truncated));
+  return fields.filter(
+    (field) => field.type === "widget" && !field.truncated && !(field.options?.length) && !isGated(field)
+  );
 }
-
