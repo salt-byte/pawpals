@@ -84,13 +84,25 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
     const tabId = preferredTabId ?? pickTargetTab(task.url, await listTabs());
     if (tabId === null || tabId === undefined) return false;
 
+    /**
+     * 等多久。
+     *
+     * 默认那个上限是用来接住「标签页被丢弃后 sendMessage 挂住不返回」的，可
+     * probe 是**合法的长任务**：单个控件真机约 2.8 秒，一批 5 个就要十几秒。
+     * 用同一把尺子量，probe 会被误判成掉线——真机上因此把页面刷掉、整批结果
+     * 丢失（进度日志里明明在探，返回的 probed 却是 0）。任务自己声明了预算就
+     * 按预算等，多给一截余量覆盖往返开销。
+     */
+    const budget = Number(task?.payload?.budgetMs);
+    const waitMs = Number.isFinite(budget) && budget > 0 ? budget + 10000 : sendTimeoutMs;
+
     const TIMEOUT = Symbol('dispatch-timeout');
     let result;
     let timer;
     try {
       result = await Promise.race([
         sendToTab(tabId, { type: 'OFFICIAL_TASK', task }),
-        new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), sendTimeoutMs); }),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), waitMs); }),
       ]);
     } catch {
       return false; // 页面里还没有 content script

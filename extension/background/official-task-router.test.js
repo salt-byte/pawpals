@@ -304,3 +304,39 @@ describe('派给刚上线的那个标签页', () => {
     expect(sent[0]).toBe(1);
   });
 });
+
+/**
+ * 长任务不能用「掉线」那把尺子量。
+ *
+ * 默认等待上限是用来接住「标签页被丢弃后 sendMessage 挂住不返回」的。可 probe
+ * 是合法的长任务：单个控件真机约 2.8 秒，一批 5 个就十几秒。真机上因此被误判成
+ * 掉线、页面被刷掉、整批结果丢失——进度日志里明明在探，返回的 probed 却是 0。
+ */
+describe('任务自带预算时按预算等', () => {
+  function harness(delayMs) {
+    const reported = [];
+    return {
+      reported,
+      dispatcher: createOfficialDispatcher({
+        listTabs: async () => [{ id: 1, url: 'https://form.example.com/a' }],
+        sendToTab: async () => new Promise((r) => setTimeout(() => r({ ok: true, probed: [1, 2] }), delayMs)),
+        openTab: async () => ({ id: 1 }),
+        reportResult: (id, result) => reported.push({ id, result }),
+        reloadTab: async () => {},
+        sendTimeoutMs: 30,
+      }),
+    };
+  }
+
+  it('没声明预算时用默认上限，慢响应算超时', async () => {
+    const { dispatcher, reported } = harness(80);
+    await dispatcher.accept({ id: 'p0', kind: 'probe', url: 'https://form.example.com/a' });
+    expect(reported).toHaveLength(0);
+  });
+
+  it('声明了预算就等够——探测中途不该被当成掉线', async () => {
+    const { dispatcher, reported } = harness(80);
+    await dispatcher.accept({ id: 'p1', kind: 'probe', url: 'https://form.example.com/a', payload: { budgetMs: 60 } });
+    expect(reported).toEqual([{ id: 'p1', result: { ok: true, probed: [1, 2] } }]);
+  });
+});
