@@ -2515,7 +2515,10 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       const snapshot: any[] = Array.isArray(inspection.snapshot) ? inspection.snapshot : [];
       const usingSnapshot = snapshot.length > 0;
       let planFields: any[] = usingSnapshot
-        ? snapshot.map((control: any) => ({ ...control, signature: control.handle }))
+        // label 是下游（widgetsToProbe / retryTargets）认字段的键，快照里它叫
+        // context。不补这个别名，probe 会因为「没有标签的容器多半不是真字段」
+        // 把所有控件都过滤掉——真机上表现为「待探 0 个」，探测整段静默失效。
+        ? snapshot.map((control: any) => ({ ...control, signature: control.handle, label: control.context }))
         : plan.fields;
 
       /**

@@ -264,3 +264,38 @@ describe("validateAutofillPlan 接受快照控件", () => {
   });
 });
 
+
+/**
+ * 档案是 markdown，引用比对不能被格式噪声挡住。
+ *
+ * 真机：档案里写的是 `- **姓名**: 邓雨蝶`，模型引「姓名: 邓雨蝶」，去掉空白后是
+ * 「姓名:邓雨蝶」，原文却是「姓名**:邓雨蝶」——对不上，判 unsourced。最基本的
+ * 字段被自己的闸门挡了。
+ *
+ * 归一化掉强调符号不削弱反编造：值本身仍然必须在原文里出现，只是不再要求模型
+ * 连 markdown 标记一起原样抄。
+ */
+describe("markdown 强调符号不该挡住引用", () => {
+  const profile = "# 邓雨蝶 - 简历 Master\n\n- **姓名**: 邓雨蝶\n- **邮箱**: a@b.com";
+  const fields = [{ signature: "sig-name", label: "姓名", kind: "custom", type: "text" }];
+
+  it("引用跨越 ** 时仍然成立", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-name", value: "邓雨蝶", source: "姓名: 邓雨蝶" }],
+      fields,
+      profile
+    );
+    expect(plan.rejected).toEqual([]);
+    expect(plan.values).toEqual([{ signature: "sig-name", value: "邓雨蝶" }]);
+  });
+
+  it("编造的值仍然拦得住——归一化不是放水", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "sig-name", value: "张三", source: "姓名: 张三" }],
+      fields,
+      profile
+    );
+    expect(plan.values).toEqual([]);
+    expect(plan.rejected[0].reason).toBe("unsourced");
+  });
+});

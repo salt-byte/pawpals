@@ -70,8 +70,17 @@ const isGated = (field: PlannableField) =>
   (GATED_KINDS as readonly string[]).includes(String(field.kind || "")) ||
   String((field as any).type || "") === "file";
 
-/** 去掉全部空白再比对：档案里的换行缩进不该影响引用是否成立。 */
-const strip = (text: unknown) => String(text ?? "").replace(/\s+/g, "");
+/**
+ * 比对前的归一化：去掉空白，以及 markdown 的强调/代码标记。
+ *
+ * 换行缩进不该影响引用是否成立，markdown 标记同理。真机上档案里写的是
+ * `- **姓名**: 邓雨蝶`，模型引「姓名: 邓雨蝶」，只去空白的话原文是
+ * 「姓名**:邓雨蝶」，对不上，最基本的字段被自己的闸门判成 unsourced。
+ *
+ * 这不削弱反编造：值本身仍然必须在原文里出现（见 anchored），归一化只是不再
+ * 要求模型连排版符号一起原样抄。
+ */
+const strip = (text: unknown) => String(text ?? "").replace(/\s+/g, "").replace(/[*_`~]/g, "");
 
 /**
  * 交给模型的字段。安全闸之外全给——包括 custom，那正是模型要接管的桶。
