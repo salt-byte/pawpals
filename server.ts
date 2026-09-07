@@ -3247,6 +3247,7 @@ async function streamAgent(
       .replace(/RESUME_DECISION::\w+\n?/g, "")
       .replace(/MEMORY_UPDATE::\{[^}]*\}\n?/g, "")
       .replace(/PROFILE_CONFIRM\n?/g, "")
+      .replace(/NEED_MORE::\s*\[[\s\S]*?\]\s*/g, "")
       .replace(/\{\{sessions_spawn[^}]*\}\}/g, "")
       .replace(/\{[^{}]*"action"\s*:\s*"sessions_spawn"[^{}]*\}/g, "")
       .replace(/\{[^{}]*"agentId"\s*:\s*"[^"]*"[^{}]*"prompt"\s*:\s*"[^"]*"[^{}]*\}/g, "")
@@ -3609,7 +3610,7 @@ async function executePlan(
           const { reply } = await streamAgent(
             expert,
             [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: snapshot, task: item.task }) }],
-            0, io, groupId, allMessages, petName, petPersonality
+            MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
           );
           return reply ? { agentId: expert.id, agentName: expert.name, task: item.task, reply } : null;
         } catch (e: any) {
@@ -3689,18 +3690,25 @@ async function runOrchestratedTurn(
     plan = matchPipeline(userMsg) ?? await requestPlan(userMsg, history, petName);
   }
 
-  // 没有专家要派：首席直接回答，带完整历史。
-  if (plan.length === 0) {
+  // 首席独自作答：没有专家可派，或专家一个都没产出。两处共用，避免又拼出两份不一样的上下文。
+  const chiefAlone = async () => {
     io.emit("agent_thinking", { agentName: petName, groupId });
     try {
       await streamAgent(
         chiefWithName,
         [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: [], task: userMsg }) }],
-        0, io, groupId, allMessages, petName, petPersonality
+        // depth 钉死为 MAX_CHAIN_DEPTH：这是编排出来的回复，不该再触发 streamAgent
+        // 里那套给旧入口用的 @提及自动接力（本次改造要移除的正是它）。
+        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
       );
     } finally {
       io.emit("agent_done", { agentName: petName, groupId });
     }
+  };
+
+  // 没有专家要派：首席直接回答，带完整历史。
+  if (plan.length === 0) {
+    await chiefAlone();
     return;
   }
 
@@ -3709,16 +3717,7 @@ async function runOrchestratedTurn(
 
   // 一个专家都没成功产出，就别拿空的 turnLog 去让首席「综合」。
   if (turnLog.length === 0) {
-    io.emit("agent_thinking", { agentName: petName, groupId });
-    try {
-      await streamAgent(
-        chiefWithName,
-        [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: [], task: userMsg }) }],
-        0, io, groupId, allMessages, petName, petPersonality
-      );
-    } finally {
-      io.emit("agent_done", { agentName: petName, groupId });
-    }
+    await chiefAlone();
     return;
   }
 
@@ -3737,7 +3736,7 @@ async function runOrchestratedTurn(
             task: synthesisInstruction(allowMore),
           }),
         }],
-        0, io, groupId, allMessages, petName, petPersonality
+        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
       );
       return reply || "";
     } catch (e: any) {
