@@ -60,7 +60,15 @@ export type AutofillPlan = {
  */
 const SOURCE_MIN_LENGTH = 2;
 
-const isGated = (field: PlannableField) => (GATED_KINDS as readonly string[]).includes(String(field.kind || ""));
+/**
+ * 由代码把关、绝不交给模型的字段。
+ *
+ * 旧字段表按 kind 判断；快照没有 kind，按 type=file 判断——文件框永远是安全闸
+ * （简历先传、提交前拦截），这一条不能建立在模型的判断上。
+ */
+const isGated = (field: PlannableField) =>
+  (GATED_KINDS as readonly string[]).includes(String(field.kind || "")) ||
+  String((field as any).type || "") === "file";
 
 /** 去掉全部空白再比对：档案里的换行缩进不该影响引用是否成立。 */
 const strip = (text: unknown) => String(text ?? "").replace(/\s+/g, "");
@@ -74,19 +82,55 @@ export function fillableFields(fields: PlannableField[]): PlannableField[] {
   return (fields ?? []).filter((field) => Boolean(field.signature) && !isGated(field));
 }
 
+/** 快照里的一个控件。给的是周围**原文**，不是猜出来的标签。 */
+export type SnapshotControl = {
+  handle: string;
+  type?: string;
+  required?: boolean;
+  options?: string[];
+  context?: string;
+};
+
+/**
+ * 快照控件转成待填行。
+ *
+ * 真机：帆软那页 39 个字段里 16 个「没有标签」——启发式没猜出来，模型于是根本
+ * 看不到这些框，30/39 填不上。快照不猜标签，直接把控件周围的原文给模型，它看得
+ * 懂「* 姓名」这种排布。
+ *
+ * 文件框不进 prompt：那是安全闸（简历先传、提交前拦截），由代码把关。
+ * 没有 context 的控件也不进：模型无从判断，给了也是瞎猜。
+ */
+function snapshotRows(controls: SnapshotControl[]) {
+  return (controls ?? [])
+    .filter((control) => control.handle && String(control.context || "").trim())
+    .filter((control) => control.type !== "file")
+    .map((control) => ({
+      signature: control.handle,
+      context: control.context,
+      type: control.type || "text",
+      required: control.required === true,
+      options: control.options?.length ? control.options : undefined,
+    }));
+}
+
 export function buildAutofillPrompt(input: {
-  fields: PlannableField[];
+  fields?: PlannableField[];
+  controls?: SnapshotControl[];
   profileText: string;
   ctx?: { company?: string; title?: string };
 }): string {
-  const { fields, profileText, ctx = {} } = input;
-  const rows = fillableFields(fields).map((field) => ({
-    signature: field.signature as string,
-    label: field.label || "",
-    type: field.type || "text",
-    required: field.required === true,
-    options: field.options?.length ? field.options : undefined,
-  }));
+  const { fields, controls, profileText, ctx = {} } = input;
+  // 迁移期两条路并存：有快照就用快照的原文，没有就退回旧的启发式字段表。
+  const rows = controls?.length
+    ? snapshotRows(controls)
+    : fillableFields(fields ?? []).map((field) => ({
+        signature: field.signature as string,
+        context: field.label || "",
+        type: field.type || "text",
+        required: field.required === true,
+        options: field.options?.length ? field.options : undefined,
+      }));
 
   return [
     `岗位：${ctx.company || "未知公司"} - ${ctx.title || "未知岗位"}`,
@@ -94,7 +138,7 @@ export function buildAutofillPrompt(input: {
     "【候选人档案原文】",
     profileText,
     "",
-    "【待填字段】",
+    "【待填字段】（context 是这个框周围的页面原文，请据此判断它要什么）",
     JSON.stringify(rows, null, 2),
     "",
     "把档案里已有的信息映射到上面的字段，返回：",
@@ -133,7 +177,10 @@ export function validateAutofillPlan(
     const signature = typeof item.signature === "string" ? item.signature : "";
     const reject = (reason: string) => rejected.push({ signature, reason });
 
-    const matches = (fields ?? []).filter((field) => field.signature === signature);
+    // 迁移期两套并存：快照控件用 handle，旧字段表用 signature。
+    const matches = (fields ?? []).filter(
+      (field) => field.signature === signature || (field as any).handle === signature
+    );
     if (!signature || matches.length === 0) { reject("unknown_signature"); continue; }
     if (matches.length > 1) { reject("ambiguous_signature"); continue; }
 

@@ -190,3 +190,77 @@ describe("source 校验：以「引用包含值」代替长度阈值", () => {
     expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
   });
 });
+
+/**
+ * 真机：帆软那页 39 个字段里 16 个「没有标签」——启发式没猜出来，模型于是根本
+ * 看不到这些框，30/39 填不上。快照给的是控件周围的**原文**，不是猜出来的标签：
+ * 模型看得懂「* 姓名」这种排布，不需要我们先猜对。
+ */
+describe("prompt 用快照的原文，而不是猜出来的标签", () => {
+  const control = (over: any = {}) => ({
+    handle: `h-${over.context ?? "x"}`, type: "text", required: true, context: "字段", options: [], ...over,
+  });
+
+  it("把 context 原文交给模型，即使没有 label", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [control({ context: "* 姓名", handle: "h1" })],
+      profileText: "姓名：邓雨蝶",
+    } as any);
+    expect(prompt).toContain("* 姓名");
+    expect(prompt).toContain("h1");
+  });
+
+  it("文件框不进 prompt——那是安全闸，代码把关", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [control({ context: "简历附件", type: "file", handle: "hf" })],
+      profileText: "简历",
+    } as any);
+    expect(prompt).not.toContain("hf");
+  });
+
+  it("有选项的控件把选项一并给出", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [control({ context: "学历", handle: "hx", type: "widget", options: ["本科", "研究生"] })],
+      profileText: "硕士",
+    } as any);
+    expect(prompt).toContain("研究生");
+  });
+
+  it("没有 context 的控件不进 prompt——模型无从判断，给了也是瞎猜", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [control({ context: "", handle: "hempty" })],
+      profileText: "x",
+    } as any);
+    expect(prompt).not.toContain("hempty");
+  });
+
+  it("仍然兼容旧的 fields 入参，迁移期两条路都能走", () => {
+    const prompt = buildAutofillPrompt({
+      fields: [{ signature: "s1", label: "姓名", kind: "full_name", type: "text", required: true, options: [] }],
+      profileText: "姓名：邓雨蝶",
+    } as any);
+    expect(prompt).toContain("s1");
+  });
+});
+
+describe("validateAutofillPlan 接受快照控件", () => {
+  const control = (over: any = {}) => ({ handle: "h1", type: "text", required: true, context: "姓名", options: [], ...over });
+
+  it("按句柄校验并通过", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "h1", value: "邓雨蝶", source: "邓雨蝶" }],
+      [control()] as any, "邓雨蝶 手机：15996610829"
+    );
+    expect(plan.values).toEqual([{ signature: "h1", value: "邓雨蝶" }]);
+  });
+
+  it("文件框的句柄一律拒绝——安全闸不交给模型", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "hf", value: "x.pdf", source: "简历附件" }],
+      [control({ handle: "hf", type: "file", context: "简历附件" })] as any, "简历附件"
+    );
+    expect(plan.values).toEqual([]);
+    expect(plan.rejected[0]).toMatchObject({ reason: "gated_field" });
+  });
+});
+
