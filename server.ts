@@ -6,7 +6,18 @@ import os from "os";
 import path from "path";
 import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
 import { OfficialApplicationQueue, parseRequestedKind } from "./server/official-application-queue.ts";
-import { resolveRoute } from "./server/routing.ts";
+import { resolveRoute, detectExplicitAgentId } from "./server/routing.ts";
+import {
+  parsePlan,
+  batchByDependency,
+  buildAgentPrompt,
+  buildTurnHistory,
+  parseNeedMore,
+  matchPipeline,
+  NEED_MORE_TAG,
+  type PlanTask,
+  type TurnEntry,
+} from "./server/orchestration.ts";
 import { buildFileInjections } from "./server/agent-context.ts";
 import { formatLogEntry, renderAgentLog } from "./server/agent-log.ts";
 import { stageLabel, type WorkflowStageId } from "./server/workflow.ts";
@@ -3492,6 +3503,257 @@ async function runAgentChain(
   }
 }
 
+// ── runOrchestratedTurn：出计划 → 拓扑分批执行 → 综合（最多追加一轮）──────
+// 本次刻意不切换入口，runOrchestratedTurn 暂时无人调用。见 Task 5 说明。
+
+/** 档案 + 简历，收口成一份。此前三处内联读取，拼法各不相同。 */
+function loadProfileContext(): string {
+  let ctx = "";
+  try {
+    const profilePath = path.join(CAREER_DIR, "profile.md");
+    const resumePath = path.join(CAREER_DIR, "resume_master.md");
+    const profile = existsSync(profilePath) ? readFileSync(profilePath, "utf8") : "";
+    const resume = existsSync(resumePath) ? readFileSync(resumePath, "utf8") : "";
+    if (profile) ctx += `【用户档案】\n${profile}`;
+    if (resume) ctx += `${ctx ? "\n\n" : ""}【简历原文】\n${resume.slice(0, 3000)}`;
+  } catch {}
+  return ctx;
+}
+
+/** 可被派活的专家（首席自己不进计划——它是出计划和综合的那个）。 */
+function planCandidates() {
+  return JOB_AGENTS.filter((a) => a.id !== "career-planner");
+}
+
+/**
+ * 首席一次性出计划。**这是兜底路径**——固定流水线模板都不命中时才走到这里。
+ * 返回空数组表示不需要专家、首席自己答。
+ *
+ * 出错、超时、模型胡说八道一律返回空数组：编排不能因为计划这一步失败就
+ * 整个哑掉，降级成「首席自己回答」始终是可用的。
+ */
+async function requestPlan(
+  userMsg: string,
+  history: { role: string; content: string; name?: string }[],
+  petName: string
+): Promise<PlanTask[]> {
+  const candidates = planCandidates();
+  const roster = candidates.map((a) => `${a.id}（${a.role}）`).join("、");
+  try {
+    const result = await chatCompletion({
+      messages: [
+        {
+          role: "system",
+          content: `你是${petName}，求职伴学团队的协调者。根据用户这次的请求，决定要派哪些专家、各自做什么。
+
+可派的专家：${roster}
+
+输出规则：
+- 只输出 JSON 数组，不要任何其它文字，不要 markdown 围栏。
+- 每项格式：{"agentId":"专家id","task":"这个专家具体要做什么","dependsOn":["需要先完成的专家id"]}
+- dependsOn 只在后一个专家确实需要前一个的产出时才写，否则留空数组（留空的会并行执行，更快）。
+- 你自己（career-planner）不要出现在计划里。
+- 如果这次请求你自己就能回答、不需要任何专家，输出：[]`,
+        },
+        {
+          role: "user",
+          content: buildAgentPrompt({
+            history,
+            profile: "",
+            turnLog: [],
+            task: `用户说：${userMsg}\n\n请输出计划。`,
+          }),
+        },
+      ],
+      max_tokens: 500,
+    });
+    return parsePlan(result.content, candidates.map((a) => a.id));
+  } catch (e: any) {
+    console.warn("[orchestration] 出计划失败，降级为首席自己回答：", e?.message || e);
+    return [];
+  }
+}
+
+/**
+ * 按拓扑批次跑计划。同批并行，批间串行——后一批的 prompt 里带着前一批的产出。
+ *
+ * 每个专家跑完就把产出写进 turnLog（传入的数组被就地追加），因此 turnLog 既是
+ * 下一批的输入，也是最后综合的输入。
+ */
+async function executePlan(
+  plan: PlanTask[],
+  turnLog: TurnEntry[],
+  io: Server,
+  groupId: string,
+  history: { role: string; content: string; name?: string }[],
+  profile: string,
+  allMessages: any[],
+  petName: string,
+  petPersonality: string
+): Promise<void> {
+  const batches = batchByDependency(plan);
+  if (!batches) return; // parsePlan 已经挡过环，这里是防御
+
+  for (const batch of batches) {
+    // 快照：同一批内的专家看到的 turnLog 必须一致，否则并行结果不可复现。
+    const snapshot = [...turnLog];
+    const done = await Promise.all(
+      batch.map(async (item) => {
+        const expert = JOB_AGENTS.find((a) => a.id === item.agentId);
+        if (!expert) return null;
+        io.emit("agent_thinking", { agentName: expert.name, groupId });
+        try {
+          const { reply } = await streamAgent(
+            expert,
+            [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: snapshot, task: item.task }) }],
+            0, io, groupId, allMessages, petName, petPersonality
+          );
+          return reply ? { agentId: expert.id, agentName: expert.name, task: item.task, reply } : null;
+        } catch (e: any) {
+          console.warn(`[orchestration] ${expert.id} 执行失败：`, e?.message || e);
+          return null;
+        } finally {
+          io.emit("agent_done", { agentName: expert.name, groupId });
+        }
+      })
+    );
+    for (const entry of done) if (entry) turnLog.push(entry);
+  }
+}
+
+/**
+ * 综合的职责说明。
+ *
+ * 改造前这里写的是「1-2 句简短收尾，绝对不要重复专家的内容」——综合这件事
+ * 被 prompt 主动关掉了。现在要求的是关联、冲突、下一步：引用但不复述。
+ *
+ * allowMore 为 false 时不给追加出口，因为追加轮硬上限是一次。
+ */
+function synthesisInstruction(allowMore: boolean): string {
+  const base = `以上是本轮各位专家刚刚给用户的产出，用户已经逐条看到了，不要复述内容。
+
+你要做的是把它们接成一个整体：
+1. 指出各家产出之间的关联——谁的结论支撑了谁
+2. 指出彼此矛盾或对不上的地方，并给出你的判断
+3. 给出明确的下一步`;
+
+  if (!allowMore) return base;
+
+  return `${base}
+
+如果你判断还缺一个关键环节、必须再派一位专家才能给用户交代，就在回复最后另起一行写：
+${NEED_MORE_TAG}[{"agentId":"专家id","task":"要做什么"}]
+不需要就完全不要出现这个标记。
+
+注：专家的产出里如果出现了「@某某」，那只是它的建议，不会自动触发调用——
+要不要真的再派人，由你在这里决定。`;
+}
+
+/**
+ * 一次用户提问的完整编排：出计划 → 分批执行 → 综合（可追加一轮）。
+ *
+ * 取代求职群主入口原本的三条路径（并行多专家 / 路由单专家 / 首席直接回加正则
+ * 接力）。计划为空就是「首席自己答」，计划一项就是「单专家」——它们不再是独立
+ * 的代码路径，因此也不会再各自拼出不一样的上下文。
+ */
+async function runOrchestratedTurn(
+  io: Server,
+  groupId: string,
+  userMsg: string,
+  allMessages: any[],
+  petName: string,
+  petPersonality: string
+): Promise<void> {
+  const chief = JOB_AGENTS.find((a) => a.id === "career-planner")!;
+  const chiefWithName = { ...chief, name: petName };
+  const history = buildTurnHistory(allMessages, groupId);
+  const profile = loadProfileContext();
+  const candidateIds = planCandidates().map((a) => a.id);
+
+  // 显式 @ 时跳过出计划那次模型调用——用户已经说清楚要找谁了。
+  const nameToId: Record<string, string> = {};
+  for (const [name, a] of Object.entries(agentByName)) nameToId[name] = a.id;
+  const explicitId = detectExplicitAgentId(userMsg, nameToId);
+
+  let plan: PlanTask[];
+  if (explicitId && explicitId !== "career-planner") {
+    plan = [{ agentId: explicitId, task: userMsg, dependsOn: [] }];
+  } else if (explicitId === "career-planner") {
+    plan = [];
+  } else {
+    // 先查固定流水线：命中就省掉出计划那次模型调用，而且同一句话每次的编排都一样。
+    // 模板覆盖不到的请求才落到模型出计划。
+    plan = matchPipeline(userMsg) ?? await requestPlan(userMsg, history, petName);
+  }
+
+  // 没有专家要派：首席直接回答，带完整历史。
+  if (plan.length === 0) {
+    io.emit("agent_thinking", { agentName: petName, groupId });
+    try {
+      await streamAgent(
+        chiefWithName,
+        [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: [], task: userMsg }) }],
+        0, io, groupId, allMessages, petName, petPersonality
+      );
+    } finally {
+      io.emit("agent_done", { agentName: petName, groupId });
+    }
+    return;
+  }
+
+  const turnLog: TurnEntry[] = [];
+  await executePlan(plan, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality);
+
+  // 一个专家都没成功产出，就别拿空的 turnLog 去让首席「综合」。
+  if (turnLog.length === 0) {
+    io.emit("agent_thinking", { agentName: petName, groupId });
+    try {
+      await streamAgent(
+        chiefWithName,
+        [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: [], task: userMsg }) }],
+        0, io, groupId, allMessages, petName, petPersonality
+      );
+    } finally {
+      io.emit("agent_done", { agentName: petName, groupId });
+    }
+    return;
+  }
+
+  // 综合。allowMore 只在第一次为 true —— 追加轮硬上限一次。
+  const synthesize = async (allowMore: boolean): Promise<string> => {
+    io.emit("agent_thinking", { agentName: petName, groupId });
+    try {
+      const { reply } = await streamAgent(
+        chiefWithName,
+        [{
+          role: "user",
+          content: buildAgentPrompt({
+            history,
+            profile,
+            turnLog,
+            task: synthesisInstruction(allowMore),
+          }),
+        }],
+        0, io, groupId, allMessages, petName, petPersonality
+      );
+      return reply || "";
+    } catch (e: any) {
+      console.warn("[orchestration] 综合失败：", e?.message || e);
+      return "";
+    } finally {
+      io.emit("agent_done", { agentName: petName, groupId });
+    }
+  };
+
+  const firstReply = await synthesize(true);
+  const followUp = parseNeedMore(firstReply, candidateIds)
+    .filter((t) => !turnLog.some((e) => e.agentId === t.agentId));
+
+  if (followUp.length > 0) {
+    await executePlan(followUp, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality);
+    await synthesize(false);
+  }
+}
 
 // ── handleJobOnboarding: 降级为「记录器」──────────────────────────────
 // 不拦截消息、不做正则判断、不控制流转
