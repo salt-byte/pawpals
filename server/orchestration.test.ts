@@ -207,6 +207,39 @@ describe("parseNeedMore", () => {
   it("追加任务里不认识的 agentId 同样被丢掉", () => {
     expect(parseNeedMore('NEED_MORE::[{"agentId":"产品经理","task":"随便"}]', VALID2)).toEqual([]);
   });
+
+  it("数组后面还跟着一句人话时照样解析得出来", () => {
+    const reply = 'NEED_MORE::[{"agentId":"interview-coach","task":"备面"}]\n\n希望有帮助！';
+    expect(parseNeedMore(reply, VALID2)).toEqual([
+      { agentId: "interview-coach", task: "备面", dependsOn: [] },
+    ]);
+  });
+
+  it("嵌套的 dependsOn 数组不会让解析提前收尾", () => {
+    const reply = 'NEED_MORE::[{"agentId":"resume-expert","task":"改简历"},{"agentId":"interview-coach","task":"备面","dependsOn":["resume-expert"]}]';
+    expect(parseNeedMore(reply, VALID2)).toEqual([
+      { agentId: "resume-expert", task: "改简历", dependsOn: [] },
+      { agentId: "interview-coach", task: "备面", dependsOn: ["resume-expert"] },
+    ]);
+  });
+
+  it("标记前面有正文、后面也有正文时仍然解析得出来", () => {
+    const reply = '综合完了。\nNEED_MORE::[{"agentId":"interview-coach","task":"准备面试"}]\n就这些。';
+    expect(parseNeedMore(reply, VALID2)).toEqual([
+      { agentId: "interview-coach", task: "准备面试", dependsOn: [] },
+    ]);
+  });
+
+  it("task 文案里带方括号不会让数组提前收尾", () => {
+    const reply = 'NEED_MORE::[{"agentId":"interview-coach","task":"按[岗位JD]准备面试"}] 完毕';
+    expect(parseNeedMore(reply, VALID2)).toEqual([
+      { agentId: "interview-coach", task: "按[岗位JD]准备面试", dependsOn: [] },
+    ]);
+  });
+
+  it("方括号没有闭合时返回空，不抛错", () => {
+    expect(parseNeedMore('NEED_MORE::[{"agentId":"interview-coach"', VALID2)).toEqual([]);
+  });
 });
 
 describe("matchPipeline", () => {

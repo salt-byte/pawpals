@@ -938,6 +938,12 @@ export default function App() {
         }, 280);
       }
     });
+    // 「正在思考」只靠配对的 agent_done 摘除，服务端中途重启就没人来摘了，
+    // 指示器会一直挂着直到那位专家碰巧再跑一次。断线/重连时清空：
+    // 连接断了，之前那些 thinking 就都不可能再等到自己的 agent_done 了。
+    socketRef.current.on('connect', () => setThinkingAgents([]));
+    socketRef.current.on('disconnect', () => setThinkingAgents([]));
+
     socketRef.current.on('agent_thinking', ({ agentName, groupId }: { agentName: string; groupId: string }) => {
       setThinkingAgents(prev =>
         prev.some(a => a.agentName === agentName && a.groupId === groupId)

@@ -2801,7 +2801,13 @@ async function streamAgent(
   petName = "团团",
   petPersonality = "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。",
   extraSystemPrompt = "",
-  allowedToolNamesOverride?: string[]
+  allowedToolNamesOverride?: string[],
+  // 用户这次真正说的那句话。下面 search_jobs / apply_job 的关键词触发和投递目标
+  // 选行都是拿它做匹配的，而编排路径传进来的 messages 里那条 user 消息是
+  // buildAgentPrompt 拼出来的大段上下文（历史 + 档案 + 3000 字简历 + 本轮产出），
+  // 简历里的公司名会把投递目标匹配歪、触发词几乎每轮都能命中。
+  // 不传就沿用原来的推导，老调用方行为完全不变。
+  rawUserMsg?: string
 ): Promise<{ reply: string | null; calledApply: boolean }> {
   const msgId = `msg-${Date.now()}-${agent.id}`;
   const isChief = agent.id === "career-planner";
@@ -2855,7 +2861,7 @@ async function streamAgent(
     const allowedToolNames = allowedToolNamesOverride ?? (AGENT_TOOLS[agent.id] ?? []);
     const agentTools = TOOLS.filter(t => allowedToolNames.includes(t.function.name));
 
-    const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
+    const lastUserMsg = rawUserMsg ?? ([...messages].reverse().find(m => m.role === "user")?.content ?? "");
 
     // ── 预执行工具（Agent 职责驱动，不靠关键词）────────────────────────────
     // Step 1+2: 按 AGENT_CONTEXT_CONFIG 自动注入文件 + 工具结果
@@ -3273,7 +3279,11 @@ async function streamAgent(
       .replace(/RESUME_DECISION::\w+\n?/g, "")
       .replace(/MEMORY_UPDATE::\{[^}]*\}\n?/g, "")
       .replace(/PROFILE_CONFIRM\n?/g, "")
-      .replace(/NEED_MORE::\s*\[[\s\S]*?\]\s*/g, "")
+      // 贪婪匹配到最后一个 ]，再一路吃到结尾：PlanTask 有 dependsOn 数组，
+      // 非贪婪会停在第一个 ]，把 "}]" 这种协议残渣直接流给用户、存进历史、
+      // 再喂回下一轮的 prompt。标记按约定写在回复最末，所以它之后的东西
+      // 整段都是协议地盘，可以一起清掉。
+      .replace(/NEED_MORE::\s*\[[\s\S]*\][\s\S]*$/, "")
       .replace(/\{\{sessions_spawn[^}]*\}\}/g, "")
       .replace(/\{[^{}]*"action"\s*:\s*"sessions_spawn"[^{}]*\}/g, "")
       .replace(/\{[^{}]*"agentId"\s*:\s*"[^"]*"[^{}]*"prompt"\s*:\s*"[^"]*"[^{}]*\}/g, "")
@@ -3619,7 +3629,8 @@ async function executePlan(
   profile: string,
   allMessages: any[],
   petName: string,
-  petPersonality: string
+  petPersonality: string,
+  userMsg: string
 ): Promise<void> {
   const batches = batchByDependency(plan);
   if (!batches) return; // parsePlan 已经挡过环，这里是防御
@@ -3631,12 +3642,29 @@ async function executePlan(
       batch.map(async (item) => {
         const expert = JOB_AGENTS.find((a) => a.id === item.agentId);
         if (!expert) return null;
+
+        // 分批是照计划算的，但计划不等于实际发生的事。依赖那一步失败或没产出时
+        // 它不会进 turnLog，而下游的任务文案还指着「上方伙伴产出」——apply 模板里
+        // 下游那步是真的会投出去的，等于拿着一份没定制的简历去投。所以这里按
+        // turnLog 里真实落地的东西再判一次，缺依赖就跳过。
+        // 必须出声：这种跳过静默掉，就是永远查不出来的那类 bug。
+        const missingDeps = (item.dependsOn ?? []).filter(
+          (dep) => !snapshot.some((e) => e.agentId === dep)
+        );
+        if (missingDeps.length > 0) {
+          console.warn(
+            `[orchestration] 跳过 ${item.agentId}：依赖的 ${missingDeps.join("、")} 本轮没有产出`
+          );
+          return null;
+        }
+
         io.emit("agent_thinking", { agentName: expert.name, groupId });
         try {
           const { reply } = await streamAgent(
             expert,
             [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: snapshot, task: item.task }) }],
-            MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
+            MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality,
+            "", undefined, userMsg
           );
           return reply ? { agentId: expert.id, agentName: expert.name, task: item.task, reply } : null;
         } catch (e: any) {
@@ -3744,7 +3772,8 @@ async function runOrchestratedTurn(
         [{ role: "user", content: buildAgentPrompt({ history, profile, turnLog: [], task: userMsg }) }],
         // depth 钉死为 MAX_CHAIN_DEPTH：这是编排出来的回复，不该再触发 streamAgent
         // 里那套给旧入口用的 @提及自动接力（本次改造要移除的正是它）。
-        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
+        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality,
+        "", undefined, userMsg
       );
     } finally {
       io.emit("agent_done", { agentName: petName, groupId });
@@ -3758,7 +3787,7 @@ async function runOrchestratedTurn(
   }
 
   const turnLog: TurnEntry[] = [];
-  await executePlan(plan, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality);
+  await executePlan(plan, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality, userMsg);
 
   // 一个专家都没成功产出，就别拿空的 turnLog 去让首席「综合」。
   if (turnLog.length === 0) {
@@ -3781,7 +3810,8 @@ async function runOrchestratedTurn(
             task: synthesisInstruction(allowMore),
           }),
         }],
-        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality
+        MAX_CHAIN_DEPTH, io, groupId, allMessages, petName, petPersonality,
+        "", undefined, userMsg
       );
       return reply || "";
     } catch (e: any) {
@@ -3793,11 +3823,30 @@ async function runOrchestratedTurn(
   };
 
   const firstReply = await synthesize(true);
+  // 先算 followUp 再往 turnLog 里补首席那条：这样下面这个去重过滤看到的
+  // turnLog 还是「只有专家」的，首席那条不可能干扰它。
+  // （即便顺序反了也不会出事——followUp 由 parsePlan 按 candidateIds 校验过，
+  // 而 candidateIds 不含 career-planner，追加任务永远不会指向首席。）
   const followUp = parseNeedMore(firstReply, candidateIds)
     .filter((t) => !turnLog.some((e) => e.agentId === t.agentId));
 
   if (followUp.length > 0) {
-    await executePlan(followUp, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality);
+    // history 是进函数时就固定的，第一次综合既不在 history 里也不在 turnLog 里。
+    // 不补这一条，追加轮的专家和第二次综合都不知道首席已经说过一遍，
+    // 第二次综合就会把用户刚读过的话再讲一遍。
+    // firstReply 是原始回复，带着 NEED_MORE 标记——用户看到的版本已经清掉了，
+    // 写进 turnLog 的这份也要清掉，别把协议文本喂回给下一轮的模型。
+    const tagAt = firstReply.indexOf(NEED_MORE_TAG);
+    const firstReplyShown = (tagAt === -1 ? firstReply : firstReply.slice(0, tagAt)).trim();
+    if (firstReplyShown) {
+      turnLog.push({
+        agentId: "career-planner",
+        agentName: petName,
+        task: "第一次综合：已经把上面各位专家的产出接成一段给用户了",
+        reply: firstReplyShown,
+      });
+    }
+    await executePlan(followUp, turnLog, io, groupId, history, profile, allMessages, petName, petPersonality, userMsg);
     await synthesize(false);
   }
 }

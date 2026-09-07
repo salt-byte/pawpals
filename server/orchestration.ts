@@ -154,15 +154,55 @@ export function buildTurnHistory(
 export const NEED_MORE_TAG = "NEED_MORE::";
 
 /**
+ * 从一段文本里抠出第一个 JSON 数组：从第一个 [ 扫到与它配对的 ]。
+ *
+ * 扫描时数括号层级，并跳过字符串字面量里的括号——task 文案里写个「[备注]」
+ * 不该让数组提前收尾。找不到成对的括号时返回 null。
+ */
+function extractJsonArray(text: string): string | null {
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) { escaped = false; continue; }
+    if (inString) {
+      if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+/**
  * 解析首席综合结尾的追加轮申请。
  *
  * 这是方案里给一次性计划留的纠错出口——计划出错时不至于毫无补救，
  * 但也不会滑向「每轮都判断一次」的成本。
+ *
+ * 标记后面先抠出那个 JSON 数组再交给 parsePlan：parsePlan 是整串 JSON.parse
+ * 的（这个行为被它自己的测试钉着，不能改），而首席很爱在标记后面再补一句
+ * 人话。不先切一刀的话，只要多一个字追加轮就永远不会触发，而且没有任何日志
+ * ——这是唯一的纠错出口，静默失效等于没有。
  */
 export function parseNeedMore(reply: string, validAgentIds: string[]): PlanTask[] {
   const at = reply.indexOf(NEED_MORE_TAG);
   if (at === -1) return [];
-  return parsePlan(reply.slice(at + NEED_MORE_TAG.length), validAgentIds);
+  const arr = extractJsonArray(reply.slice(at + NEED_MORE_TAG.length));
+  if (arr === null) return [];
+  return parsePlan(arr, validAgentIds);
 }
 
 export type PipelineStage = { agentId: string; task: string; dependsOn?: string[] };
