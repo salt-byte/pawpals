@@ -28,118 +28,50 @@ const officialClient = createOfficialTaskClient();
  * 网络仍然只能在这里做——content script 的跨域 fetch 受页面 origin 的 CORS 管，
  * 直连 localhost 会稳定失败（详见 official-task-router.js 顶部注释）。
  */
-const SOCKET_URL = `${SERVER_BASE.replace(/^http/, 'ws')}/ws/official`;
-
-let socket = null;
-
-function sendToServer(message) {
-  if (socket?.readyState !== WebSocket.OPEN) return false;
-  try {
-    socket.send(JSON.stringify(message));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * 扩展自己开的标签页会被归进一个带名字的分组，用户一眼看得出是谁开的。
- * 归组失败不影响投递（见 tab-group.js）。
- */
-const tabGrouper = createTabGrouper({
-  groupTabs: (options) => chrome.tabs.group(options),
-  updateGroup: (groupId, props) => chrome.tabGroups.update(groupId, props),
-  queryGroups: (query) => chrome.tabGroups.query(query),
-});
-
-/**
- * 任务在飞行中时保活 service worker。
+ * 连接不再放在这里，改由 offscreen document 承载。
  *
- * MV3 的 service worker 空闲约 30 秒被回收，而**调用扩展 API 会重置这个计时器**。
- * 一个任务要走「收到 → 找/开标签页 → 等表单就绪（最多 8 秒）→ 页面执行 → 回报」，
- * 中间大段时间都在 await，没有任何 API 调用，计时器照常走完——真机上因此看到
- * 每 15~30 秒一次干净断开、31 次重连，任务做到一半进程就没了，重发再死，循环。
+ * MV3 的 service worker 是设计成会被回收的，怎么保活都是在跟浏览器较劲：今天为此
+ * 打了五个补丁（20 秒调 API 保活、30 秒 alarm 看门狗、ping/pong 探活、新连接作废
+ * 租约、派发失败刷新标签页），真机日志里仍有几十次断开重连、任务反复做到一半就没了。
  *
- * 所以只在有任务在手时每 20 秒调一次最便宜的 API，任务做完立刻停——不做无谓保活。
+ * offscreen document 不受这个生命周期管辖，是 Chrome 官方给「扩展需要长期干活」
+ * 准备的出口。但它拿不到 chrome.tabs，所以分工是：
+ *   offscreen        持连接；收到任务转发过来（消息事件顺带把这里唤醒）
+ *   service worker   做标签页的事
  */
-let inFlight = 0;
-let keepAliveTimer = null;
-function beginWork() {
-  inFlight += 1;
-  if (keepAliveTimer) return;
-  keepAliveTimer = setInterval(() => { try { chrome.runtime.getPlatformInfo(() => {}); } catch { /* 已失效 */ } }, 20000);
-}
-function endWork() {
-  inFlight = Math.max(0, inFlight - 1);
-  if (inFlight > 0 || !keepAliveTimer) return;
-  clearInterval(keepAliveTimer);
-  keepAliveTimer = null;
-}
-/** 包住一段可能很长的异步工作，期间保活。 */
-async function withKeepAlive(run) {
-  beginWork();
-  try { return await run(); } finally { endWork(); }
-}
+let offscreenReady = null;
 
-const dispatcher = createOfficialDispatcher({
-  listTabs: () => chrome.tabs.query({ url: 'https://*/*' }),
-  sendToTab: async (tabId, message) => {
-    // Chrome 会丢弃后台标签页，content script 随之消失。标成不可丢弃，
-    // 否则任务派下去就石沉大海（派发侧另有超时兜底）。
-    try { await chrome.tabs.update(tabId, { autoDiscardable: false }); } catch { /* 标签页没了 */ }
-    return chrome.tabs.sendMessage(tabId, message);
-  },
-  // 自主开页：申请页没开着就自己开一个后台标签页。submit 不在可自动开页的类型
-  // 里——提交只发生在用户亲眼确认过的那个页面上。
-  openTab: async (url) => {
-    const tab = await chrome.tabs.create({ url, active: false });
-    if (tab?.id) {
-      try { await chrome.tabs.update(tab.id, { autoDiscardable: false }); } catch { /* 忽略 */ }
-      await tabGrouper.add(tab.id);
-    }
-    return tab;
-  },
-  reportResult: (id, result) => sendToServer({ type: 'result', id, result }),
-  // 标签页被丢弃后只能靠重新加载把 content script 请回来
-  reloadTab: (tabId) => chrome.tabs.reload(tabId),
-});
-
-function connectOfficialSocket() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
-  try {
-    socket = new WebSocket(SOCKET_URL);
-  } catch {
-    socket = null;
-    return;
-  }
-  socket.addEventListener('message', (event) => {
-    let payload;
+async function ensureOffscreen() {
+  if (offscreenReady) return offscreenReady;
+  offscreenReady = (async () => {
     try {
-      payload = JSON.parse(event.data);
-    } catch {
-      return;
+      const existing = await chrome.runtime.getContexts?.({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+      if (existing?.length) return;
+      await chrome.offscreen.createDocument({
+        url: 'offscreen/offscreen.html',
+        reasons: ['WORKERS'],
+        justification: '与本地 PawPals 服务保持长连接，接收官网投递任务',
+      });
+    } catch (error) {
+      // 已经存在会抛错，属于正常；其余情况下次再试
+      if (!String(error?.message || '').includes('Only a single offscreen')) offscreenReady = null;
     }
-    if (payload?.type === 'task' && payload.task) void withKeepAlive(() => dispatcher.accept(payload.task));
-  });
-  socket.addEventListener('close', () => { socket = null; });
-  socket.addEventListener('error', () => { /* close 会紧跟着来，在那里清理 */ });
+  })();
+  return offscreenReady;
 }
 
-/**
- * 重连看门狗。
- *
- * 连接活着的时候用不上它——连接本身就保活。但连接一断，service worker 可能随
- * 之被回收，那就没有任何东西会去重连了。alarms 能唤醒被回收的 service worker，
- * 30 秒一次纯粹是兜底，不是在轮询任务。
- */
-chrome.alarms.create('pawpals-official-socket', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'pawpals-official-socket') connectOfficialSocket();
-});
+/** 结果经 offscreen 送回服务端——连接在那边。 */
+function sendToServer(message) {
+  void ensureOffscreen().then(() =>
+    chrome.runtime.sendMessage({ type: 'OFFICIAL_SOCKET_SEND', payload: message }).catch(() => {})
+  );
+  return true;
+}
 
-chrome.runtime.onStartup.addListener(connectOfficialSocket);
-chrome.runtime.onInstalled.addListener(connectOfficialSocket);
-connectOfficialSocket();
+chrome.runtime.onStartup.addListener(() => void ensureOffscreen());
+chrome.runtime.onInstalled.addListener(() => void ensureOffscreen());
+void ensureOffscreen();
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
@@ -161,10 +93,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id });
     sendResponse({ ok: true });
   }
+  if (message?.type === 'OFFICIAL_SOCKET_MESSAGE') {
+    const payload = message.payload;
+    if (payload?.type === 'task' && payload.task) void withKeepAlive(() => dispatcher.accept(payload.task));
+    sendResponse({ ok: true });
+    return false;
+  }
   if (message?.type === 'OFFICIAL_PAGE_READY') {
     // 页面上线：顺手确保连接活着，上报页面上下文，并把待办里同源的任务补派过
     // 去——任务可能是在这个页面加载完成之前就推过来的。
-    connectOfficialSocket();
+    void ensureOffscreen();
     void officialClient.reportContext(message.payload);
     void withKeepAlive(() => dispatcher.onPageReady(message.origin));
     sendResponse({ ok: true });
@@ -172,7 +110,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'OFFICIAL_TASK_PROGRESS') {
     // 进度是 best-effort：最终 result 才会结掉任务；此处失败不应影响页面执行。
-    connectOfficialSocket();
+    void ensureOffscreen();
     const sent = sendToServer({ type: 'progress', id: message.id, progress: message.progress || {} });
     sendResponse({ ok: sent });
     return false;
