@@ -188,7 +188,7 @@ export const JOB_PIPELINES: PipelineTemplate[] = [
   },
   {
     id: "apply",
-    match: /投递|帮.*投|请.*投|申请这个岗|apply/i,
+    match: /投递|投这|帮.*投|请.*投|申请这个岗|apply/i,
     stages: [
       { agentId: "resume-expert", task: "用户说：{{msg}}\n\n按这次要投的岗位把简历定制一版，说明改了哪里、为什么。" },
       { agentId: "app-tracker", task: "用户说：{{msg}}\n\n执行投递并记录进度，设置后续跟进。简历专家刚定制的版本见上方伙伴产出。", dependsOn: ["resume-expert"] },

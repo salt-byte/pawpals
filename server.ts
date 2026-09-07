@@ -1814,7 +1814,7 @@ type EvalEvent =
   | { type: "reviewer"; agentId: string; msgId: string; groupId: string; passed: boolean; score: number; issueCount: number }
   | { type: "tool_call"; agentId?: string; toolName: string; success: boolean; durationMs?: number; errorReason?: string }
   | { type: "user_feedback"; msgId: string; agentId?: string; signal: "thumbs_up" | "thumbs_down"; comment?: string }
-  | { type: "routing"; userMsg: string; chosenAgentId: string; route: "explicit_at" | "orchestrate" | "application_delegate" | "default" };
+  | { type: "routing"; userMsg: string; chosenAgentId: string; route: "explicit_at" | "orchestrate" | "application_delegate" | "default" | "pipeline_template" | "model_plan" };
 
 function recordEvalEvent(event: EvalEvent) {
   try {
@@ -3534,7 +3534,7 @@ async function runAgentChain(
 }
 
 // ── runOrchestratedTurn：出计划 → 拓扑分批执行 → 综合（最多追加一轮）──────
-// 本次刻意不切换入口，runOrchestratedTurn 暂时无人调用。见 Task 5 说明。
+// 求职群主入口（send_message 的 else 分支）唯一调用；@all、onboarding、四个 workflow 仍走 runAgentChain。
 
 /** 档案 + 简历，收口成一份。此前三处内联读取，拼法各不相同。 */
 function loadProfileContext(): string {
@@ -3706,14 +3706,33 @@ async function runOrchestratedTurn(
   const explicitId = detectExplicitAgentId(userMsg, nameToId);
 
   let plan: PlanTask[];
+  // 与 plan 一起决定，避免为了埋点再判一次 matchPipeline——来源在这里就已确定。
+  let planSource: "explicit_at" | "pipeline_template" | "model_plan" | null = null;
   if (explicitId && explicitId !== "career-planner") {
     plan = [{ agentId: explicitId, task: userMsg, dependsOn: [] }];
+    planSource = "explicit_at";
   } else if (explicitId === "career-planner") {
     plan = [];
   } else {
     // 先查固定流水线：命中就省掉出计划那次模型调用，而且同一句话每次的编排都一样。
     // 模板覆盖不到的请求才落到模型出计划。
-    plan = matchPipeline(userMsg) ?? await requestPlan(userMsg, history, petName);
+    const templatePlan = matchPipeline(userMsg);
+    if (templatePlan) {
+      plan = templatePlan;
+      planSource = "pipeline_template";
+    } else {
+      plan = await requestPlan(userMsg, history, petName);
+      planSource = "model_plan";
+    }
+  }
+
+  // 埋点：这次计划里的每个任务来自哪个来源（explicit_at / pipeline_template /
+  // model_plan），供事后判断「模板命中率」用。计划为空（首席自己答）没有路由
+  // 决策可记，跳过。
+  if (plan.length > 0 && planSource) {
+    for (const t of plan) {
+      recordEvalEvent({ type: "routing", userMsg: userMsg.slice(0, 200), chosenAgentId: t.agentId, route: planSource });
+    }
   }
 
   // 首席独自作答：没有专家可派，或专家一个都没产出。两处共用，避免又拼出两份不一样的上下文。
@@ -5046,6 +5065,7 @@ async function startServer() {
           [{ role: "user", content: nextStepPrompt }],
           0, io, "job", messages, pn, pp
         );
+        io.emit("agent_done", { groupId: "job" });
       }, 500);
     });
 
@@ -5607,6 +5627,7 @@ async function startServer() {
         setTimeout(async () => {
           const cp = JOB_AGENTS.find(a => a.id === "career-planner")!;
           await runAgentChain({ ...cp, name: pn }, [{ role: "user", content: "Boss直聘登录成功了，请继续帮用户搜索岗位。" }], 0, io, "job", messages, pn, pp);
+          io.emit("agent_done", { groupId: "job" });
         }, 500);
       } else {
         const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");

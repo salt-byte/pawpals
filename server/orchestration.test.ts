@@ -227,6 +227,11 @@ describe("matchPipeline", () => {
     expect(plan[0].agentId).toBe("resume-expert");
   });
 
+  it("「投这个岗」也算投递意图 —— 与旧的 APPLICATION_INTENT_RE 对齐", () => {
+    const plan = matchPipeline("投这个岗")!;
+    expect(plan.map((t) => t.agentId)).toEqual(["resume-expert", "app-tracker"]);
+  });
+
   it("搜岗类请求是两段，专业老师依赖岗位猎手", () => {
     const plan = matchPipeline("帮我搜几个产品岗")!;
     expect(plan.map((t) => t.agentId)).toEqual(["job-hunter", "professional-teacher"]);
