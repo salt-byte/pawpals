@@ -9,8 +9,7 @@
     "scripting",
     "tabs",
     "alarms",
-    "tabGroups",
-    "offscreen"
+    "tabGroups"
   ],
   "host_permissions": [
     "http://localhost:3000/*",
@@ -47,8 +46,7 @@
         "perceive/*.js",
         "act/*.js",
         "application/*.js",
-        "background/*.js",
-        "offscreen/*.js"
+        "background/*.js"
       ],
       "matches": [
         "<all_urls>"
