@@ -217,3 +217,17 @@ describe('周围没有文案时，退回控件自身的元数据', () => {
   });
 });
 
+/**
+ * 真机 bug：简道云在真正的字段容器 .fx-field 里还套了一层 .field-component，
+ * 它的 class 也含 "field"、但自身没有文字。原先命中容器判断就提前返回，于是
+ * 返回空串、再也走不到外层那个有「姓名」的容器——39 个控件里 17 个原文为空。
+ */
+describe('中间包装层不能中断向上查找', () => {
+  it('穿过没有文字的 field 包装层，拿到外层真正的文案', () => {
+    document.body.innerHTML =
+      '<div class="fx-field"><span class="field-required">*</span><div class="field-name">姓名</div>' +
+      '<div class="field-component"><div class="x-input"><input type="text" name="n"></div></div></div>';
+    expect(snapshotControls(document)[0].context).toContain('姓名');
+  });
+});
+

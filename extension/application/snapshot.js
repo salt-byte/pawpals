@@ -71,7 +71,9 @@ function contextOf(el, limit) {
   for (let depth = 0; depth < CONTAINER_DEPTH && container; depth += 1) {
     const text = visibleText(container, limit);
     if (text) return text;
-    if (FIELD_CONTAINER_HINT.test(String(container.className || ''))) return text;
+    // 命中容器判断但自身没文字时**继续往上**，不能提前返回空串：简道云在真正的
+    // .fx-field 里还套了一层 .field-component，class 同样含 field 却没有文案，
+    // 提前返回会让 39 个控件里 17 个的原文变成空，模型直接看不见它们。
     container = container.parentElement;
   }
   return '';
