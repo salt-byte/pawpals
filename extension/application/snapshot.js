@@ -32,18 +32,30 @@ const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox
 const DEFAULT_CONTEXT_LIMIT = 200;
 const DEFAULT_MAX_CONTROLS = 200;
 const CONTAINER_DEPTH = 5;
+/**
+ * 抓原文时最多走多少个节点。
+ *
+ * 扁平结构里每个控件都会往上走到 body，再扫一遍全部兄弟节点——400 个控件就是
+ * 十几万次遍历，测试里直接超时。这是今天第四次踩「DOM 遍历没有上限」。
+ */
+const MAX_TEXT_NODES = 300;
 
 const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
 /** 容器里的可见文案。跳过 script/style——那是代码，混进去等于把页面令牌送给模型。 */
 function visibleText(container, limit) {
   const parts = [];
+  let scanned = 0;
+  let length = 0;
   for (const node of container.querySelectorAll('*')) {
+    if ((scanned += 1) > MAX_TEXT_NODES) break;
     if (NON_TEXT_TAGS.has(node.tagName)) continue;
     if (node.querySelector('*')) continue;
     const text = tidy(node.textContent);
-    if (text) parts.push(text);
-    if (parts.join(' ').length > limit) break;
+    if (!text) continue;
+    parts.push(text);
+    length += text.length + 1;
+    if (length > limit) break;
   }
   return parts.join(' ').slice(0, limit);
 }
