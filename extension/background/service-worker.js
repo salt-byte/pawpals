@@ -2,8 +2,15 @@ import { createSessionClient, SERVER_BASE } from './session-client.js';
 import { createOfficialTaskClient } from './official-task-client.js';
 import { createOfficialDispatcher } from './official-task-router.js';
 import { createTabGrouper } from './tab-group.js';
+import { createCdpInput } from './cdp-input.js';
 
 const client = createSessionClient();
+
+/**
+ * CDP 输入。合成事件失效时的兜底——chrome.debugger 会让 Chrome 挂一条「已开始
+ * 调试此浏览器」的横幅，所以只在 content script 明确请求时才用，用完即摘。
+ */
+const cdpInput = createCdpInput({ debuggerApi: chrome.debugger });
 const officialClient = createOfficialTaskClient();
 
 /**
@@ -160,6 +167,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'OPEN_PANEL') {
     if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id });
     sendResponse({ ok: true });
+  }
+  if (message?.type === 'OFFICIAL_CDP_CLICK') {
+    // content script 拿不到 chrome.debugger，坐标由它算、这里派发
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false }); return false; }
+    cdpInput.click(tabId, { x: message.x, y: message.y }).then((ok) => sendResponse({ ok }));
+    return true;
+  }
+  if (message?.type === 'OFFICIAL_CDP_TYPE') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false }); return false; }
+    cdpInput.type(tabId, message.text).then((ok) => sendResponse({ ok }));
+    return true;
+  }
+  if (message?.type === 'OFFICIAL_CDP_RELEASE') {
+    if (sender.tab?.id) void cdpInput.release(sender.tab.id);
+    sendResponse({ ok: true });
+    return false;
   }
   if (message?.type === 'OFFICIAL_PAGE_READY') {
     // 页面上线：顺手确保连接活着，上报页面上下文，并把待办里同源的任务补派过

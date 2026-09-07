@@ -106,9 +106,17 @@ export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisib
   async function clickAndDiff(container, before) {
     const trigger = elementAtCenter(container);
     if (!trigger) return [];
-    await click(trigger);
+    const outcome = await click(trigger);
     await wait(250);
-    const fresh = panelNodes().filter((panel) => !before.has(panel));
+    let fresh = panelNodes().filter((panel) => !before.has(panel));
+
+    // 合成点击没让面板出来时，用调用方提供的兜底再点一次（真机上是 CDP 派发真实
+    // 事件）。只在确实没反应时才走，因为它会让 Chrome 挂调试横幅。
+    if (fresh.length === 0 && typeof outcome?.cdpFallback === 'function') {
+      await outcome.cdpFallback();
+      await wait(350);
+      fresh = panelNodes().filter((panel) => !before.has(panel));
+    }
     return optionsIn(fresh);
   }
 

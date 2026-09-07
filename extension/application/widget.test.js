@@ -500,3 +500,60 @@ describe('带搜索框的面板：搜而不是枚举', () => {
     expect(result).toMatchObject({ ok: true, value: '研究生' });
   });
 });
+
+/**
+ * 合成事件优先、CDP 兜底。
+ *
+ * Claude in Chrome 全程走 chrome.debugger + Input.dispatchMouseEvent，事件
+ * isTrusted、任何页面拦不住，代价是 Chrome 强制显示「已开始调试此浏览器」的
+ * 横幅。我们的合成事件在简道云上验证过可用，所以只把 CDP 当兜底——面板没被
+ * 合成点击打开时才用，横幅只在那几秒出现。
+ */
+describe('CDP 兜底', () => {
+  it('合成点击没打开面板时，调用兜底再点一次', async () => {
+    document.body.innerHTML = COMBO;
+    let syntheticTried = false;
+    const cdpFallback = vi.fn(async () => {
+      document.body.insertAdjacentHTML('beforeend', '<div class="x-popup"><span>本科</span></div>');
+    });
+    const driver = createWidgetDriver({
+      click: async () => { syntheticTried = true; return { cdpFallback }; },
+      wait: async () => {},
+      elementAtCenter: (el) => el.querySelector('.x-combo-dropdown-label') || el,
+      isVisible: (el) => document.body.contains(el),
+    });
+
+    expect(await driver.probeOptions(container())).toEqual(['本科']);
+    expect(syntheticTried).toBe(true);
+    expect(cdpFallback).toHaveBeenCalled();
+  });
+
+  it('合成点击成功时不碰兜底——不该无谓地挂调试横幅', async () => {
+    document.body.innerHTML = COMBO;
+    const cdpFallback = vi.fn();
+    const driver = createWidgetDriver({
+      click: async (el) => {
+        if (el.closest('.x-combo')) document.body.insertAdjacentHTML('beforeend', '<div class="x-popup"><span>本科</span></div>');
+        return { cdpFallback };
+      },
+      wait: async () => {},
+      elementAtCenter: (el) => el.querySelector('.x-combo-dropdown-label') || el,
+      isVisible: (el) => document.body.contains(el),
+    });
+
+    await driver.probeOptions(container());
+    expect(cdpFallback).not.toHaveBeenCalled();
+  });
+
+  it('没有提供兜底时行为不变', async () => {
+    document.body.innerHTML = COMBO;
+    const driver = createWidgetDriver({
+      click: async () => {},
+      wait: async () => {},
+      elementAtCenter: (el) => el,
+      isVisible: () => true,
+    });
+    expect(await driver.probeOptions(container())).toEqual([]);
+  });
+});
+

@@ -8,10 +8,41 @@ import { snapshotControls, elementForHandle, fillByHandle } from '../application
 import { syntheticImpl } from '../act/synthetic.js';
 
 /** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
+/**
+ * 点击与打字：**合成事件优先，CDP 兜底**。
+ *
+ * 合成事件在简道云上验证过可用，而且不会让 Chrome 挂「已开始调试此浏览器」的
+ * 横幅。只有当合成事件没能让页面产生反应时，才请 service worker 用
+ * chrome.debugger 派发真实事件（Claude in Chrome 全程走的就是这条路，代价就是
+ * 那条横幅）。
+ *
+ * chrome.debugger 只能在 service worker 里用，所以这里负责算视口坐标。
+ */
+async function cdpClick(el) {
+  el.scrollIntoView?.({ block: 'center' });
+  await new Promise((r) => setTimeout(r, 120));
+  const box = el.getBoundingClientRect();
+  const x = box.left + box.width / 2;
+  const y = box.top + box.height / 2;
+  if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+  const reply = await toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y });
+  return Boolean(reply?.ok);
+}
+
 const widgetDriver = createPageWidgetDriver({
-  click: (el) => syntheticImpl.click(el, { fast: true }),
+  click: async (el) => {
+    await syntheticImpl.click(el, { fast: true });
+    return { cdpFallback: () => cdpClick(el) };
+  },
   // 搜索框打字：面板带搜索时不枚举，直接搜
-  type: (el, text) => syntheticImpl.type(el, text, { fast: true }),
+  type: async (el, text) => {
+    el.focus?.();
+    await syntheticImpl.type(el, text, { fast: true });
+    if (!el.value || !String(el.value).includes(String(text))) {
+      // 合成打字没落到框里，改用 CDP 往当前焦点插入
+      await toBackground({ type: 'OFFICIAL_CDP_TYPE', text });
+    }
+  },
 });
 import { sendToBackground } from './bg-bridge.js';
 
