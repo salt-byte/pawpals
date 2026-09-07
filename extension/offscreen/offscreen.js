@@ -12,12 +12,27 @@ import { SERVER_BASE } from '../background/session-client.js';
  */
 const SOCKET_URL = `${SERVER_BASE.replace(/^http/, 'ws')}/ws/official`;
 
-const hostSocket = createSocketHost({
+let hostSocket;
+hostSocket = createSocketHost({
   url: SOCKET_URL,
   socketFactory: (url) => new WebSocket(url),
   notify: (payload) => {
-    // 转发给 service worker。它没在跑的话，这条消息本身就会把它拉起来。
-    chrome.runtime.sendMessage({ type: 'OFFICIAL_SOCKET_MESSAGE', payload }).catch(() => {});
+    // 先回一条进度：offscreen 和 service worker 的控制台我都读不到，只有服务端
+    // 日志能看见。没有这条就分不清「任务没到 offscreen」和「offscreen 转发了但
+    // service worker 没醒」。
+    if (payload?.task?.id) {
+      hostSocket.send({ type: 'progress', id: payload.task.id, progress: { stage: 'offscreen_received' } });
+    }
+    // 转发给 service worker。它没在跑的话，这条消息本身应该把它拉起来。
+    chrome.runtime.sendMessage({ type: 'OFFICIAL_SOCKET_MESSAGE', payload })
+      .then(() => {
+        if (payload?.task?.id) hostSocket.send({ type: 'progress', id: payload.task.id, progress: { stage: 'sw_acked' } });
+      })
+      .catch((error) => {
+        if (payload?.task?.id) {
+          hostSocket.send({ type: 'progress', id: payload.task.id, progress: { stage: 'sw_unreachable', message: String(error?.message || error).slice(0, 80) } });
+        }
+      });
   },
 });
 
