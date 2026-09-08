@@ -1,3 +1,4 @@
+import { traced } from "./tracing.ts";
 /**
  * 工具调用循环：让模型自己选工具，由代码决定能不能执行。
  *
@@ -46,7 +47,7 @@ export type ToolLoopResult = {
   rounds: number;
 };
 
-export async function runToolLoop(input: {
+async function runToolLoopInner(input: {
   messages: Array<{ role: string; content: any; [k: string]: unknown }>;
   /** 交给模型看的工具表。提交类动作绝不放进来。 */
   tools: ToolSpec[];
@@ -117,3 +118,9 @@ export async function runToolLoop(input: {
     rounds: maxRounds,
   };
 }
+
+/**
+ * 追踪包一层：LangSmith 里能看到 chat.tool_loop 这一层的输入输出和耗时。
+ * 未开启时原样透传（见 tracing.ts）。
+ */
+export const runToolLoop = traced("chat.tool_loop", runToolLoopInner);

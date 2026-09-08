@@ -1,3 +1,4 @@
+import { traced } from "./tracing.ts";
 /**
  * 投递主流程：从一个申请链接，走到「填好了、剩下这些要你处理」。
  *
@@ -92,7 +93,7 @@ const toFields = (snapshot: any[]) =>
 /** 填写的预算：逐个字段「填 → 失焦 → 回读」，widget 还要点开面板选中。 */
 const fillBudget = (n: number) => Math.min(180_000, 20_000 + n * 15_000);
 
-export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyOutcome> {
+async function runApplyFlowInner(job: JobRef, deps: ApplyDeps): Promise<ApplyOutcome> {
   const { runTask, askModel, decideField, validateValue, readProfile, findResume, readFile, fileSize, log } = deps;
   const task = (kind: string, payload?: any) => ({ kind, url: job.url, company: job.company, title: job.title, payload });
   const profileText = readProfile();
@@ -449,3 +450,9 @@ async function uploadResume(fields: any[], notes: string[], io: any) {
     ? `已上传简历 ${name}`
     : `简历上传失败（${result?.skipped?.[0]?.reason || "未知原因"}），需要你自己选一下`);
 }
+
+/**
+ * 追踪包一层：LangSmith 里能看到 apply.flow 这一层的输入输出和耗时。
+ * 未开启时原样透传（见 tracing.ts）。
+ */
+export const runApplyFlow = traced("apply.flow", runApplyFlowInner);

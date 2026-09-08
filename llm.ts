@@ -1,3 +1,5 @@
+import { traced } from "./server/tracing.ts";
+
 /**
  * LLM 适配层 — 直接调 API，不经过 OpenClaw Gateway
  * 支持 Google Gemini / OpenAI / Anthropic / 国内兼容模型
@@ -154,7 +156,7 @@ function resolveModel(model?: string): { baseUrl: string; apiKey: string; modelI
 /**
  * 非流式 chat completion
  */
-export async function chatCompletion(options: ChatCompletionOptions): Promise<ChatCompletionResult> {
+async function chatCompletionInner(options: ChatCompletionOptions): Promise<ChatCompletionResult> {
   const { baseUrl, apiKey, modelId } = resolveModel(options.model);
 
   const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -300,3 +302,11 @@ export async function chatExtractJson<T = any>(
     return null;
   }
 }
+
+/**
+ * 每次模型调用都留痕（未开启追踪时原样透传，见 server/tracing.ts）。
+ *
+ * 这是最底下那一层：完整的 prompt、模型的原始输出、token 用量、耗时。今天调
+ * 「模型为什么放弃这个字段」时缺的正是它——只看得到结果，看不到它到底看见了什么。
+ */
+export const chatCompletion = traced("llm.chat", chatCompletionInner);

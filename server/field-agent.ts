@@ -1,3 +1,4 @@
+import { traced } from "./tracing.ts";
 /**
  * 单字段的「自己想办法」循环。
  *
@@ -159,7 +160,7 @@ export function buildFieldPrompt(input: {
   ].filter(Boolean).join("\n");
 }
 
-export async function runFieldAgent(input: {
+async function runFieldAgentInner(input: {
   field: { signature: string; context?: string; hint?: string; options?: string[]; type?: string; value?: string };
   profile: string;
   tools: FieldTools;
@@ -248,3 +249,9 @@ export async function runFieldAgent(input: {
 
   return { ok: false, value: String(last?.actual ?? ""), reason: last?.reason || "max_attempts", attempts };
 }
+
+/**
+ * 追踪包一层：LangSmith 里能看到 apply.field 这一层的输入输出和耗时。
+ * 未开启时原样透传（见 tracing.ts）。
+ */
+export const runFieldAgent = traced("apply.field", runFieldAgentInner);
