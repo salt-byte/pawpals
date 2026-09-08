@@ -72,6 +72,8 @@ function visibleText(container, limit) {
 const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
 /** 找标题时最多看多少个同级节点。字段容器只有几个孩子；上限是为了挡住 body。 */
 const SIBLING_SCAN_CAP = 50;
+/** 说明文字的长度上限。别把整页规则塞进 prompt。 */
+const HINT_LIMIT = 200;
 
 /**
  * 打开的下拉浮层不是表单字段。
@@ -211,6 +213,35 @@ function tableLabelOf(el, limit, cache) {
   return '';
 }
 
+/**
+ * 页面自己写在字段旁边的说明。
+ *
+ * 帆软那张表在「意向工作地点」旁写着「请先选择【意向岗位】，再查看可选工作地点~」，
+ * 在「学号」的占位符里写着「若无学号可填写"无"」。这些是给人看的说明书，模型也看
+ * 得懂——但它一直没看到：context 为了精确只取标题节点，把说明一起扔了。
+ *
+ * 所以分开装。**hint 绝不能进句柄**：句柄从 context 派生，页面文案一改句柄就变，
+ * 模型作答后一个都定位不到。
+ */
+function hintOf(el, label, cache) {
+  const parts = [];
+  const placeholder = tidy(el.getAttribute?.('placeholder'));
+  if (placeholder) parts.push(placeholder);
+
+  // 从元素**自身**开始找：widget 的 el 就是字段容器本身，从 parentElement 起步
+  // 会直接跳过它，那句「请先选择【意向岗位】」就永远捡不到。
+  for (let node = el, depth = 0; node && depth < 4; node = node.parentElement, depth += 1) {
+    if (!FIELD_CONTAINER_HINT.test(String(node.className || ''))) continue;
+    const text = textOf(node, HINT_LIMIT * 3, cache);
+    if (!text) continue;
+    // 去掉标题本身：它已经在 context 里了，重复只是浪费 token
+    const rest = text.replace(label, '').replace(/^[\s*＊]+/, '').trim();
+    if (rest) parts.push(rest);
+    break;
+  }
+  return tidy(parts.join(' ')).slice(0, HINT_LIMIT);
+}
+
 const hasValueArea = (container) =>
   [...container.querySelectorAll('*')].some((node) => VALUE_AREA_HINT.test(String(node.className || '')));
 
@@ -271,6 +302,7 @@ export function snapshotEntries(root = document, {
       // 不算数，模型说填了更不算数。
       value: typeof el.value === 'string' ? el.value : '',
       context,
+      hint: hintOf(el, context, textCache),
     } });
   }
 
@@ -285,6 +317,7 @@ export function snapshotEntries(root = document, {
       options: [],
       value: widgetValue(container),
       context,
+      hint: hintOf(container, context, textCache),
     } });
   }
 

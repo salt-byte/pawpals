@@ -299,3 +299,30 @@ describe("markdown 强调符号不该挡住引用", () => {
     expect(plan.rejected[0].reason).toBe("unsourced");
   });
 });
+
+/**
+ * 页面自己写的说明要进 prompt。
+ *
+ * 帆软那张表在「意向工作地点」旁写着「请先选择【意向岗位】，再查看可选工作地点~」，
+ * 在「学号」的占位符里写着「若无学号可填写"无"」。这些是给人看的说明书，模型也看得
+ * 懂——但它一直没看到，因为 context 为了精确只取标题节点。采到了不给模型看，等于
+ * 没采。
+ */
+describe("说明文字进 prompt", () => {
+  it("hint 出现在给模型的字段表里", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [{ handle: "h1", type: "widget", context: "意向工作地点",
+        hint: "请先选择【意向岗位】，再查看可选工作地点~" } as any],
+      profileText: "档案",
+    });
+    expect(prompt).toContain("请先选择【意向岗位】");
+  });
+
+  it("没有说明的字段不多一个空字段，省 token", () => {
+    const prompt = buildAutofillPrompt({
+      controls: [{ handle: "h1", type: "text", context: "姓名" } as any],
+      profileText: "档案",
+    });
+    expect(prompt).not.toContain('"hint"');
+  });
+});

@@ -93,6 +93,8 @@ export function fillableFields(fields: PlannableField[]): PlannableField[] {
 
 /** 快照里的一个控件。给的是周围**原文**，不是猜出来的标签。 */
 export type SnapshotControl = {
+  /** 页面写在字段旁边的说明文字。绝不进句柄——文案一改句柄就变。 */
+  hint?: string;
   handle: string;
   type?: string;
   required?: boolean;
@@ -120,6 +122,10 @@ function snapshotRows(controls: SnapshotControl[]) {
       type: control.type || "text",
       required: control.required === true,
       options: control.options?.length ? control.options : undefined,
+      // 页面自己写在字段旁边的说明。「请先选择【意向岗位】，再查看可选工作地点~」
+      // 「若无学号可填写"无"」——这些是给人看的说明书，模型也看得懂，之前一直没
+      // 传给它。没有说明的字段不带这个键，省 token。
+      hint: String(control.hint || "").trim() || undefined,
     }));
 }
 
@@ -147,7 +153,7 @@ export function buildAutofillPrompt(input: {
     "【候选人档案原文】",
     profileText,
     "",
-    "【待填字段】（context 是这个框周围的页面原文，请据此判断它要什么）",
+    "【待填字段】（context 是标签，hint 是页面写在旁边的说明——依赖关系、填写要求都在里面，务必照做）",
     JSON.stringify(rows, null, 2),
     "",
     "把档案里已有的信息映射到上面的字段，返回：",
