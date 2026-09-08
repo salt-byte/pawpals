@@ -165,7 +165,14 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
           fields = await probeAll([current], fields, { task, runTask });
           current = fields.find((f: any) => f.signature === target.signature) ?? current;
         }
-        if (!(current.options?.length)) { deferred.push(target.signature); continue; }
+        if (!(current.options?.length)) {
+          // 必须同时进本轮跳过集，否则下一次循环重新算 pending 时它还排在最前面，
+          // 会被反复挑中——真机上就是这样：探不到的那两个被原地试了一遍又一遍，
+          // 而它们真正缺的是上面那个还没填的父级。探不动就换下一个。
+          deferred.push(target.signature);
+          skipThisSweep.add(target.signature);
+          continue;
+        }
 
         const [value] = await askModel(fieldsForModel([current]), fields);
         if (!value) {

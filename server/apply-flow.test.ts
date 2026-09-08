@@ -352,3 +352,55 @@ describe("级联：填完父级当场补探", () => {
     expect(after - before).toBeLessThanOrEqual(4);
   });
 });
+
+/**
+ * 探不动就换下一个，别在原地打转。
+ *
+ * 用户盯着真机看出来的：页面上「意向团队」和「意向工作地点」被反复重试，而它们
+ * 真正缺的是上面那个还没填的「意向岗位」。原因是 deferred 记了但没进本轮跳过集，
+ * 下一次循环重新算 pending 时它还排在最前面，于是被反复挑中——一轮的预算全耗在
+ * 两个填不了的控件上，后面能填的一个都没轮到。
+ */
+describe("探不到选项就换下一个", () => {
+  it("同一个控件在一遍里只试一次", async () => {
+    const probed: string[] = [];
+    const page = new Map<string, string>();
+    const controls = [
+      { handle: "h-blocked", type: "widget", context: "意向工作地点" },  // 永远探不到
+      { handle: "h-ok", type: "widget", context: "性别" },
+    ];
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: controls.map((c) => ({ ...c, value: page.get(c.handle) ?? "", options: [] })) };
+        }
+        if (task.kind === "probe") {
+          const wanted: string[] = task.payload?.signatures ?? [];
+          probed.push(...wanted);
+          return { ok: true, probed: wanted.map((h) => ({
+            signature: h, options: h === "h-ok" ? ["女"] : [], timedOut: false })) };
+        }
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: (task.payload?.values ?? []).map((v: any) => v.signature), skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async (fields: any[]) =>
+        fields.filter((f: any) => f.options?.length).map((f: any) => ({ signature: f.signature, value: f.options[0] })),
+      readProfile: () => "档案", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    await runApplyFlow(JOB, deps as any);
+
+    // 探不到的那个每一遍最多试一次；不能在一遍里被反复挑中
+    const blockedTries = probed.filter((h) => h === "h-blocked").length;
+    expect(blockedTries).toBeLessThanOrEqual(CASCADE_SWEEPS_MAX);
+    // 而且能填的那个必须填上了——预算不能被卡住的那个吃光
+    expect(page.get("h-ok")).toBe("女");
+  });
+});
+
+/** 与 apply-flow 里的 CASCADE_PASSES 对应：每一遍最多重试一次被跳过的控件。 */
+const CASCADE_SWEEPS_MAX = 4;
