@@ -29,6 +29,7 @@ import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-pla
 import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser, unprobed } from "./server/apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
+import { runApplyFlow } from "./server/apply-flow.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
@@ -2491,348 +2492,77 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       if (!/^https:\/\//i.test(String(job_url || ""))) {
         return "[ERR] 需要有效的 HTTPS 公司官网申请链接。";
       }
-      const inspectTask = enqueueOfficialTask({
-        kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
-      });
-      const inspection = await waitForOfficialTask(inspectTask.id);
-      const plan = planApplicationStep(inspection);
-      if (plan.action === "abort") return `[ERR] 官网申请页检查失败：${plan.reason}`;
-
-      /**
-       * 简历先传。
-       *
-       * 一度以为这做不到（"浏览器不允许脚本代选文件"），其实 input.files 可以赋值，
-       * 只要给的是 DataTransfer 造出来的 FileList——file-upload.js 里那条路真机验证
-       * 过。缺的一直是**文件本身**：我们只存了从 PDF 抽出来的 markdown，原件没留。
-       *
-       * 必须排在填写之前、且单独成一拍：不少站点解析简历后会把结果覆盖到表单上，
-       * 上传完立刻填等于白填。
-       *
-       * 三种情况都如实上报，不含糊过去——用户以为传好了却没传，是投递里代价最大
-       * 的一种误解。
-       */
-      const uploadNotes: string[] = [];
-      {
-        const snap0: any[] = Array.isArray(inspection.snapshot) ? inspection.snapshot : [];
-        const target = pickResumeTarget(snap0);
-        if (target) {
-          const resumePath = pickResumeFile({
-            envPath: process.env.PAWPALS_RESUME_FILE,
-            dirs: [CAREER_DIR, path.join(process.env.HOME || "", "Downloads")],
-            exists: (p: string) => existsSync(p),
-            list: (dir: string) => readdirSync(dir),
-          });
-          if (!resumePath) {
-            uploadNotes.push("没找到你的简历原件（只有抽出来的文本），简历附件需要你自己选一下");
-          } else {
-            const bytes = statSync(resumePath).size;
-            const fits = checkUploadFits(bytes, parseSizeLimit(String(target.context || "")));
-            if (!fits.ok) {
-              // 传上去被网站默默拒掉、用户以为传好了，比当场说不行糟得多
-              uploadNotes.push(`简历没传：${fits.reason}（${path.basename(resumePath)}），请换一份小一点的`);
-            } else {
-              const uploadTask = enqueueOfficialTask({
-                kind: "upload", url: job_url, company: String(company || ""), title: String(title || ""),
-                payload: { uploads: [{
-                  signature: target.handle,
-                  name: path.basename(resumePath),
-                  type: resumePath.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream",
-                  dataBase64: readFileSync(resumePath).toString("base64"),
-                }] },
-              });
-              const up = await waitForOfficialTask(uploadTask.id, 60_000);
-              uploadNotes.push(up?.uploaded?.length
-                ? `已上传简历 ${path.basename(resumePath)}`
-                : `简历上传失败（${up?.skipped?.[0]?.reason || "未知原因"}），需要你自己选一下`);
-              // 等页面解析完再往下走：不少站点会用解析结果覆盖表单
-              if (up?.uploaded?.length) await new Promise((r) => setTimeout(r, 3000));
-            }
-          }
-        }
-      }
 
       const fillCtx = { title: String(title || ""), company: String(company || "") };
       const profileText = readAutofillProfileText();
 
       /**
-       * 分轮填写：填一步，重新看一眼页面，再填下一步。
+       * 主流程在 server/apply-flow.ts 里，这里只负责接线。
        *
-       * 原先是一次性的——采一次、探一次、问一次、填一次，结束。级联下拉因此必然
-       * 失败：帆软的「意向岗位」要先选「意向岗位大类」才会有选项，而在一次性流程
-       * 里，选完大类已经没有下一步了。
-       *
-       * 修法不是去写「识别级联」的规则。页面自己就写着「请先选择【意向岗位大类】，
-       * 再选择具体岗位~」，这句话本来就在快照的 context 里，模型看得见——缺的是
-       * 「做一步、观察后果、再做下一步」的机会，是我把流程写死了。分轮之后级联
-       * 自然解决，且不需要任何关于级联的代码，换一家表单同样有效。
-       *
-       * 每一轮的安全闸原封不动：stillOpen 永远排除简历/验证/敏感字段，值仍然要过
-       * 出处和选项两道校验。模型决定做什么，代码决定什么被允许。
+       * 抠出去的理由：它原先是这个函数里的 300 行内联代码，没法单测——每验一次
+       * 「中途断线还能不能接着填」都要真机跑十分钟，而真机一次只覆盖一条路径。
+       * 现在断线、探测超时、控件点不动这些分支都有测试守着。
        */
-      const MAX_ROUNDS = 4;
-      const filledSignatures: string[] = [];
-      const filledLabels: string[] = [];
-      let planFields: any[] = [];
-      let usingSnapshot = false;
-      let rejected: Array<{ signature: string; reason: string }> = [];
-      let needsUser: any[] = [];
-      let skippedCount = 0;
-      /** 最后一轮 fill 报回来的失败，用于收尾时把「控件操作失败」和「缺资料」分开。 */
-      let lastFailures: any[] = [];
-      let lastInspection: any = inspection;
-
-      const labelOf = (signature: string) => {
-        const hit = planFields.find((f: any) => f.signature === signature || f.handle === signature);
-        return String(hit?.context || hit?.label || signature).slice(0, 20);
-      };
-
-      const askModel = async (ask: any[]) => {
-        if (!ask.length || !profileText) return { values: [], rejected: [] };
-        try {
-          const raw = await chatExtractJson<{ values?: unknown }>(
-            "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
-            usingSnapshot
-              ? buildAutofillPrompt({ controls: ask as any, profileText, ctx: fillCtx })
-              : buildAutofillPrompt({ fields: ask, profileText, ctx: fillCtx }),
-            // 纯映射任务不需要推理。推理 token 会算进 max_tokens，字段一多就把
-            // 预算吃光、content 返回空（真机上 8 个字段时就这样）。
-            { max_tokens: 4000, reasoning_effort: "minimal" }
-          );
-          return validateAutofillPlan(raw?.values, planFields, profileText);
-        } catch (error) {
-          console.warn("[autofill] LLM 取值失败:", error);
-          return { values: [], rejected: [] };
-        }
-      };
-
-      const runFill = async (batch: Array<{ signature: string; value: string }>) => {
-        // 声明预算：填写现在是逐个字段「填 → 失焦 → 回读」，widget 还要点开面板
-        // 选中，一个字段几百毫秒到几秒。派发层默认那个 20 秒上限是用来检测「标签页
-        // 被丢弃、content script 没了」的，拿来量这里会把正常的长任务判成掉线
-        // ——真机上 16 个字段填到第 11 个就被判超时，前 10 个填好了却报 ok=false。
-        const budgetMs = Math.min(180_000, 15_000 + batch.length * 6_000);
-        const fillTask = enqueueOfficialTask({
-          kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""),
-          payload: { values: batch, budgetMs },
-        });
-        return waitForOfficialTask(fillTask.id, budgetMs + 30_000);
-      };
-
-      for (let round = 1; round <= MAX_ROUNDS; round += 1) {
-        // 每轮重新采一次页面：上一轮填完之后，级联的子控件才会出现或解锁。
-        // 第一轮直接用进来时那次 inspect 的结果，不多跑一次。
-        if (round > 1) {
-          const again = enqueueOfficialTask({
-            kind: "inspect", url: job_url, company: String(company || ""), title: String(title || ""),
-          });
-          const fresh = await waitForOfficialTask(again.id);
-          if (fresh?.ok) lastInspection = fresh;
-        }
-
-        const snapshot: any[] = Array.isArray(lastInspection.snapshot) ? lastInspection.snapshot : [];
-        usingSnapshot = snapshot.length > 0;
-        // label 是下游（widgetsToProbe / retryTargets）认字段的键，快照里它叫
-        // context。不补这个别名，「没有标签的容器多半不是真字段」这条过滤会把所有
-        // 控件都滤掉——真机上表现为「待探 0 个」，探测整段静默失效。
-        planFields = usingSnapshot
-          ? snapshot.map((c: any) => ({ ...c, signature: c.handle, label: c.context }))
-          : plan.fields;
-
-        const open = stillOpen(planFields, filledSignatures);
-        if (!open.length) break;
-
-        /**
-         * 先让模型看到页面，再让它作答。
-         *
-         * 自定义控件的选项是点开才渲染的，inspect 采不到。不先探就问，模型只能凭
-         * 常识猜——真机上它把学历和学位都答成「硕士」，概念上没错，但两个选项列表
-         * 里写的都是「研究生」，执行时整片被拒。
-         *
-         * 必须分批：单个控件真机约 2.8 秒。派发层会按任务自己声明的 budgetMs 等，
-         * 但一次探太多仍然会拖长整轮。
-         */
-        let probeList = widgetsToProbe(open);
-        // 补探：探测返回 partial 很常见（单控件真机约 2.8 秒，一批预算有限）。把
-        // partial 当成「探完了」，没轮到的控件就永远没有选项，模型永远答不对它们。
-        for (let pass = 0; pass < 3 && probeList.length; pass += 1) {
-          const gotThisPass: any[] = [];
-          for (let i = 0; i < probeList.length; i += 5) {
-            const probeTask = enqueueOfficialTask({
-              kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
-              payload: { signatures: probeList.slice(i, i + 5), budgetMs: 15000 },
+      const outcome = await runApplyFlow(
+        { url: job_url, company: String(company || ""), title: String(title || "") },
+        {
+          runTask: async (t, timeoutMs) => {
+            const queued = enqueueOfficialTask({
+              kind: t.kind as any, url: t.url, company: t.company, title: t.title, payload: t.payload,
             });
-            const probed = await waitForOfficialTask(probeTask.id, 40_000);
-            if (Array.isArray(probed?.probed)) {
-              gotThisPass.push(...probed.probed);
-              planFields = mergeProbedOptions(planFields, probed.probed);
+            return waitForOfficialTask(queued.id, timeoutMs);
+          },
+          askModel: async (askFields, allFields) => {
+            if (!askFields.length || !profileText) return [];
+            try {
+              const raw = await chatExtractJson<{ values?: unknown }>(
+                "你是网申表单填写助手。只做映射，不做创作。只输出 JSON。",
+                buildAutofillPrompt({ controls: askFields as any, profileText, ctx: fillCtx }),
+                // 纯映射任务不需要推理。推理 token 会算进 max_tokens，字段一多就把
+                // 预算吃光、content 返回空（真机上 8 个字段时就这样）。
+                { max_tokens: 4000, reasoning_effort: "minimal" }
+              );
+              return validateAutofillPlan(raw?.values, allFields, profileText).values;
+            } catch (error) {
+              console.warn("[autofill] LLM 取值失败:", error);
+              return [];
             }
-          }
-          const left = unprobed(probeList, gotThisPass);
-          if (left.length === probeList.length) break; // 一个都没推进，再试也没用
-          probeList = left;
+          },
+          readProfile: () => profileText,
+          findResume: () => pickResumeFile({
+            envPath: process.env.PAWPALS_RESUME_FILE,
+            dirs: [CAREER_DIR, path.join(process.env.HOME || "", "Downloads")],
+            exists: (p: string) => existsSync(p),
+            list: (dir: string) => readdirSync(dir),
+          }),
+          readFile: (p: string) => readFileSync(p),
+          fileSize: (p: string) => statSync(p).size,
+          log: (line: string) => console.log(line),
         }
-
-        /**
-         * 视觉兜底：DOM 驱动不了的控件，改成看图点坐标。
-         *
-         * 真机上帆软那 5 个「是否有…经历」probe 探回来 0 个选项——面板压根没打开。
-         * 这类控件没有原生 input、没有 ARIA、选项是无 class 的 span，结构化那条路
-         * 到此为止。但它在屏幕上就是一个写着「是否有获奖经历」的框，截图给模型看
-         * 它认得出该点哪儿。Claude in Chrome 全程走的就是这条路。
-         *
-         * 两道机械约束，一道都不能省：
-         *   坐标必须落在目标控件的框内   —— 越界一律丢弃，点歪了可能点到「提交」
-         *   点完必须重探来确认           —— 面板真开了才算成功，不看模型的自述
-         */
-        const blind = manualFields(stillOpen(planFields, filledSignatures));
-        for (const field of blind.slice(0, 6)) {
-          const visionTask = enqueueOfficialTask({
-            kind: "vision", url: job_url, company: String(company || ""), title: String(title || ""),
-            payload: { signature: field.signature },
-          });
-          const seen = await waitForOfficialTask(visionTask.id, 40_000);
-          if (!seen?.ok || !seen.screenshot || !seen.box) continue;
-
-          const answer = await chatExtractJsonWithImage<{ x?: number; y?: number }>(
-            "你在看网页截图，只回坐标 JSON，不要解释。",
-            buildVisionPrompt({ label: String(field.label || field.context || ""), box: seen.box }),
-            seen.screenshot,
-            { max_tokens: 200, reasoning_effort: "minimal" }
-          ).catch(() => null);
-
-          const point = parseVisionClick(answer, seen.box);
-          if (!point.ok) {
-            console.log(`[vision] ${String(field.label).slice(0, 12)} 坐标不可用：${"reason" in point ? point.reason : "?"}`);
-            continue;
-          }
-          const clickTask = enqueueOfficialTask({
-            kind: "cdp_click", url: job_url, company: String(company || ""), title: String(title || ""),
-            payload: { x: point.x, y: point.y },
-          });
-          await waitForOfficialTask(clickTask.id, 30_000);
-
-          // 点完重探一次：面板真开了才算数，不听模型自述
-          const recheck = enqueueOfficialTask({
-            kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
-            payload: { signatures: [field.signature], budgetMs: 12000 },
-          });
-          const again = await waitForOfficialTask(recheck.id, 30_000);
-          if (Array.isArray(again?.probed)) planFields = mergeProbedOptions(planFields, again.probed);
-          const got = again?.probed?.[0]?.options?.length ?? 0;
-          console.log(`[vision] ${String(field.label).slice(0, 12)} 点(${point.x},${point.y}) → 探到 ${got} 个选项`);
-        }
-
-        const refreshed = stillOpen(planFields, filledSignatures);
-        const ask = fieldsForModel(refreshed);
-        needsUser = manualFields(refreshed);
-
-        const attempt = await askModel(ask);
-        rejected = attempt.rejected;
-
-        /**
-         * 兜底：模型不可用、或一项都没通过校验时，仍按 kind 把已知字段填上。
-         * 宁可少填几个框，也不能因为一次 LLM 故障就整个投递流程停摆。
-         *
-         * 只在第一轮兜底：后面几轮靠的就是模型对新出现字段的判断，确定性映射
-         * 在那里给不出新东西，重复跑只是白费。
-         */
-        if (!attempt.values.length && round === 1) {
-          const profile = extractAutofillProfile();
-          attempt.values = ask
-            .filter((field: any) => !["resume", "verification", "sensitive_demographic", "custom"].includes(field.kind))
-            .map((field: any) => ({ signature: field.signature, value: pickAutofillValue(field, profile, fillCtx) }))
-            .filter((item: any) => item.value);
-        }
-
-        let filledThisRound = 0;
-        if (attempt.values.length) {
-          const filled = await runFill(attempt.values);
-          if (filled?.ok) {
-            for (const sig of filled.filled ?? []) {
-              filledSignatures.push(String(sig));
-              filledLabels.push(labelOf(String(sig)));
-              filledThisRound += 1;
-            }
-            skippedCount += (filled.skipped?.length ?? 0) + (filled.lost?.length ?? 0);
-            lastFailures = [...lastFailures, ...(filled.skipped ?? [])];
-
-            /**
-             * 值不在选项里而被执行侧拒掉的，带着**真实选项**重问一次。
-             *
-             * 这一步是为了不把模型该干的事推给人：真机上它把学历答成「硕士」，
-             * 选项里写的是「研究生」——它自己完全能解决，缺的只是选项。
-             */
-            const retryable = retryTargets(filled.skipped ?? [], planFields);
-            if (retryable.length) {
-              const second = await askModel(retryable);
-              if (second.values.length) {
-                const again = await runFill(second.values);
-                for (const sig of again?.filled ?? []) {
-                  filledSignatures.push(String(sig));
-                  filledLabels.push(labelOf(String(sig)));
-                  filledThisRound += 1;
-                }
-              }
-            }
-          }
-        }
-
-        console.log(`[apply] 第 ${round} 轮：字段 ${planFields.length} 待填 ${open.length} 探 ${probeList.length} 本轮填进 ${filledThisRound}`);
-        if (!shouldRunAnotherRound({ round, filledThisRound, maxRounds: MAX_ROUNDS })) break;
-      }
-
-      const filledCount = filledSignatures.length;
+      );
 
       const confirmationId = officialApplicationQueue.requestConfirmation({
         url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
       });
-      const warnings = Array.isArray(inspection.warnings) ? inspection.warnings : [];
-      // unsourced / option_not_allowed 说明模型想填但被闸门挡下了，这类字段
-      // 页面上是空的，必须让用户知道要手动补，不能沉默。
-      const blockedCount = rejected.filter((r) => r.reason === "unsourced" || r.reason === "option_not_allowed").length;
-      /**
-       * 档案里没有的，要问，不能静默留空。
-       *
-       * 之前把「档案里查不到」当成「正确留空」，那是自作主张：查不到只说明我们不
-       * 知道，不说明用户不知道。民族、学号、内推码都是他张口就能答的，而必填项
-       * 沉默的代价更大——他以为填好了，一提交才被打回。
-       */
-      /**
-       * 收尾时按**页面实际状态**验收，不按我们记了什么。
-       *
-       * 重新采一次快照，有值的就是真的填上了。这样「filled=8」这种数字不会掺水
-       * ——之前它是「fill 任务返回的条数」，而 fill 返回 ok 只说明赋值没抛错。
-       */
-      const finalInspect = await waitForOfficialTask(
-        enqueueOfficialTask({ kind: "inspect", url: job_url, company: String(company || ""), title: String(title || "") }).id
-      );
-      const finalFields: any[] = Array.isArray(finalInspect?.snapshot)
-        ? finalInspect.snapshot.map((c: any) => ({ ...c, signature: c.handle, label: c.context }))
-        : planFields;
 
-      const done = finalFields.filter((f: any) => String(f.value ?? "").trim());
-      const open2 = stillOpen(finalFields, []);
-      // 三类，分开说清楚，不混成一句「还有 31 个没填」
-      const brokenReasons = new Map(lastFailures.map((x: any) => [x.signature, x.reason]));
-      const broken = open2.filter((f: any) => brokenReasons.has(f.signature));
-      const askable = questionsForUser(
-        open2.filter((f: any) => !brokenReasons.has(f.signature)),
-        []
-      );
-      const askLine = (q: any) => `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
       const label = (f: any) => String(f.context || f.label || "").slice(0, 12);
-
       const notes = [
-        ...uploadNotes,
-        `页面上确认填好 ${done.length}/${finalFields.length} 个字段` +
-          (done.length ? `（${done.slice(0, 12).map(label).join("、")}${done.length > 12 ? "…" : ""}）` : ""),
-        broken.length ? `${broken.length} 个控件操作失败：${broken.slice(0, 6).map((f: any) => `${label(f)}(${brokenReasons.get(f.signature)})`).join("、")}` : "",
-        warnings.includes("resume_requires_user_file_selection") ? "简历附件需要你在页面上手动选择" : "",
+        ...outcome.uploadNotes,
+        `页面上确认填好 ${outcome.confirmed.length}/${outcome.totalFields} 个字段` +
+          (outcome.confirmed.length
+            ? `（${outcome.confirmed.slice(0, 12).map(label).join("、")}${outcome.confirmed.length > 12 ? "…" : ""}）`
+            : ""),
+        outcome.broken.length
+          ? `${outcome.broken.length} 个控件操作失败：${outcome.broken.slice(0, 6).map((b: any) => `${label(b.field)}(${b.reason})`).join("、")}`
+          : "",
       ].filter(Boolean);
 
-      const askBlock = askable.length
-        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${askable.map(askLine).join("\n")}`
+      const askLine = (q: any) =>
+        `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
+      const askBlock = outcome.questions.length
+        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${outcome.questions.map(askLine).join("\n")}`
         : "";
+
       return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。${askBlock}\n\n请检查页面内容，确认无误后再回复“确认投递”。`;
 
     }

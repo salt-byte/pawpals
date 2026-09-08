@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { splitName, pickAutofillValue , parseAutofillProfile } from "./autofill.ts";
 
 const profile = {
-  name: "邓雨蝶",
+  name: "张小明",
   email: "yudieden@usc.edu",
   phone: "13800000000",
   linkedin: "https://linkedin.com/in/example",
@@ -13,7 +13,7 @@ const field = (kind: string, label = "") => ({ kind, label, index: 0 });
 
 describe("splitName", () => {
   it("中文名：首字为姓，其余为名", () => {
-    expect(splitName("邓雨蝶")).toEqual({ first: "雨蝶", last: "邓" });
+    expect(splitName("张小明")).toEqual({ first: "小明", last: "张" });
   });
 
   it("中文复姓识别为两字姓", () => {
@@ -46,15 +46,15 @@ describe("pickAutofillValue", () => {
   const ctx = { title: "AI 产品经理实习生", company: "字节跳动" };
 
   it("first_name 填名，不是全名", () => {
-    expect(pickAutofillValue(field("first_name"), profile, ctx)).toBe("雨蝶");
+    expect(pickAutofillValue(field("first_name"), profile, ctx)).toBe("小明");
   });
 
   it("last_name 填姓，不是全名", () => {
-    expect(pickAutofillValue(field("last_name"), profile, ctx)).toBe("邓");
+    expect(pickAutofillValue(field("last_name"), profile, ctx)).toBe("张");
   });
 
   it("full_name 才填全名", () => {
-    expect(pickAutofillValue(field("full_name"), profile, ctx)).toBe("邓雨蝶");
+    expect(pickAutofillValue(field("full_name"), profile, ctx)).toBe("张小明");
   });
 
   it("邮箱 / 电话 / linkedin / 作品集按 kind 取值", () => {
@@ -96,14 +96,14 @@ describe("parseAutofillProfile", () => {
   const RESUME_HEADER = "# 原始简历\n\n来源文件: 简历.pdf\n\n## 提取文本\n\n";
 
   it("优先用显式的「姓名：」标注", () => {
-    const text = `姓名：邓雨蝶\n邮箱：a@b.com`;
-    expect(parseAutofillProfile(text).name).toBe("邓雨蝶");
+    const text = `姓名：张小明\n邮箱：a@b.com`;
+    expect(parseAutofillProfile(text).name).toBe("张小明");
   });
 
   it("没有标注时取正文第一行，不能把模板标题当名字", () => {
-    const text = `${RESUME_HEADER}邓雨蝶\n手机：15996610829\n邮箱：290277166@qq.com`;
+    const text = `${RESUME_HEADER}张小明\n手机：13800138000\n邮箱：test@example.com`;
     const profile = parseAutofillProfile(text);
-    expect(profile.name).toBe("邓雨蝶");
+    expect(profile.name).toBe("张小明");
     expect(profile.name).not.toBe("原始简历");
   });
 
@@ -114,15 +114,15 @@ describe("parseAutofillProfile", () => {
   });
 
   it("正文第一行不像名字时宁可留空——填错名字比不填更糟", () => {
-    const text = `${RESUME_HEADER}15996610829 | 290277166@qq.com | 个人主页`;
+    const text = `${RESUME_HEADER}13800138000 | test@example.com | 个人主页`;
     expect(parseAutofillProfile(text).name).toBe("");
   });
 
   it("邮箱和手机照常提取", () => {
-    const text = `${RESUME_HEADER}邓雨蝶\n手机：15996610829\n邮箱：290277166@qq.com`;
+    const text = `${RESUME_HEADER}张小明\n手机：13800138000\n邮箱：test@example.com`;
     const profile = parseAutofillProfile(text);
-    expect(profile.email).toBe("290277166@qq.com");
-    expect(profile.phone).toBe("15996610829");
+    expect(profile.email).toBe("test@example.com");
+    expect(profile.phone).toBe("13800138000");
   });
 
   it("空档案时全部留空，不编造", () => {

@@ -19,6 +19,7 @@
 
 import { fieldSignature } from './schema.js';
 import { gridHeaderFor } from './grid.js';
+import { PANEL_SELECTOR } from './widget.js';
 import { nativeSetValue } from '../act/synthetic.js';
 
 /** 这些标签的文字是代码不是文案，绝不能进快照——否则页面令牌会被送进模型。 */
@@ -71,6 +72,21 @@ function visibleText(container, limit) {
 const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
 /** 找标题时最多看多少个同级节点。字段容器只有几个孩子；上限是为了挡住 body。 */
 const SIBLING_SCAN_CAP = 50;
+
+/**
+ * 打开的下拉浮层不是表单字段。
+ *
+ * 真机：填完「语言特长」后浮层没关，它那 11 个选项被当成 11 个字段采进快照，每个
+ * 的「值」就是自己的文字（俄语四级 = 俄语四级），全被算成「已填好」——40 个字段
+ * 变成 52 个，回读确认数从 17 虚报到 28。浮层是临时 UI，里面的东西一律不进快照。
+ */
+function insidePanel(el) {
+  try {
+    return Boolean(el.closest(PANEL_SELECTOR));
+  } catch {
+    return false;
+  }
+}
 /**
  * 占位符的类名特征。widget 没选值时显示的是「请选择」「可多选」这类灰字，
  * 那不是值——把它当成值会让回读误判成「已经填好了」。
@@ -232,7 +248,7 @@ export function snapshotEntries(root = document, {
   const textCache = new Map();
 
   const natives = [...root.querySelectorAll('input, textarea, select')].filter(
-    (el) => !el.disabled && !SKIP_TYPES.has((el.getAttribute('type') || '').toLowerCase())
+    (el) => !el.disabled && !SKIP_TYPES.has((el.getAttribute('type') || '').toLowerCase()) && !insidePanel(el)
   );
   for (const el of natives) {
     if (out.length >= maxControls) return out;
@@ -260,6 +276,7 @@ export function snapshotEntries(root = document, {
 
   for (const container of widgetContainers(root)) {
     if (out.length >= maxControls) return out;
+    if (insidePanel(container)) continue;
     const context = contextOf(container.firstElementChild ?? container, contextLimit, labelSelector, textCache);
     out.push({ el: container, control: {
       handle: fieldSignature({ name: '', id: container.id, type: 'widget', label: context.split(' ')[0] || '' }),

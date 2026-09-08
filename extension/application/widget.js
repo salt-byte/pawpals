@@ -198,10 +198,11 @@ export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisib
 
       // 回读：值真的落到控件上了才算成功
       const applied = tidy(container.textContent).includes(wanted);
-      if (!applied) {
-        await dismiss();
-        return { ok: false, reason: 'value_not_applied', options };
-      }
+      // 成功也要收起浮层。多选控件（combocheck）选完不会自己关，开着的话它那些
+      // 选项会被下一次快照当成表单字段采进去——真机上「语言特长」的 11 个选项
+      // 就这么变成了 11 个「已填好的字段」，40 个字段虚报成 52 个。
+      await dismiss();
+      if (!applied) return { ok: false, reason: 'value_not_applied', options };
       return { ok: true, value: wanted };
     },
   };

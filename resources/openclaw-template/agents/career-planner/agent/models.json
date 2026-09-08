@@ -176,7 +176,7 @@
     },
     "custom-openai": {
       "api": "openai-completions",
-      "apiKey": "sk-ZA9JqYmJPVbEr5PcCMl2J1pTbm2abkIWbK7wOqB8epvbfqiG",
+      "apiKey": "REPLACE_WITH_YOUR_API_KEY",
       "baseUrl": "http://1.95.142.151:3000/v1",
       "models": [
         {

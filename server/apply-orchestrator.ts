@@ -32,7 +32,14 @@ type Field = {
   [k: string]: unknown;
 };
 
-const isGated = (field: Field) => GATED_KINDS.includes(String(field.kind || ""));
+/**
+ * 安全闸。与 autofill-plan 的判定保持一致，包括 type=file。
+ *
+ * 只看 kind 是不够的：快照控件没有 kind，简历附件在那里是 type:"file"。漏掉这一
+ * 半，简历框就会被当成普通字段交给模型——闸门在快照这条路径上等于不存在。
+ */
+const isGated = (field: Field) =>
+  GATED_KINDS.includes(String(field.kind || "")) || String((field as any).type || "") === "file";
 
 /**
  * 需要点开去探选项的控件。

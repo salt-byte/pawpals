@@ -110,3 +110,40 @@ describe('widgetTargets', () => {
     expect(widgetTargets(root, opts)[0].field.label).toBe('学历');
   });
 });
+
+/**
+ * 打开的下拉浮层不是表单字段。
+ *
+ * 真机：填完「语言特长」后浮层没关，它那 11 个选项被当成 11 个字段采进快照，
+ * 每个的「值」就是自己的文字（俄语四级 = 俄语四级），于是全被算成「已填好」
+ * ——40 个字段变成 52 个，回读确认数从 17 虚报到 28。
+ *
+ * 浮层是临时 UI，不是表单的一部分。它里面的东西一律不进快照。
+ */
+describe('浮层里的东西不进快照', () => {
+  it('下拉面板里的选项不算字段', () => {
+    const root = html(`
+      <div class="fx-field"><div class="field-name">语言特长</div><div class="field-component"><input name="lang"></div></div>
+      <div class="x-popup x-combo-dropdown">
+        <div class="fx-field"><span>俄语四级</span></div>
+        <div class="fx-field"><span>英语雅思7+</span></div>
+        <div class="fx-field"><input name="panel-search"></div>
+      </div>`);
+    const contexts = snapshotControls(root).map((c) => c.context);
+    expect(contexts).toContain('语言特长');
+    expect(contexts).not.toContain('俄语四级');
+    expect(contexts.some((c) => String(c).includes('英语雅思'))).toBe(false);
+  });
+
+  it('面板里的搜索框也不算字段', () => {
+    const root = html(`
+      <div class="fx-field"><div class="field-name">学校</div><input name="school"></div>
+      <div class="x-popup"><input name="panel-search" placeholder="搜索"></div>`);
+    expect(snapshotControls(root)).toHaveLength(1);
+  });
+
+  it('普通字段不受影响', () => {
+    const root = html('<div class="fx-field"><div class="field-name">姓名</div><input name="n"></div>');
+    expect(snapshotControls(root)).toHaveLength(1);
+  });
+});

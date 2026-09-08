@@ -7,7 +7,7 @@ import {
 } from "./autofill-plan.ts";
 
 const profileText = `
-姓名：邓雨蝶
+姓名：张小明
 邮箱：yudieden@usc.edu
 手机：13800138000
 学历：南加州大学 传播数据科学 硕士
@@ -50,7 +50,7 @@ describe("安全闸", () => {
   it("prompt 带上岗位上下文和档案原文", () => {
     const prompt = buildAutofillPrompt({ fields, profileText, ctx: { company: "58同城", title: "产品经理" } });
     expect(prompt).toContain("58同城");
-    expect(prompt).toContain("邓雨蝶");
+    expect(prompt).toContain("张小明");
   });
 });
 
@@ -81,13 +81,13 @@ describe("validateAutofillPlan", () => {
   });
 
   it("签名不在字段表里就拒绝——模型不能凭空指一个框", () => {
-    const { rejected } = plan([{ signature: "name=|id=zzz|type=text|label=编造", value: "x", source: "姓名：邓雨蝶" }]);
+    const { rejected } = plan([{ signature: "name=|id=zzz|type=text|label=编造", value: "x", source: "姓名：张小明" }]);
     expect(rejected[0]).toMatchObject({ reason: "unknown_signature" });
   });
 
   it("命中安全闸字段一律拒绝，即便模型给了合法来源", () => {
     for (const f of [fields[3], fields[4], fields[5]]) {
-      const { values, rejected } = plan([{ signature: f.signature, value: "男", source: "姓名：邓雨蝶" }]);
+      const { values, rejected } = plan([{ signature: f.signature, value: "男", source: "姓名：张小明" }]);
       expect(values).toEqual([]);
       expect(rejected[0]).toMatchObject({ reason: "gated_field" });
     }
@@ -110,7 +110,7 @@ describe("validateAutofillPlan", () => {
   });
 
   it("来源比对忽略空白差异，但不做模糊匹配", () => {
-    const ok = plan([{ signature: fields[0].signature, value: "雨蝶", source: "姓名：  邓雨蝶" }]);
+    const ok = plan([{ signature: fields[0].signature, value: "小明", source: "姓名：  张小明" }]);
     expect(ok.values).toHaveLength(1);
   });
 
@@ -136,7 +136,7 @@ describe("validateAutofillPlan", () => {
 
 /**
  * 真机踩到：SOURCE_MIN_LENGTH = 4 让 3 个字的中文姓名永远过不了 source 校验。
- * 用真实简历跑，「邓雨蝶」被判 unsourced——最基本的字段填不上。
+ * 用真实简历跑，「张小明」被判 unsourced——最基本的字段填不上。
  *
  * 长度是个糟糕的代理指标：4 个拉丁字母几乎不携带信息，3 个汉字的姓名却高度
  * 特异。真正要的保证是「引用得包含要填的值」——指给我看这个值出自哪里。
@@ -147,12 +147,12 @@ describe("source 校验：以「引用包含值」代替长度阈值", () => {
   });
 
   it("3 个字的中文姓名能通过", () => {
-    const profile = "邓雨蝶\n手机：15996610829";
+    const profile = "张小明\n手机：13800138000";
     const plan = validateAutofillPlan(
-      [{ signature: "sig-1", value: "邓雨蝶", source: "邓雨蝶" }],
+      [{ signature: "sig-1", value: "张小明", source: "张小明" }],
       [field()], profile
     );
-    expect(plan.values).toEqual([{ signature: "sig-1", value: "邓雨蝶" }]);
+    expect(plan.values).toEqual([{ signature: "sig-1", value: "张小明" }]);
   });
 
   it("引用在档案里但不包含要填的值时拦下——那不叫有出处", () => {
@@ -176,7 +176,7 @@ describe("source 校验：以「引用包含值」代替长度阈值", () => {
 
   it("引用压根不在档案里，一律拦下", () => {
     const plan = validateAutofillPlan(
-      [{ signature: "sig-1", value: "邓雨蝶", source: "邓雨蝶" }],
+      [{ signature: "sig-1", value: "张小明", source: "张小明" }],
       [field()], "另一个人的简历"
     );
     expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
@@ -185,7 +185,7 @@ describe("source 校验：以「引用包含值」代替长度阈值", () => {
   it("单字符引用仍然拦下，避免退化匹配", () => {
     const plan = validateAutofillPlan(
       [{ signature: "sig-1", value: "邓", source: "邓" }],
-      [field()], "邓雨蝶"
+      [field()], "张小明"
     );
     expect(plan.rejected[0]).toMatchObject({ reason: "unsourced" });
   });
@@ -204,7 +204,7 @@ describe("prompt 用快照的原文，而不是猜出来的标签", () => {
   it("把 context 原文交给模型，即使没有 label", () => {
     const prompt = buildAutofillPrompt({
       controls: [control({ context: "* 姓名", handle: "h1" })],
-      profileText: "姓名：邓雨蝶",
+      profileText: "姓名：张小明",
     } as any);
     expect(prompt).toContain("* 姓名");
     expect(prompt).toContain("h1");
@@ -237,7 +237,7 @@ describe("prompt 用快照的原文，而不是猜出来的标签", () => {
   it("仍然兼容旧的 fields 入参，迁移期两条路都能走", () => {
     const prompt = buildAutofillPrompt({
       fields: [{ signature: "s1", label: "姓名", kind: "full_name", type: "text", required: true, options: [] }],
-      profileText: "姓名：邓雨蝶",
+      profileText: "姓名：张小明",
     } as any);
     expect(prompt).toContain("s1");
   });
@@ -248,10 +248,10 @@ describe("validateAutofillPlan 接受快照控件", () => {
 
   it("按句柄校验并通过", () => {
     const plan = validateAutofillPlan(
-      [{ signature: "h1", value: "邓雨蝶", source: "邓雨蝶" }],
-      [control()] as any, "邓雨蝶 手机：15996610829"
+      [{ signature: "h1", value: "张小明", source: "张小明" }],
+      [control()] as any, "张小明 手机：13800138000"
     );
-    expect(plan.values).toEqual([{ signature: "h1", value: "邓雨蝶" }]);
+    expect(plan.values).toEqual([{ signature: "h1", value: "张小明" }]);
   });
 
   it("文件框的句柄一律拒绝——安全闸不交给模型", () => {
@@ -268,25 +268,25 @@ describe("validateAutofillPlan 接受快照控件", () => {
 /**
  * 档案是 markdown，引用比对不能被格式噪声挡住。
  *
- * 真机：档案里写的是 `- **姓名**: 邓雨蝶`，模型引「姓名: 邓雨蝶」，去掉空白后是
- * 「姓名:邓雨蝶」，原文却是「姓名**:邓雨蝶」——对不上，判 unsourced。最基本的
+ * 真机：档案里写的是 `- **姓名**: 张小明`，模型引「姓名: 张小明」，去掉空白后是
+ * 「姓名:张小明」，原文却是「姓名**:张小明」——对不上，判 unsourced。最基本的
  * 字段被自己的闸门挡了。
  *
  * 归一化掉强调符号不削弱反编造：值本身仍然必须在原文里出现，只是不再要求模型
  * 连 markdown 标记一起原样抄。
  */
 describe("markdown 强调符号不该挡住引用", () => {
-  const profile = "# 邓雨蝶 - 简历 Master\n\n- **姓名**: 邓雨蝶\n- **邮箱**: a@b.com";
+  const profile = "# 张小明 - 简历 Master\n\n- **姓名**: 张小明\n- **邮箱**: a@b.com";
   const fields = [{ signature: "sig-name", label: "姓名", kind: "custom", type: "text" }];
 
   it("引用跨越 ** 时仍然成立", () => {
     const plan = validateAutofillPlan(
-      [{ signature: "sig-name", value: "邓雨蝶", source: "姓名: 邓雨蝶" }],
+      [{ signature: "sig-name", value: "张小明", source: "姓名: 张小明" }],
       fields,
       profile
     );
     expect(plan.rejected).toEqual([]);
-    expect(plan.values).toEqual([{ signature: "sig-name", value: "邓雨蝶" }]);
+    expect(plan.values).toEqual([{ signature: "sig-name", value: "张小明" }]);
   });
 
   it("编造的值仍然拦得住——归一化不是放水", () => {

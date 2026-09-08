@@ -16,8 +16,8 @@ const html = (m) => { document.body.innerHTML = m; return document.body; };
 
 describe('快照带当前值', () => {
   it('原生输入框报它的 value', () => {
-    const root = html('<div class="fx-field"><div class="field-name">姓名</div><input name="n" value="邓雨蝶"></div>');
-    expect(snapshotControls(root)[0].value).toBe('邓雨蝶');
+    const root = html('<div class="fx-field"><div class="field-name">姓名</div><input name="n" value="张小明"></div>');
+    expect(snapshotControls(root)[0].value).toBe('张小明');
   });
 
   it('空框报空串，不报 undefined', () => {
@@ -40,7 +40,7 @@ describe('快照带当前值', () => {
 
 describe('verifyByHandle', () => {
   const root = () => html(`
-    <div class="fx-field"><div class="field-name">姓名</div><input name="n" value="邓雨蝶"></div>
+    <div class="fx-field"><div class="field-name">姓名</div><input name="n" value="张小明"></div>
     <div class="fx-field"><div class="field-name">手机</div><input name="p" value=""></div>`);
 
   const handles = (r) => Object.fromEntries(snapshotControls(r).map((c) => [c.context, c.handle]));
@@ -48,7 +48,7 @@ describe('verifyByHandle', () => {
   it('值对上了算确认', () => {
     const r = root();
     const h = handles(r);
-    const out = verifyByHandle(r, [{ signature: h['姓名'], value: '邓雨蝶' }]);
+    const out = verifyByHandle(r, [{ signature: h['姓名'], value: '张小明' }]);
     expect(out.confirmed).toEqual([h['姓名']]);
     expect(out.mismatched).toEqual([]);
   });

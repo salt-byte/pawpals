@@ -116,6 +116,9 @@ function scrubTextFile(filePath) {
     .replaceAll("/Users/dengyudie/.openclaw", "{{OPENCLAW_HOME}}")
     .replaceAll(sourceRoot, "{{OPENCLAW_HOME}}")
     .replaceAll("yudieden@usc.edu", "your-email@example.com")
+    // 模板会进公开仓库，密钥一律洗掉：真机上有一把 sk- 开头的 key 从初始提交
+    // 就躺在 agents/career-planner/agent/models.json 里，公开了很久没人发现。
+    .replace(/"apiKey":\s*"(sk-|AIza)[A-Za-z0-9_-]{20,}"/g, '"apiKey": "REPLACE_WITH_YOUR_API_KEY"')
     .replaceAll("JjPDbDqflaMZfxsh7cTctYHZnve", "<bitable-app-token>")
     .replaceAll("OSyJfaCk4lpwI7dYepCc5CfGnxe", "<folder-token>")
     .replace(/https:\/\/my\.feishu\.cn\/[^\s)]+/g, "<feishu-link>");

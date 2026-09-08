@@ -215,7 +215,7 @@ describe("alreadyFilled", () => {
   const f = (over: any) => ({ signature: `s-${over.label}`, label: over.label, type: "text", ...over });
 
   it("页面上有值的算已填，不管我们记不记得填过", () => {
-    const fields = [f({ label: "姓名", value: "邓雨蝶" }), f({ label: "手机", value: "" })];
+    const fields = [f({ label: "姓名", value: "张小明" }), f({ label: "手机", value: "" })];
     expect(stillOpen(fields, []).map((x: any) => x.label)).toEqual(["手机"]);
   });
 

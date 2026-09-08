@@ -37,9 +37,9 @@ describe("pickResumeFile", () => {
     const hit = pickResumeFile({
       dirs: ["/downloads"],
       exists: () => true,
-      list: files(["/downloads/年度总结.pdf", "/downloads/邓雨蝶简历.pdf", "/downloads/论文.pdf"]),
+      list: files(["/downloads/年度总结.pdf", "/downloads/张小明简历.pdf", "/downloads/论文.pdf"]),
     });
-    expect(hit).toBe("/downloads/邓雨蝶简历.pdf");
+    expect(hit).toBe("/downloads/张小明简历.pdf");
   });
 
   it("只认简历相关的扩展名", () => {
