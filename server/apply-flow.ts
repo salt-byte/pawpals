@@ -216,6 +216,7 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
           profile: profileText,
           maxAttempts: FIELD_ATTEMPTS,
           decide: (ctx) => decideField(ctx),
+          trace: (step) => log(`[field] ${String(current.context).slice(0, 12)} #${step.attempt} ${step.action}${step.value ? ` "${String(step.value).slice(0, 20)}"` : ""} → ${step.result}`),
           validate: (value: string, _f: any, source: string) => validateValue(value, current, source),
           tools: {
             probe: async () => {

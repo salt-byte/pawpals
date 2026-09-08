@@ -114,8 +114,17 @@ export async function runFieldAgent(input: {
     options: string[];
   }) => Promise<FieldAction>;
   maxAttempts?: number;
+  /**
+   * 每一步做了什么、结果如何。
+   *
+   * 把决策交给模型的代价是**失败藏在推理里**：真机上「意向岗位大类」探到了 7 个
+   * 选项然后放弃，日志里完全看不出为什么——是模型选了 give_up，还是它的答案被
+   * 闸门拦了三次。不记这一层，调这类问题只能靠猜。
+   */
+  trace?: (step: { attempt: number; action: string; value?: string; result: string }) => void;
 }): Promise<FieldOutcome> {
-  const { field, profile, tools, decide, validate, maxAttempts = 4 } = input;
+  const { field, profile, tools, decide, validate, trace, maxAttempts = 4 } = input;
+  const note = (step: any) => { try { trace?.(step); } catch { /* 记录不该打断填写 */ } };
   let options = field.options ?? [];
   let last: { ok: boolean; reason?: string; actual?: string } | null = null;
   let attempts = 0;
@@ -126,10 +135,12 @@ export async function runFieldAgent(input: {
     // 不认识的动作**拒绝执行**。模型回一个 submit_form 而我们「尽力照做」，
     // 后果不可撤销——工具集是白名单，不是建议。
     if (!action || !ALLOWED.has(String((action as any).action))) {
+      note({ attempt, action: String((action as any)?.action ?? "null"), result: "unknown_action" });
       return { ok: false, value: "", reason: "unknown_action", attempts };
     }
 
     if (action.action === "give_up") {
+      note({ attempt, action: "give_up", result: action.reason || "give_up" });
       return { ok: false, value: "", reason: action.reason || "give_up", attempts };
     }
 
@@ -137,6 +148,7 @@ export async function runFieldAgent(input: {
       // probe 不算一次尝试：它只是"看一眼"，没有对页面做任何写入
       const result = await tools.probe();
       options = result?.options ?? [];
+      note({ attempt, action: "probe", result: `${options.length} 个选项` });
       last = { ok: false, reason: "probed", actual: "" };
       continue;
     }
@@ -149,6 +161,7 @@ export async function runFieldAgent(input: {
     const gate = validate(wanted, field, String((action as any).source ?? ""));
     if (!gate.ok) {
       // 把拦下的原因告诉模型，让它换个答案，而不是原样再来一遍
+      note({ attempt, action: action.action, value: wanted, result: `闸门拦下：${gate.reason || "rejected"}` });
       last = { ok: false, reason: gate.reason || "rejected", actual: "" };
       continue;
     }
@@ -158,7 +171,11 @@ export async function runFieldAgent(input: {
     const actual = String(result?.value ?? "");
 
     // 成功只以页面回读为准。模型说成了不算，工具返回 ok 也不算。
-    if (applied(actual, wanted)) return { ok: true, value: actual, attempts };
+    if (applied(actual, wanted)) {
+      note({ attempt, action: action.action, value: wanted, result: "成功" });
+      return { ok: true, value: actual, attempts };
+    }
+    note({ attempt, action: action.action, value: wanted, result: `页面上是「${actual}」` });
     last = { ok: false, reason: actual ? "value_rewritten" : "value_not_applied", actual };
   }
 
