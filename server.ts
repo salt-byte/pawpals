@@ -35,6 +35,7 @@ import { extractApplyTarget } from "./server/apply-target.ts";
 import { upsertAnswers } from "./server/profile-answers.ts";
 import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
+import { runToolLoop } from "./server/tool-loop.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
@@ -2930,8 +2931,77 @@ async function streamAgent(
       }
     }
 
-    // apply_job: 投递管家收到投递任务时，自动从协作表查 URL 并执行
-    if (allowedToolNames.includes("apply_job")) {
+    /**
+     * 让模型自己选工具。
+     *
+     * 这些工具声明（TOOLS）早就写好了，agentTools 也一直在算——但从来没发给过
+     * 模型：真正的触发是下面那些正则。也就是说所谓「agent」在工具这一层其实是
+     * 条件语句，模型从头到尾没选过工具。
+     *
+     * 现在把它接上，但**边界不动**（见 tool-loop.ts）：工具名双重白名单、轮数
+     * 有上限、提交类动作永远不出现在工具表里——模型看不见也就选不了，真正的提交
+     * 只能由用户确认后的一次性令牌产生。
+     *
+     * 正则那条路留作兜底：模型没选工具时仍然按老办法判断，这样接入不会让原来
+     * 能用的场景变得不能用。
+     */
+    if (agentTools.length) {
+      try {
+        const loop = await runToolLoop({
+          messages: [
+            { role: "system", content: `你是${agent.role}。判断要不要调用工具；不需要就直接回答。` },
+            { role: "user", content: lastUserMsg },
+          ],
+          tools: agentTools.map((t: any) => ({
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+          })),
+          allowed: allowedToolNames,
+          callModel: async (history, toolSpecs) => {
+            const reply = await chatCompletion({
+              messages: history as any,
+              max_tokens: 800,
+              reasoning_effort: "minimal",
+              tools: toolSpecs.map((t) => ({
+                type: "function" as const,
+                function: { name: t.name, description: t.description, parameters: t.parameters },
+              })),
+            });
+            return { content: reply.content, toolCalls: reply.toolCalls };
+          },
+          executeTool: async (name, args) => {
+            emitToolActivity(name, `调用 ${name}`, name === "apply_job" ? "official-site" : "workspace", String((args as any)?.job_url || ""));
+            const result = await executeTool(name, args);
+            // apply_job 会带回一次性确认令牌，记下来，用户回「确认投递」时才用得上
+            const confirm = result.match(/\[OFFICIAL_CONFIRM:([^\]]+)\]/);
+            if (confirm) {
+              pendingApplyCommands.set(agent.id, {
+                url: String((args as any)?.job_url || ""),
+                company: String((args as any)?.company || ""),
+                title: String((args as any)?.title || ""),
+                timestamp: Date.now(),
+                officialConfirmationId: confirm[1],
+              });
+            }
+            if (name === "apply_job") calledApply = true;
+            return result;
+          },
+          maxRounds: 3,
+        });
+
+        for (const step of loop.executed) toolInjections.push(`【${step.name}】\n${step.result}`);
+        for (const bad of loop.rejected) {
+          console.log(`[tool-loop] 拦下 ${bad.name}：${bad.reason}`);
+        }
+      } catch (error) {
+        // 工具循环失败不该让这轮对话崩掉：下面的正则兜底还在
+        console.warn("[tool-loop] 失败，回退到规则触发:", error);
+      }
+    }
+
+    // apply_job: 模型没选工具时的兜底——按关键词判断（接入工具循环前的老路径）
+    if (!calledApply && allowedToolNames.includes("apply_job")) {
       // 方式 1: AI 回复中的 APPLY_JOB:: 指令 + 用户确认
       const sessionKey = agent.id;
       const pending = pendingApplyCommands.get(sessionKey);

@@ -69,9 +69,22 @@ export type ChatMessage = {
   name?: string;
 };
 
+/** 交给模型的工具声明（OpenAI 兼容格式）。 */
+export type ToolDefinition = {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+};
+
 export type ChatCompletionOptions = {
   model?: string;
   messages: ChatMessage[];
+  /**
+   * 可选的工具表。之前这里完全没有——工具全靠正则匹配用户消息来触发，模型从头
+   * 到尾没选过工具。声明了工具，模型才可能自己决定调哪个。
+   *
+   * 注意提交类动作永远不该出现在这里：模型看不见，也就选不了（见 tool-loop.ts）。
+   */
+  tools?: ToolDefinition[];
   max_tokens?: number;
   stream?: boolean;
   signal?: AbortSignal;
@@ -80,6 +93,14 @@ export type ChatCompletionOptions = {
 
 export type ChatCompletionResult = {
   content: string;
+  /**
+   * 模型选了哪些工具。声明了 tools 才可能有。
+   *
+   * 形状对齐 OpenAI 兼容格式，但参数已经解析成对象——原始返回里 arguments 是
+   * 一段 JSON 字符串，模型偶尔会写出解析不了的东西，那种情况当成没选工具处理，
+   * 不让一次坏输出把整轮打断。
+   */
+  toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
   model: string;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 };
@@ -132,6 +153,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
     body: JSON.stringify({
       model: modelId,
       messages: options.messages,
+      ...(options.tools?.length ? { tools: options.tools } : {}),
       ...(options.max_tokens ? { max_tokens: options.max_tokens } : {}),
       ...(options.reasoning_effort ? { reasoning_effort: options.reasoning_effort } : {}),
     }),
@@ -145,10 +167,28 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
 
   const data = await res.json() as any;
   const content = data.choices?.[0]?.message?.content || "";
+  const rawCalls = data.choices?.[0]?.message?.tool_calls;
+  const toolCalls = Array.isArray(rawCalls)
+    ? rawCalls
+        .map((call: any) => {
+          // arguments 是模型写出来的 JSON 字符串，解析不了就丢掉这一条：
+          // 一次坏输出不该打断整轮，上层会看到「没选工具」并继续。
+          let args: Record<string, unknown> = {};
+          try {
+            args = call?.function?.arguments ? JSON.parse(call.function.arguments) : {};
+          } catch {
+            return null;
+          }
+          const name = String(call?.function?.name || "");
+          return name ? { id: String(call?.id || name), name, args } : null;
+        })
+        .filter(Boolean)
+    : undefined;
   trackUsage(data.usage);
 
   return {
     content,
+    ...(toolCalls?.length ? { toolCalls: toolCalls as any } : {}),
     model: modelId,
     usage: data.usage,
   };
