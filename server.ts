@@ -5733,6 +5733,21 @@ async function startServer() {
   });
 
   // 此端点只创建 inspect / fill，供聊天层在用户已经打开并授权官网标签页后调用。
+  /**
+   * 让扩展自己重载。
+   *
+   * 开发期改一次扩展代码就要手动去 chrome://extensions 点刷新，一天十几次；
+   * Claude in Chrome 也帮不上——扩展不能注入 chrome:// 页面。
+   *
+   * 仅本机开发用途：它不改任何用户数据、不碰投递流程，最坏情况是扩展重启一次
+   * （队列里的任务由重连补发，不会丢）。
+   */
+  app.post("/api/dev/reload-extension", (_req: any, res: any) => {
+    const delivered = officialTaskHub.sendRaw({ type: "reload" });
+    console.log(`[official] 下发重载命令，送达=${delivered}`);
+    res.json({ ok: true, delivered });
+  });
+
   app.post("/api/official-applications/prepare", (req: any, res: any) => {
     const { url, company = "", title = "", payload = {}, kind } = req.body || {};
     if (typeof url !== "string" || !/^https:\/\//i.test(url)) {

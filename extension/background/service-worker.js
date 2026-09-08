@@ -127,6 +127,23 @@ function connectOfficialSocket() {
       return;
     }
     if (payload?.type === 'task' && payload.task) void withKeepAlive(() => dispatcher.accept(payload.task));
+    /**
+     * 服务端要求重载扩展。
+     *
+     * 开发期改一次扩展代码就要手动去 chrome://extensions 点一下刷新，一天下来
+     * 十几次。Claude in Chrome 也帮不上——扩展不能注入 chrome:// 页面。
+     *
+     * 这条命令只可能来自我们自己的 WebSocket（localhost 的服务端），页面里的
+     * 脚本发不进来：content script 走的是 chrome.runtime.sendMessage，那是另一
+     * 条通道，而且下面的 onMessage 里没有对应的处理分支。
+     *
+     * 重载会杀掉这条连接，模块顶层的 connectOfficialSocket() 会在新实例里立刻
+     * 重连，队列里的任务由 onConnect 补发，不会丢。
+     */
+    if (payload?.type === 'reload') {
+      console.log('[pawpals] 收到重载命令');
+      chrome.runtime.reload();
+    }
   });
   socket.addEventListener('close', () => { socket = null; });
   socket.addEventListener('error', () => { /* close 会紧跟着来，在那里清理 */ });

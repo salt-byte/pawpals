@@ -41,6 +41,27 @@ export function createTaskBroadcaster() {
      * 送不出去的客户端顺手清掉：readyState 不是 OPEN，或者 send 抛错（连接刚
      * 断但 close 事件还没到）。
      */
+    /**
+     * 原样发一条消息给所有在线扩展，不套 task 外壳。
+     *
+     * broadcast 固定包成 {type:"task", task}，那是任务专用的形状；开发期的
+     * 「重载扩展」命令不是任务，包成任务会被扩展当成任务去派发。
+     */
+    sendRaw(message: unknown): number {
+      const payload = JSON.stringify(message);
+      let delivered = 0;
+      for (const client of [...clients]) {
+        if (!isOpen(client)) { clients.delete(client); continue; }
+        try {
+          client.send(payload);
+          delivered += 1;
+        } catch {
+          clients.delete(client);
+        }
+      }
+      return delivered;
+    },
+
     broadcast(task: unknown): number {
       const payload = JSON.stringify({ type: "task", task });
       let delivered = 0;

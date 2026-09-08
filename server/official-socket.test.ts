@@ -115,3 +115,34 @@ describe("parseClientMessage", () => {
     expect(parseClientMessage(raw)).toMatchObject({ id: "official_1" });
   });
 });
+
+/**
+ * 裸消息通道。
+ *
+ * broadcast 固定把内容包成 {type:"task", task}，那是任务专用的形状。开发期的
+ * 「重载扩展」命令不是任务，包成任务会被扩展当成任务去派发。
+ */
+describe("sendRaw", () => {
+  it("原样发出去，不套 task 外壳", () => {
+    const hub = createTaskBroadcaster();
+    const sent: string[] = [];
+    hub.add({ readyState: 1, send: (m: string) => sent.push(m) } as any);
+    hub.sendRaw({ type: "reload" });
+    expect(JSON.parse(sent[0])).toEqual({ type: "reload" });
+  });
+
+  it("返回送达数", () => {
+    const hub = createTaskBroadcaster();
+    hub.add({ readyState: 1, send: () => {} } as any);
+    hub.add({ readyState: 1, send: () => {} } as any);
+    expect(hub.sendRaw({ type: "reload" })).toBe(2);
+  });
+
+  it("发不出去的连接清掉，不影响其余", () => {
+    const hub = createTaskBroadcaster();
+    hub.add({ readyState: 1, send: () => { throw new Error("gone"); } } as any);
+    hub.add({ readyState: 1, send: () => {} } as any);
+    expect(hub.sendRaw({ type: "reload" })).toBe(1);
+    expect(hub.size()).toBe(1);
+  });
+});
