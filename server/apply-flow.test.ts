@@ -167,3 +167,59 @@ describe("验收分三类", () => {
     expect(out.questions.map((q: any) => q.label)).toContain("学号");
   });
 });
+
+/**
+ * 分批填写。
+ *
+ * 真机：13 个值一次填，走到第 9 个（第一个 widget）时超出预算被派发层判超时，
+ * 任务报 ok=false——可 content script 还在继续填，progress=filling 10/13 是在
+ * ok=false **之后**才到的。结果就是：值确实填进去了，结果被丢弃，失败也无从归类
+ * （页面上 6 个新填的字段，本轮计数却是 0，【控件操作失败】是空的）。
+ *
+ * widget 慢是本质的（点开面板 → 选中 → 收起 → 回读，每个 5~15 秒），把预算越调
+ * 越大只是把问题推后。分批让每个任务都稳稳落在预算内，而且一批失败不影响其余。
+ */
+describe("分批填写", () => {
+  it("字段多时拆成多个任务，不是一次全塞进去", async () => {
+    const many = Array.from({ length: 13 }, (_, i) => ({
+      handle: `h${i}`, type: i < 8 ? "text" : "widget", context: `字段${i}`, required: true,
+    }));
+    const h = harness({ controls: many });
+    await runApplyFlow(JOB, h.deps as any);
+    expect(h.calls.filter((k) => k === "fill").length).toBeGreaterThan(1);
+  });
+
+  it("widget 单独分批，比文本框更小——它慢得多", async () => {
+    const mixed = [
+      ...Array.from({ length: 6 }, (_, i) => ({ handle: `t${i}`, type: "text", context: `文本${i}` })),
+      ...Array.from({ length: 6 }, (_, i) => ({ handle: `w${i}`, type: "widget", context: `下拉${i}` })),
+    ];
+    const sizes: number[] = [];
+    const h = harness({
+      controls: mixed,
+      onTask: async (task: any) => {
+        if (task.kind === "fill") sizes.push(task.payload.values.length);
+        return undefined;
+      },
+    });
+    await runApplyFlow(JOB, h.deps as any);
+    // 每一批都不该太大——最大的那批也要能稳稳落在预算内
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(6);
+  });
+
+  it("一批超时不影响其余批次继续填", async () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({ handle: `h${i}`, type: "text", context: `字段${i}` }));
+    let n = 0;
+    const h = harness({
+      controls: many,
+      onTask: async (task: any) => {
+        if (task.kind !== "fill") return undefined;
+        n += 1;
+        // 第一批超时，后面的照常
+        return n === 1 ? { ok: false, error: "dispatch_timeout", timedOut: true } : undefined;
+      },
+    });
+    const out = await runApplyFlow(JOB, h.deps as any);
+    expect(out.confirmed.length).toBeGreaterThan(0);
+  });
+});

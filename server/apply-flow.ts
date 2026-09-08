@@ -59,7 +59,7 @@ const toFields = (snapshot: any[]) =>
   (Array.isArray(snapshot) ? snapshot : []).map((c: any) => ({ ...c, signature: c.handle, label: c.context }));
 
 /** 填写的预算：逐个字段「填 → 失焦 → 回读」，widget 还要点开面板选中。 */
-const fillBudget = (n: number) => Math.min(180_000, 15_000 + n * 6_000);
+const fillBudget = (n: number) => Math.min(180_000, 20_000 + n * 15_000);
 
 export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyOutcome> {
   const { runTask, askModel, readProfile, findResume, readFile, fileSize, log } = deps;
@@ -103,7 +103,7 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
 
     let claimedFilled = 0;
     if (values.length) {
-      const result = await runFill(values, { task, runTask });
+      const result = await runFill(values, { task, runTask }, fields);
       claimedFilled += countFilled(result);
       recordFailures(result, failures);
 
@@ -112,7 +112,7 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
       if (retryable.length) {
         const second = await askModel(retryable, fields);
         if (second.length) {
-          const again = await runFill(second, { task, runTask });
+          const again = await runFill(second, { task, runTask }, fields);
           claimedFilled += countFilled(again);
           recordFailures(again, failures);
         }
@@ -151,10 +151,56 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
   return { confirmed, broken, questions, uploadNotes, totalFields: fields.length, rounds, runLog: runLog.snapshot() };
 }
 
-/** 填一批，返回执行结果。预算按字段数声明，别用「掉线检测」那把尺子量长任务。 */
-async function runFill(values: Array<{ signature: string; value: string }>, io: any) {
-  const budgetMs = fillBudget(values.length);
-  return io.runTask(io.task("fill", { values, budgetMs }), budgetMs + 30_000);
+/**
+ * 每批最多填几个。
+ *
+ * widget 慢是本质的：点开面板 → 选中 → 收起 → 回读，每个 5~15 秒。真机上 13 个
+ * 值一次填，走到第 9 个（第一个 widget）就超出预算被判超时，任务报 ok=false——
+ * 可 content script 还在继续填，progress=filling 10/13 是在 ok=false 之后才到的。
+ * 值填进去了，结果被丢弃，失败也无从归类。
+ *
+ * 把预算越调越大只是把问题推后。分批让每个任务稳稳落在预算内，一批失败也不影响
+ * 其余。文本框快，可以多装几个；widget 单独小批走。
+ */
+const TEXT_BATCH = 6;
+const WIDGET_BATCH = 2;
+
+const chunk = <T,>(list: T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+};
+
+/** 按「快的一起、慢的分开」切批。 */
+function fillBatches(values: Array<{ signature: string; value: string }>, fields: any[]) {
+  const byHandle = new Map(fields.map((f: any) => [f.signature, f]));
+  const slow = values.filter((v) => byHandle.get(v.signature)?.type === "widget");
+  const fast = values.filter((v) => byHandle.get(v.signature)?.type !== "widget");
+  return [...chunk(fast, TEXT_BATCH), ...chunk(slow, WIDGET_BATCH)];
+}
+
+/**
+ * 分批填。每批单独派任务、单独声明预算，结果合并返回。
+ *
+ * 预算别用「掉线检测」那把 20 秒的尺子量——那个上限是接「标签页被丢弃、
+ * content script 没了」的，正常的长任务会被它误判。
+ */
+async function runFill(values: Array<{ signature: string; value: string }>, io: any, fields: any[] = []) {
+  const merged = { ok: true, filled: [] as string[], skipped: [] as any[] };
+  for (const batch of fillBatches(values, fields)) {
+    if (!batch.length) continue;
+    const budgetMs = fillBudget(batch.length);
+    const result = await io.runTask(io.task("fill", { values: batch, budgetMs }), budgetMs + 30_000);
+    if (Array.isArray(result?.filled)) merged.filled.push(...result.filled);
+    if (Array.isArray(result?.skipped)) merged.skipped.push(...result.skipped);
+    // 一批超时不影响其余：把这一批的字段记成超时，继续下一批
+    if (result?.timedOut) {
+      for (const item of batch) {
+        if (!merged.filled.includes(item.signature)) merged.skipped.push({ signature: item.signature, reason: "dispatch_timeout" });
+      }
+    }
+  }
+  return merged;
 }
 
 const countFilled = (result: any) => (Array.isArray(result?.filled) ? result.filled.length : 0);
