@@ -22,33 +22,51 @@ export function tracingEnabled(env: Record<string, string | undefined> = process
 
 type AnyFn = (...args: any[]) => Promise<any>;
 
-/** 惰性加载 langsmith：没开启时连模块都不加载，省启动开销。 */
-let traceableFn: ((fn: AnyFn, config: any) => AnyFn) | null | undefined;
-function loadTraceable() {
-  if (traceableFn !== undefined) return traceableFn;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    traceableFn = require("langsmith/traceable").traceable;
-  } catch {
-    // 装不上就当没开：追踪是观测手段，不该成为跑不起来的原因
-    traceableFn = null;
-  }
-  return traceableFn;
-}
+/**
+ * 可注入的接缝，只为测试。
+ *
+ * 第一版用 require("langsmith/traceable") 加载——而这是 ESM 环境，require 根本
+ * 不存在：抛错、被 catch 吞掉、返回原函数。表现是「配置全对、日志正常、LangSmith
+ * 里 0 个项目」。又一次「所有指标都说成功，只有结果是错的」，而且是我自己写的。
+ *
+ * 所以现在用动态 import（ESM 里唯一正确的方式），并且**加载失败要出声**。
+ */
+type Seams = {
+  env?: Record<string, string | undefined>;
+  load?: () => Promise<(fn: AnyFn, config: any) => AnyFn>;
+  warn?: (message: string) => void;
+};
+
+const defaultLoad = async () => (await import("langsmith/traceable")).traceable as any;
 
 /**
- * 包一层追踪。未开启时原样返回传进来的函数。
+ * 包一层追踪。未开启时**原样返回**传进来的函数——不改返回值、不吞异常。
  *
- * @param name  在 LangSmith 里显示的名字。取得具体些——「fill_field」比「step」有用。
- * @param meta  附加元数据，用于筛选（比如 provider、表单域名）。
+ * @param name  LangSmith 里显示的名字。取具体些：「apply.field」比「step」有用。
+ * @param meta  附加元数据，用于筛选。
  */
-export function traced<T extends AnyFn>(name: string, fn: T, meta?: Record<string, unknown>): T {
-  if (!tracingEnabled()) return fn;
-  const wrap = loadTraceable();
-  if (!wrap) return fn;
-  try {
-    return wrap(fn, { name, metadata: meta }) as T;
-  } catch {
-    return fn;
-  }
+export function traced<T extends AnyFn>(name: string, fn: T, meta?: Record<string, unknown>, seams: Seams = {}): T {
+  const { env = process.env, load = defaultLoad, warn = (m: string) => console.warn(m) } = seams;
+  if (!tracingEnabled(env)) return fn;
+
+  let wrapped: AnyFn | null = null;
+  let loading: Promise<void> | null = null;
+  let warned = false;
+
+  return (async (...args: any[]) => {
+    if (!wrapped) {
+      loading ??= load()
+        .then((traceable) => { wrapped = traceable(fn, { name, metadata: meta }); })
+        .catch((error) => {
+          // 出声一次就够，别刷屏；但绝不能一声不吭——静默降级正是这次栽的地方
+          wrapped = fn;
+          if (!warned) {
+            warned = true;
+            warn(`[tracing] 追踪已开启但加载 langsmith 失败，本次运行不会留痕：${String((error as any)?.message || error)}`);
+          }
+        });
+      await loading;
+    }
+    return (wrapped ?? fn)(...args);
+  }) as T;
 }

@@ -41,3 +41,44 @@ describe("traced（未开启时）", () => {
     expect(tracingEnabled({ LANGSMITH_API_KEY: "lsv2_x", LANGSMITH_TRACING: "true" })).toBe(true);
   });
 });
+
+/**
+ * 开启了就必须真的包上，装不上要出声。
+ *
+ * 第一版用 require("langsmith/traceable") 加载，而这是 ESM 环境，require 根本不
+ * 存在——抛错、被 catch 吞掉、返回原函数。表现是「配置全对、日志正常、LangSmith
+ * 里 0 个项目」。又一次「所有指标都说成功，只有结果是错的」，而且这次是我自己写的。
+ *
+ * 所以两条：开启时必须真的用上包装器；加载失败要**出声**，不能静默退回。
+ */
+describe("traced（开启时）", () => {
+  const on = { LANGSMITH_API_KEY: "x", LANGSMITH_TRACING: "true" };
+
+  it("真的用上了包装器，不是悄悄退回原函数", async () => {
+    const calls: string[] = [];
+    const fake = (fn: any, cfg: any) => async (...a: any[]) => { calls.push(cfg.name); return fn(...a); };
+    const fn = traced("t.name", async (x: number) => x * 2, undefined, { env: on, load: async () => fake });
+    expect(await fn(3)).toBe(6);
+    expect(calls).toEqual(["t.name"]);
+  });
+
+  it("加载失败时退回原函数，但要出声——静默降级是这次的教训", async () => {
+    const warned: string[] = [];
+    const fn = traced("t", async (x: number) => x + 1, undefined, {
+      env: on,
+      load: async () => { throw new Error("模块没装"); },
+      warn: (m: string) => warned.push(m),
+    });
+    expect(await fn(1)).toBe(2);
+    expect(warned.join(" ")).toContain("追踪");
+  });
+
+  it("只出声一次，不刷屏", async () => {
+    const warned: string[] = [];
+    const fn = traced("t", async () => 1, undefined, {
+      env: on, load: async () => { throw new Error("x"); }, warn: (m: string) => warned.push(m),
+    });
+    await fn(); await fn(); await fn();
+    expect(warned).toHaveLength(1);
+  });
+});
