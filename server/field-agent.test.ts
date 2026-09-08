@@ -285,3 +285,29 @@ describe("失败原因要能指导下一步", () => {
     expect(p).toContain("换个写法");
   });
 });
+
+/**
+ * 有可选项时，一次只能填一个。
+ *
+ * 真机：「意向岗位」是多选控件，模型想选两个，给了 "产品经理,产品运营"，闸门要求
+ * 值必须恰好等于某一个选项，于是连拦三次——它一直用同样的写法，因为我们没告诉它
+ * 规则。规则本来就该写在 prompt 里，而不是让它撞三次去猜。
+ */
+describe("多选控件的写法", () => {
+  it("明确告诉模型一次只填一个，不要逗号拼接", () => {
+    const p = buildFieldPrompt({
+      field: { context: "意向岗位", options: ["全选", "产品经理", "产品运营"], type: "widget" } as any,
+      profile: "档案", attempt: 1, lastResult: null,
+    });
+    expect(p).toContain("一次只填一个");
+  });
+
+  it("被判越界时提醒可能是拼了多个", () => {
+    const p = buildFieldPrompt({
+      field: { context: "意向岗位", options: ["产品经理", "产品运营"], type: "widget" } as any,
+      profile: "档案", attempt: 2,
+      lastResult: { ok: false, reason: "option_not_allowed", actual: "" },
+    });
+    expect(p).toContain("一个");
+  });
+});

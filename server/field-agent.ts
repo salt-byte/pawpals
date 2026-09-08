@@ -72,7 +72,12 @@ function describeFailure(last: { ok: boolean; reason?: string; actual?: string }
         "不要改写、不要总结。引不出原文的，就选 give_up。",
       ].join("\n");
     case "option_not_allowed":
-      return "上一次被拦下了：这个值不在**可选项**里。请从上面列出的可选项中挑一个；都不合适就 give_up。";
+      return [
+        "上一次被拦下了：这个值不在**可选项**里。",
+        "请从上面列出的可选项中挑**一个**，值要和它一模一样。",
+        "如果你是想选多个，不要用逗号拼起来——一次只填一个，下一轮可以再填下一个。",
+        "都不合适就 give_up。",
+      ].join("\n");
     case "value_rewritten":
       return `上一次填进去了，但页面把它改写成了「${last.actual}」——多半是格式不对。换个写法再试（比如日期用 2025-07-01 这种完整格式）。`;
     case "value_not_applied":
@@ -114,7 +119,7 @@ export function buildFieldPrompt(input: {
     "规则：",
     "1. 只做映射，不做创作。档案里没有的信息不要编——留空永远好过填错。",
     "2. fill / search 必须给 source：档案原文里**逐字出现**的一段，用来证明这个值有出处。引不出原文的，选 give_up。",
-    "3. 有可选项时，value 必须是其中之一。",
+    "3. 有可选项时，value 必须**恰好等于**其中一个，一字不差。即使是多选控件，也一次只填一个——不要用逗号或顿号拼接多个值。",
     "4. 上一次失败了就换个办法，不要原样再来一遍：页面写的说明里常常就有答案。",
     "5. 只输出 JSON，不要解释。",
   ].filter(Boolean).join("\n");
