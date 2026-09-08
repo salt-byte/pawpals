@@ -84,7 +84,7 @@ describe('快照里的表格字段', () => {
   it('context 是「表名 · 列名」', () => {
     document.body.innerHTML = `
       <div class="fx-field">
-        <div class="field-name">获奖经历</div>
+        <div class="field-name">*获奖经历</div>
         <div class="fx-subform">
           <div class="subform-head">
             <div class="subform-row">
@@ -103,6 +103,8 @@ describe('快照里的表格字段', () => {
         </div>
       </div>`;
     const controls = snapshotControls(document.body);
+    // 表名自己也带必填星号（真机上就是「*获奖经历」）。曾经用「开头是星号就跳过」
+    // 来排除列头，把表名一起排掉了——两张表的同名列于是撞在一起。
     expect(controls.map((c) => c.context)).toEqual(['获奖经历 · 奖项名称', '获奖经历 · 获奖时间']);
   });
 

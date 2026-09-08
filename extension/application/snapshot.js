@@ -71,6 +71,10 @@ function visibleText(container, limit) {
 const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
 /** 找标题时最多看多少个同级节点。字段容器只有几个孩子；上限是为了挡住 body。 */
 const SIBLING_SCAN_CAP = 50;
+/** 表格内部的结构件：列头、行、格子。它们也带 title/label 类名，找表名时要跳过。 */
+const GRID_PART_HINT = /subform|grid|table|row|cell|head/i;
+/** 去掉必填星号：页面上写的是「*获奖经历」，标签是「获奖经历」。 */
+const stripRequiredMark = (text) => String(text || '').replace(/^[*＊]\s*/, '');
 
 /**
  * 取一个节点的文字。
@@ -155,9 +159,12 @@ function tableLabelOf(el, limit, cache) {
     for (const child of node.children) {
       if (!LABEL_CLASS_HINT.test(String(child.className || ''))) continue;
       if (child.contains(el)) continue;
-      const text = textOf(child, limit, cache);
-      // 列头本身也带 title 类名，用「不包含当前格子」还不够，再挡掉表头区
-      if (text && !/^[*＊]/.test(text)) return text;
+      // 按结构排除表格内部的标题（列头也带 title 类名），不能按「开头是星号」排除
+      // ——真机上子表单自己的标签就是「*获奖经历」，必填星号让它一起被排掉了，
+      // 于是两张表的「开始时间」「职位」「工作描述」撞在一起，模型分不清是哪张表。
+      if (GRID_PART_HINT.test(String(child.className || ''))) continue;
+      const text = stripRequiredMark(textOf(child, limit, cache));
+      if (text) return text;
     }
   }
   return '';

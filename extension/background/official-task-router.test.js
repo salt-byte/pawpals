@@ -340,3 +340,63 @@ describe('任务自带预算时按预算等', () => {
     expect(reported).toEqual([{ id: 'p1', result: { ok: true, probed: [1, 2] } }]);
   });
 });
+
+/**
+ * 别成串地开标签页。
+ *
+ * 用户实测：跑一轮投递，浏览器里多出十几个同一个申请页的标签页。
+ *
+ * 原因是「有没有为它开过页」是按**任务**记的（openedFor），所以每个新任务只要
+ * 第一次派发失败就自己开一个。分轮之后一次投递有十几个任务，窗口就成串地开。
+ *
+ * 而派发器其实知道哪个标签页是活的——onPageReady 带着 tabId 进来过，用完就扔了。
+ * 记住它：后续任务直接派给那个页面，既不用再开，也不会挑中前几次留下的死页。
+ */
+describe('复用已经上线的标签页', () => {
+  function harness() {
+    const opened = [];
+    const sent = [];
+    return {
+      opened, sent,
+      dispatcher: createOfficialDispatcher({
+        listTabs: async () => [{ id: 1, url: 'https://form.example.com/a' }],
+        sendToTab: async (tabId, message) => {
+          sent.push(tabId);
+          if (tabId === 1) throw new Error('no content script');   // 1 是陈旧死页
+          return { ok: true, from: tabId, ...message };
+        },
+        openTab: async (url) => { opened.push(url); return { id: 2 }; },
+        reportResult: () => {},
+        reloadTab: async () => {},
+        sendTimeoutMs: 50,
+      }),
+    };
+  }
+  const task = (id) => ({ id, kind: 'inspect', url: 'https://form.example.com/a' });
+
+  it('第一个任务开一次页；页面上线后，后续任务不再开新的', async () => {
+    const { dispatcher, opened } = harness();
+    await dispatcher.accept(task('t1'));
+    expect(opened).toHaveLength(1);
+
+    await dispatcher.onPageReady('https://form.example.com', 2);
+    for (const id of ['t2', 't3', 't4']) await dispatcher.accept(task(id));
+    expect(opened).toHaveLength(1);
+  });
+
+  it('后续任务直接派给那个活页面，不再挑中陈旧死页', async () => {
+    const { dispatcher, sent } = harness();
+    await dispatcher.accept(task('t1'));
+    await dispatcher.onPageReady('https://form.example.com', 2);
+    sent.length = 0;
+    await dispatcher.accept(task('t2'));
+    expect(sent).toEqual([2]);
+  });
+
+  it('那个页面也失效后，重新回到开页的老路', async () => {
+    const { dispatcher, opened } = harness();
+    await dispatcher.onPageReady('https://form.example.com', 1); // 1 是会抛错的死页
+    await dispatcher.accept(task('t1'));
+    expect(opened).toHaveLength(1);
+  });
+});

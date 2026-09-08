@@ -24,6 +24,15 @@
  */
 const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill'];
 
+/** 任务 URL 的 origin；解析不了返回空串。 */
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
 /** 找到 origin 与任务 URL 相同的标签页；找不到或 URL 解析不了都返回 null。 */
 export function pickTargetTab(taskUrl, tabs) {
   let wanted;
@@ -70,6 +79,17 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
   const openedFor = new Set();
   /** 已经为哪些任务刷过页，避免反复刷新用户正在看的页面。 */
   const reloadedFor = new Set();
+  /**
+   * 每个 origin 上「最近确认上线」的标签页。
+   *
+   * 不记它的话，「有没有为这个任务开过页」是按**任务**记的，于是每个新任务只要
+   * 第一次派发失败就自己开一个标签页。一次投递有十几个任务（分轮之后更多），
+   * 用户浏览器里就多出十几个同一个申请页——真机上就是这么炸的。
+   *
+   * onPageReady 本来就带着 tabId 进来，用完就扔太浪费：记住它，后续任务直接派
+   * 给那个页面，既不用再开，也不会挑中前几次留下的死页。
+   */
+  const readyTab = new Map();
 
   /**
    * 尝试把一个任务交给页面。成功返回 true（此时已回报），否则 false。
@@ -81,7 +101,8 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
    * 又挑中死页 → 再开新页。标签页越堆越多，结果永远回不来。
    */
   async function tryDispatch(task, preferredTabId) {
-    const tabId = preferredTabId ?? pickTargetTab(task.url, await listTabs());
+    const origin = originOf(task.url);
+    const tabId = preferredTabId ?? readyTab.get(origin) ?? pickTargetTab(task.url, await listTabs());
     if (tabId === null || tabId === undefined) return false;
 
     /**
@@ -105,7 +126,9 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
         new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), waitMs); }),
       ]);
     } catch {
-      return false; // 页面里还没有 content script
+      // 这个页面已经没有 content script 了，别再把它当成"活着的"
+      if (readyTab.get(origin) === tabId) readyTab.delete(origin);
+      return false;
     } finally {
       clearTimeout(timer);
     }
@@ -131,6 +154,9 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
         return;
       }
       pending.set(task.id, task);
+      // 这个 origin 已经有活页面时不再开新的：它多半只是还在加载，PAGE_READY
+      // 一来就会补派。再开一个只会让用户的标签栏越堆越长。
+      if (readyTab.has(originOf(task.url))) return;
       if (!openTab || !AUTO_OPEN_KINDS.includes(task.kind) || openedFor.has(task.id)) return;
       openedFor.add(task.id);
       try {
@@ -146,6 +172,7 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
      * tabId 是上线的那个标签页。给了就直接派给它——谁上线就派给谁，不再去猜。
      */
     async onPageReady(origin, tabId) {
+      if (tabId !== undefined && tabId !== null) readyTab.set(origin, tabId);
       for (const task of [...pending.values()]) {
         let taskOrigin;
         try {
