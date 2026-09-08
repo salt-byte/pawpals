@@ -170,7 +170,9 @@ describe('createOfficialDispatcher：页面就绪后补派', () => {
  * 症状很有迷惑性：刚导航完标签页是活的，2 秒成功；放一会儿被丢弃，就必然超时。
  */
 describe('派发要有超时——标签页被丢弃时 sendMessage 会挂住', () => {
-  it('派发挂住时按失败处理，任务留在待办等页面重新就绪', async () => {
+  it('派发挂住时如实上报超时，不把任务悬在待办里', async () => {
+    // 早先这里是「留在待办等页面重新就绪」。真机推翻了：悬着的任务让上层什么都
+    // 看不到，只能干等；如实报超时，上层重新采一次页面就知道实际填到哪了。
     const sendToTab = vi.fn(() => new Promise(() => {}));   // 永远不 resolve
     const reportResult = vi.fn();
     const dispatcher = createOfficialDispatcher({
@@ -179,8 +181,8 @@ describe('派发要有超时——标签页被丢弃时 sendMessage 会挂住', 
     });
 
     await dispatcher.accept(task);
-    expect(reportResult).not.toHaveBeenCalled();
-    expect(dispatcher.pendingCount()).toBe(1);
+    expect(reportResult).toHaveBeenCalledWith('official_1', { ok: false, error: 'dispatch_timeout', timedOut: true });
+    expect(dispatcher.pendingCount()).toBe(0);
   });
 
   it('正常返回的派发不受超时影响', async () => {
@@ -198,12 +200,21 @@ describe('派发要有超时——标签页被丢弃时 sendMessage 会挂住', 
 });
 
 /**
- * 光有超时不够：标签页被丢弃后 content script 就没了，除非页面重新加载，否则
- * PAGE_READY 永远不会来，待办里的任务就一直等下去。所以派发失败时要主动把那个
- * 标签页刷一下，让 content script 回来。
+ * 超时**一律不刷页面**。
+ *
+ * 这里原先的设计是：标签页被丢弃后 content script 就没了，除非页面重新加载，
+ * 否则 PAGE_READY 永远不会来，所以派发失败时主动刷一下把它请回来。只读任务
+ * （inspect/probe）刷了不亏——当时是这么想的。
+ *
+ * 真机推翻了这个判断。一次投递里 probe 超时把页面刷了，刷掉的是**前面几轮已经
+ * 填好的内容**：账本上出现「页面推进 -5」，姓名手机邮箱全回到空白。probe 自己
+ * 不写入，但它刷掉的是别人写的。
+ *
+ * 标签页真被丢弃另有兜底：开页时标了 autoDiscardable:false，且 sendToTab 抛错
+ * （而不是挂住）时会走开新页那条路。
  */
-describe('派发失败时复活标签页', () => {
-  it('派发挂住后刷新目标标签页，让 content script 回来', async () => {
+describe('超时不刷页面', () => {
+  it('派发挂住也不刷——刷掉的是别人已经填好的内容', async () => {
     const reloadTab = vi.fn(async () => {});
     const dispatcher = createOfficialDispatcher({
       listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
@@ -212,11 +223,10 @@ describe('派发失败时复活标签页', () => {
     });
 
     await dispatcher.accept(task);
-    expect(reloadTab).toHaveBeenCalledWith(7);
-    expect(dispatcher.pendingCount()).toBe(1);
+    expect(reloadTab).not.toHaveBeenCalled();
   });
 
-  it('同一个任务只刷一次，不反复刷页面', async () => {
+  it('反复派发也不会刷页面', async () => {
     const reloadTab = vi.fn(async () => {});
     const dispatcher = createOfficialDispatcher({
       listTabs: async () => [{ id: 7, url: 'https://acme.mokahr.com/apply/1' }],
@@ -225,7 +235,7 @@ describe('派发失败时复活标签页', () => {
     });
     await dispatcher.accept(task);
     await dispatcher.onPageReady('https://acme.mokahr.com');
-    expect(reloadTab).toHaveBeenCalledTimes(1);
+    expect(reloadTab).not.toHaveBeenCalled();
   });
 
   it('派发成功时不刷页面', async () => {
@@ -328,10 +338,10 @@ describe('任务自带预算时按预算等', () => {
     };
   }
 
-  it('没声明预算时用默认上限，慢响应算超时', async () => {
+  it('没声明预算时用默认上限，慢响应按超时上报', async () => {
     const { dispatcher, reported } = harness(80);
     await dispatcher.accept({ id: 'p0', kind: 'probe', url: 'https://form.example.com/a' });
-    expect(reported).toHaveLength(0);
+    expect(reported[0].result).toMatchObject({ timedOut: true });
   });
 
   it('声明了预算就等够——探测中途不该被当成掉线', async () => {
@@ -428,10 +438,22 @@ describe('填写类任务超时不刷页面', () => {
     };
   }
 
-  it('inspect 超时仍然刷页面——只读任务刷了不亏', async () => {
+  it('inspect 超时也不刷——申请进行中，刷掉的是前面已经填好的内容', async () => {
     const h = harness('inspect');
     await h.run();
-    expect(h.reloaded).toEqual([1]);
+    expect(h.reloaded).toEqual([]);
+  });
+
+  it('probe 超时也不刷。它自己不写入，但刷掉的是别人填好的', async () => {
+    const h = harness('probe');
+    await h.run();
+    expect(h.reloaded).toEqual([]);
+  });
+
+  it('任何类型超时都如实上报，让上层重新采页面核对', async () => {
+    const h = harness('probe');
+    await h.run();
+    expect(h.reported[0].result).toMatchObject({ ok: false, timedOut: true });
   });
 
   it('fill 超时不刷页面，已经填好的内容要留着', async () => {

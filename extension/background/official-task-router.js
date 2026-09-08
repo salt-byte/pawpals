@@ -24,16 +24,7 @@
  */
 const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill', 'vision', 'cdp_click'];
 
-/**
- * 超时后可以安全刷新页面的任务类型。
- *
- * 刷新是用来解开「标签页被丢弃、content script 没了」这个死局的，对只读任务没有
- * 代价。但 fill 和 upload 已经在页面上留下了内容，一刷全没——真机上就是这么白干
- * 的：前面填好的几个字段，因为后面一个控件挂住超时，整页被刷回空白。
- *
- * 所以写入类任务超时就如实上报超时，让上层重新采一次页面去核对实际填进去了什么。
- */
-const RELOAD_SAFE_KINDS = ['inspect', 'probe', 'vision'];
+
 
 /** 任务 URL 的 origin；解析不了返回空串。 */
 function originOf(url) {
@@ -83,13 +74,12 @@ export function pickTargetTab(taskUrl, tabs) {
  */
 const DEFAULT_SEND_TIMEOUT_MS = 20000;
 
+// reloadTab 保留在签名里只为兼容调用方；超时已经一律不刷页面（见 tryDispatch）。
 export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportResult, reloadTab, sendTimeoutMs = DEFAULT_SEND_TIMEOUT_MS }) {
   /** 已收到但还没派出去的任务。 */
   const pending = new Map();
   /** 已经为哪些任务开过页，避免页面加载期间重复开。 */
   const openedFor = new Set();
-  /** 已经为哪些任务刷过页，避免反复刷新用户正在看的页面。 */
-  const reloadedFor = new Set();
   /**
    * 每个 origin 上「最近确认上线」的标签页。
    *
@@ -146,17 +136,21 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
     // 挂住多半是标签页被丢弃了。光等没用——content script 已经没了，PAGE_READY
     // 永远不会来。主动刷一下把它请回来，刷完的 PAGE_READY 会带着待办任务重来。
     if (result === TIMEOUT) {
-      // 写入类任务绝不刷页面：页面上已经有填好的内容，刷了就白干（见
-      // RELOAD_SAFE_KINDS）。如实上报超时，让上层重新采页面去核对实际状态。
-      if (!RELOAD_SAFE_KINDS.includes(task.kind)) {
-        reportResult(task.id, { ok: false, error: 'dispatch_timeout', timedOut: true });
-        return true;
-      }
-      if (reloadTab && !reloadedFor.has(task.id)) {
-        reloadedFor.add(task.id);
-        try { await reloadTab(tabId); } catch { /* 标签页没了 */ }
-      }
-      return false;
+      /**
+       * 超时**一律不刷页面**，任何任务类型都不刷。
+       *
+       * 刷新原本是用来解开「标签页被丢弃、content script 没了」这个死局的，当时
+       * 觉得对只读任务（inspect/probe）刷了不亏。真机推翻了这个判断：一次投递里
+       * probe 超时把页面刷了，刷掉的是**前面几轮已经填好的内容**——账本上出现
+       * 「页面推进 -5」，姓名手机邮箱全回到空白。probe 自己不写入，但它刷掉的是
+       * 别人写的。
+       *
+       * 现在一律如实上报超时，让上层重新采一次页面去核对实际状态。标签页真被丢弃
+       * 的情况另有兜底：开页时标了 autoDiscardable:false，且 sendToTab 抛错（而不
+       * 是挂住）时会走开新页那条路。
+       */
+      reportResult(task.id, { ok: false, error: 'dispatch_timeout', timedOut: true });
+      return true;
     }
     reportResult(task.id, result ?? { ok: false, error: '页面未返回结果' });
     return true;
