@@ -60,6 +60,44 @@ export type AutofillPlan = {
  */
 const SOURCE_MIN_LENGTH = 2;
 
+/**
+ * 意愿类字段：模型永远不许替用户表态。
+ *
+ * 真机上它填了「出差意向 = 低频率短时间」，而档案里**「出差」二字都没有**——它替
+ * 用户答应了一件从没答应过的事。万一填「接受频繁出差」，人可能被安排到完全不想要
+ * 的岗位上。
+ *
+ * 为什么原来的闸门拦不住：有选项的字段豁免了「引用必须包含值」（值来自表单的选项
+ * 列表，已经被选项校验把关），只要求 source 在档案里出现过。而**任意一段档案原文
+ * 都能当 source**，所以对这类题闸门形同虚设。
+ *
+ *   事实类  本科学校 = 北京电影学院   档案里有、可核验      闸门有意义
+ *   意愿类  出差意向 = 低频率短时间   档案里没有也不可能有   闸门形同虚设
+ *
+ * 界线画在「简历说不说得出来」：
+ *   意向岗位 / 意向团队 / 意向工作地点  —— 「我想做什么」，简历本身就在回答，放行
+ *   出差 / 调剂 / 加班 / 期望薪资       —— 「我接受什么条件」，简历里没有，也不该有
+ *
+ * 意愿是用户的决定，不是能从简历里推出来的东西。唯一的例外是他**明确答过**——那些
+ * 答案存在 profile.md 的「网申补充信息」一节里（见 profile-answers.ts），这时值必须
+ * 和他答的那个一致才放行。
+ */
+const PREFERENCE_LABELS = /出差|调剂|加班|外派|轮岗|派驻|期望薪资|薪资要求|是否接受|能否接受|愿意/;
+/** 用户明确答过的那一节。只有它里面的答案能解锁意愿类字段。 */
+const ANSWERS_SECTION = "## 网申补充信息";
+
+/** 这个意愿类字段，用户自己答过吗？答过的话答案是什么。 */
+function answeredByUser(label: string, profileText: string): string | null {
+  const body = String(profileText || "").split(ANSWERS_SECTION)[1];
+  if (!body) return null;
+  for (const line of body.split("\n")) {
+    if (line.startsWith("## ")) break;
+    const hit = line.match(/^-?\s*([^:：]+)\s*[:：]\s*(.+)$/);
+    if (hit && hit[1].trim() === label.trim()) return hit[2].trim();
+  }
+  return null;
+}
+
 
 /**
  * 由代码把关、绝不交给模型的字段。
@@ -210,6 +248,18 @@ export function validateAutofillPlan(
     if (!value) { reject("empty_value"); continue; }
 
     if (field.options?.length && !field.options.includes(value)) { reject("option_not_allowed"); continue; }
+
+    /**
+     * 意愿类字段：除非用户明确答过，否则一律不填。
+     *
+     * 这道闸挡的不是「编造事实」，是「替用户做决定」——后者出不了「查无此校」这种
+     * 一眼能看穿的错，它看起来完全合理，但把人绑在了一个他没同意的承诺上。
+     */
+    const label = String(field.label || "");
+    if (PREFERENCE_LABELS.test(label)) {
+      const answered = answeredByUser(label, profileText);
+      if (!answered || strip(answered) !== strip(value)) { reject("needs_user_decision"); continue; }
+    }
 
     const source = strip(item.source);
     const quoted = source.length >= SOURCE_MIN_LENGTH && haystack && haystack.includes(source);

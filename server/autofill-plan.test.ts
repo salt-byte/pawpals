@@ -388,3 +388,111 @@ describe("prompt 要求照抄", () => {
     expect(p).toContain("不要总结");
   });
 });
+
+/**
+ * 意愿类字段：模型永远不许替用户表态。
+ *
+ * 真机上它填了「出差意向 = 低频率短时间」，而档案里**「出差」二字都没有**。它替
+ * 用户答应了一件从没答应过的事——万一填「接受频繁出差」，人可能被安排到完全不想
+ * 要的岗位上。
+ *
+ * 闸门为什么没拦住：有选项的字段豁免了「引用必须包含值」（因为值来自表单的选项
+ * 列表），只要求 source 在档案里出现过。而**任意一段档案原文都能当 source**，
+ * 所以对这类题闸门形同虚设。
+ *
+ *   事实类  本科学校=北京电影学院   档案里有，可核验      闸门有意义
+ *   意愿类  出差意向=低频率短时间   档案里没有也不可能有   闸门形同虚设
+ *
+ * 意愿是用户的决定，不是能从简历里推出来的东西。除非他明确答过（答案会存进
+ * profile.md 的「网申补充信息」一节），否则一律不填、回头问他。
+ */
+describe("意愿类字段不许模型替答", () => {
+  const profile = "# 用户档案\n\n姓名: 张小明\n本科: 北京电影学院\n实习: 洛杉矶";
+  const field = (label: string) => ({ signature: `s-${label}`, label, kind: "custom", type: "widget",
+    options: ["接受", "不接受", "低频率短时间"] });
+
+  it("出差意向：档案里没答过就不许填", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "s-出差意向", value: "低频率短时间", source: "实习: 洛杉矶" }],
+      [field("出差意向")],
+      profile
+    );
+    expect(plan.values).toEqual([]);
+    expect(plan.rejected[0].reason).toBe("needs_user_decision");
+  });
+
+  it("是否接受岗位调剂：同理", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "s-是否接受岗位调剂", value: "接受", source: "本科: 北京电影学院" }],
+      [field("是否接受岗位调剂")],
+      profile
+    );
+    expect(plan.rejected[0].reason).toBe("needs_user_decision");
+  });
+
+  it("用户明确答过就放行——答案存在档案的「网申补充信息」里", () => {
+    const answered = `${profile}\n\n## 网申补充信息\n- 出差意向: 低频率短时间\n`;
+    const plan = validateAutofillPlan(
+      [{ signature: "s-出差意向", value: "低频率短时间", source: "出差意向: 低频率短时间" }],
+      [field("出差意向")],
+      answered
+    );
+    expect(plan.rejected).toEqual([]);
+    expect(plan.values).toHaveLength(1);
+  });
+
+  it("答过了但值对不上，仍然拦——不能拿他答过的当挡箭牌乱填", () => {
+    const answered = `${profile}\n\n## 网申补充信息\n- 出差意向: 不接受\n`;
+    const plan = validateAutofillPlan(
+      [{ signature: "s-出差意向", value: "接受", source: "出差意向: 不接受" }],
+      [field("出差意向")],
+      answered
+    );
+    expect(plan.values).toEqual([]);
+  });
+
+  it("事实类字段不受影响", () => {
+    const plan = validateAutofillPlan(
+      [{ signature: "s-本科学校", value: "北京电影学院", source: "本科: 北京电影学院" }],
+      [{ signature: "s-本科学校", label: "本科学校", kind: "custom", type: "widget", options: ["北京电影学院"] }],
+      profile
+    );
+    expect(plan.values).toHaveLength(1);
+  });
+});
+
+/**
+ * 界线画在「简历说不说得出来」。
+ *
+ * 第一版正则写成 /意向|意愿|.../，会连「意向岗位」「意向团队」「意向工作地点」一起
+ * 拦掉——而那 4 个字段刚在真机上填成功，还是整条级联的起点。
+ *
+ *   「我想做什么岗位」   简历本身就在回答          → 放行
+ *   「我接受多频繁出差」 简历里没有，也不该有       → 必须问用户
+ */
+describe("意愿闸门的界线", () => {
+  const profile = "# 用户档案\n\nAI 产品经理，做过多模态陪伴产品";
+  const f = (label: string, options: string[]) => ({ signature: `s-${label}`, label, kind: "custom", type: "widget", options });
+
+  it("意向岗位这类「我想做什么」不拦——简历本身就在回答", () => {
+    for (const label of ["意向岗位", "意向岗位大类", "意向团队", "意向工作地点"]) {
+      const plan = validateAutofillPlan(
+        [{ signature: `s-${label}`, value: "产品经理", source: "AI 产品经理" }],
+        [f(label, ["产品经理"])],
+        profile
+      );
+      expect(plan.values, label).toHaveLength(1);
+    }
+  });
+
+  it("工作条件类一律拦", () => {
+    for (const label of ["出差意向", "是否接受岗位调剂", "能否接受加班", "期望薪资"]) {
+      const plan = validateAutofillPlan(
+        [{ signature: `s-${label}`, value: "接受", source: "AI 产品经理" }],
+        [f(label, ["接受", "不接受"])],
+        profile
+      );
+      expect(plan.rejected[0]?.reason, label).toBe("needs_user_decision");
+    }
+  });
+});

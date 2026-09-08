@@ -91,6 +91,12 @@ function describeFailure(last: { ok: boolean; reason?: string; actual?: string }
         "值可能没问题，问题在出处——请把 source 换成档案里**逐字出现**的一段原话（至少四个字），",
         "不要改写、不要总结。引不出原文的，就选 give_up。",
       ].join("\n");
+    case "needs_user_decision":
+      return [
+        "上一次被拦下了：这是个**由用户本人决定**的问题（出差意愿、是否接受调剂、期望薪资这类）。",
+        "档案里没有他明确答过的答案，你不能替他表态——填错了会把他绑在一个没同意的承诺上。",
+        "直接 give_up，交给用户回答。",
+      ].join("\n");
     case "option_not_allowed":
       return [
         "上一次被拦下了：这个值不在**可选项**里。",
