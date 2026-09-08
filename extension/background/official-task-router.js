@@ -22,7 +22,7 @@
  * 亲眼看过并回了「确认投递」的那个页面上。如果那个标签页已经被关掉，正确的
  * 反应是让任务留在队列里，而不是重新开一个页面把表单交上去。
  */
-const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill'];
+const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill', 'vision', 'cdp_click'];
 
 /** 任务 URL 的 origin；解析不了返回空串。 */
 function originOf(url) {

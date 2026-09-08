@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 
-export type OfficialTaskKind = "inspect" | "probe" | "upload" | "fill" | "submit";
+export type OfficialTaskKind = "inspect" | "probe" | "upload" | "fill" | "vision" | "cdp_click" | "submit";
 
 /**
  * 校验外部请求的任务类型。
@@ -9,7 +9,7 @@ export type OfficialTaskKind = "inspect" | "probe" | "upload" | "fill" | "submit
  * 不能从任何 HTTP 入口直接造出来。这是投递流程里最硬的那道闸，放宽这里等于
  * 把它废掉。
  */
-const REQUESTABLE_KINDS: OfficialTaskKind[] = ["inspect", "probe", "upload", "fill"];
+const REQUESTABLE_KINDS: OfficialTaskKind[] = ["inspect", "probe", "upload", "fill", "vision", "cdp_click"];
 
 export function parseRequestedKind(raw: unknown, fallback: OfficialTaskKind = "inspect"): OfficialTaskKind | null {
   if (raw === undefined || raw === null) return fallback;

@@ -52,9 +52,20 @@ function trackUsage(usage?: { prompt_tokens: number; completion_tokens: number; 
   tokenStats.calls += 1;
 }
 
+/**
+ * 消息内容。
+ *
+ * 多数场景是纯文本，但视觉兜底要把截图发给模型（网申表单里有些控件没有任何
+ * 无障碍信息、DOM 也驱动不了，只能看图点坐标）。Gemini 的 OpenAI 兼容端点接受
+ * 分段内容，图片走 data: URL。
+ */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
   name?: string;
 };
 
@@ -177,6 +188,39 @@ export async function chatCompletionStream(options: ChatCompletionOptions): Prom
 /**
  * 快捷方法：提取 JSON
  */
+/**
+ * 带一张图问模型要 JSON。
+ *
+ * 视觉兜底专用：截图 + 目标框 → 模型给出该点哪里。返回的坐标由 vision-click.ts
+ * 校验必须落在目标框内——坐标是危险输出，点歪了可能点到「提交」。
+ */
+export async function chatExtractJsonWithImage<T = any>(
+  systemPrompt: string,
+  userContent: string,
+  imageDataUrl: string,
+  options?: { max_tokens?: number; signal?: AbortSignal; reasoning_effort?: ChatCompletionOptions["reasoning_effort"] }
+): Promise<T | null> {
+  const result = await chatCompletion({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: [
+        { type: "text", text: userContent },
+        { type: "image_url", image_url: { url: imageDataUrl } },
+      ] },
+    ],
+    max_tokens: options?.max_tokens || 300,
+    reasoning_effort: options?.reasoning_effort,
+    signal: options?.signal,
+  });
+  const match = result.content.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]) as T;
+  } catch {
+    return null;
+  }
+}
+
 export async function chatExtractJson<T = any>(
   systemPrompt: string,
   userContent: string,

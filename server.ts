@@ -4,7 +4,7 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import os from "os";
 import path from "path";
-import { chatCompletion, chatCompletionStream, chatExtractJson, getTokenStats, resetTokenStats } from "./llm.ts";
+import { chatCompletion, chatCompletionStream, chatExtractJson, chatExtractJsonWithImage, getTokenStats, resetTokenStats } from "./llm.ts";
 import { OfficialApplicationQueue, parseRequestedKind } from "./server/official-application-queue.ts";
 import { resolveRoute, detectExplicitAgentId } from "./server/routing.ts";
 import {
@@ -29,6 +29,7 @@ import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-pla
 import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser } from "./server/apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
+import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
 import { runTailorPipeline, type TailorDeps } from "./server/tailor-pipeline.ts";
@@ -2650,6 +2651,56 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           });
           const probed = await waitForOfficialTask(probeTask.id, 40_000);
           if (Array.isArray(probed?.probed)) planFields = mergeProbedOptions(planFields, probed.probed);
+        }
+
+        /**
+         * 视觉兜底：DOM 驱动不了的控件，改成看图点坐标。
+         *
+         * 真机上帆软那 5 个「是否有…经历」probe 探回来 0 个选项——面板压根没打开。
+         * 这类控件没有原生 input、没有 ARIA、选项是无 class 的 span，结构化那条路
+         * 到此为止。但它在屏幕上就是一个写着「是否有获奖经历」的框，截图给模型看
+         * 它认得出该点哪儿。Claude in Chrome 全程走的就是这条路。
+         *
+         * 两道机械约束，一道都不能省：
+         *   坐标必须落在目标控件的框内   —— 越界一律丢弃，点歪了可能点到「提交」
+         *   点完必须重探来确认           —— 面板真开了才算成功，不看模型的自述
+         */
+        const blind = manualFields(stillOpen(planFields, filledSignatures));
+        for (const field of blind.slice(0, 6)) {
+          const visionTask = enqueueOfficialTask({
+            kind: "vision", url: job_url, company: String(company || ""), title: String(title || ""),
+            payload: { signature: field.signature },
+          });
+          const seen = await waitForOfficialTask(visionTask.id, 40_000);
+          if (!seen?.ok || !seen.screenshot || !seen.box) continue;
+
+          const answer = await chatExtractJsonWithImage<{ x?: number; y?: number }>(
+            "你在看网页截图，只回坐标 JSON，不要解释。",
+            buildVisionPrompt({ label: String(field.label || field.context || ""), box: seen.box }),
+            seen.screenshot,
+            { max_tokens: 200, reasoning_effort: "minimal" }
+          ).catch(() => null);
+
+          const point = parseVisionClick(answer, seen.box);
+          if (!point.ok) {
+            console.log(`[vision] ${String(field.label).slice(0, 12)} 坐标不可用：${"reason" in point ? point.reason : "?"}`);
+            continue;
+          }
+          const clickTask = enqueueOfficialTask({
+            kind: "cdp_click", url: job_url, company: String(company || ""), title: String(title || ""),
+            payload: { x: point.x, y: point.y },
+          });
+          await waitForOfficialTask(clickTask.id, 30_000);
+
+          // 点完重探一次：面板真开了才算数，不听模型自述
+          const recheck = enqueueOfficialTask({
+            kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
+            payload: { signatures: [field.signature], budgetMs: 12000 },
+          });
+          const again = await waitForOfficialTask(recheck.id, 30_000);
+          if (Array.isArray(again?.probed)) planFields = mergeProbedOptions(planFields, again.probed);
+          const got = again?.probed?.[0]?.options?.length ?? 0;
+          console.log(`[vision] ${String(field.label).slice(0, 12)} 点(${point.x},${point.y}) → 探到 ${got} 个选项`);
         }
 
         const refreshed = stillOpen(planFields, filledSignatures);

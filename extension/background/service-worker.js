@@ -181,6 +181,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     cdpInput.type(tabId, message.text).then((ok) => sendResponse({ ok }));
     return true;
   }
+  if (message?.type === 'OFFICIAL_CAPTURE') {
+    /**
+     * 截当前可见区域。视觉兜底用——有些控件没有任何无障碍信息、DOM 也驱动不了
+     * （真机上帆软那 5 个「是否有…经历」probe 探回来 0 个选项，面板压根没开），
+     * 那时候唯一还成立的信息源就是「它在屏幕上长什么样」。
+     *
+     * captureVisibleTab 需要 activeTab 或 <all_urls> 权限，我们的 host_permissions 已覆盖。
+     * 只截可见区域，所以调用方必须先把目标滚进视口。
+     */
+    const windowId = sender.tab?.windowId;
+    chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, (dataUrl) => {
+      const failed = chrome.runtime.lastError;
+      sendResponse(failed || !dataUrl ? { ok: false, error: String(failed?.message || '截图失败') } : { ok: true, dataUrl });
+    });
+    return true;
+  }
   if (message?.type === 'OFFICIAL_CDP_RELEASE') {
     if (sender.tab?.id) void cdpInput.release(sender.tab.id);
     sendResponse({ ok: true });

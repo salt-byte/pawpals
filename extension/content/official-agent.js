@@ -202,6 +202,47 @@ async function execute(task) {
     });
     return { ok: true, probed, partial, formReady: readiness.ready };
   }
+  /**
+   * 视觉兜底第一拍：把目标控件滚进视口，截图，连同它的视口坐标一起交回服务端。
+   *
+   * 用在 DOM 驱动不了的控件上——真机上帆软那 5 个「是否有…经历」probe 探回来
+   * 0 个选项，面板压根没开。那时候唯一还成立的信息源就是「它在屏幕上长什么样」。
+   *
+   * 这一拍只负责「看」，不动页面。点由服务端把坐标算出来后的 cdp_click 那一拍做，
+   * 而且坐标必须落在这里报上去的框内（服务端校验，见 vision-click.ts）。
+   */
+  if (task.kind === 'vision') {
+    const el = elementForHandle(document, task.payload?.signature, snapOpts());
+    if (!el) return { ok: false, error: 'handle_not_found' };
+    el.scrollIntoView({ block: 'center' });
+    await new Promise((r) => setTimeout(r, 350));
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return { ok: false, error: 'element_not_visible' };
+    const shot = await toBackground({ type: 'OFFICIAL_CAPTURE' });
+    if (!shot?.ok) return { ok: false, error: shot?.error || 'capture_failed' };
+    return {
+      ok: true,
+      screenshot: shot.dataUrl,
+      box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) },
+      viewport: { width: innerWidth, height: innerHeight },
+      formReady: readiness.ready,
+    };
+  }
+
+  /**
+   * 视觉兜底第二拍：在服务端算出的坐标上点一下。
+   *
+   * 走 chrome.debugger 派发真实事件而不是合成事件——这类控件本来就是合成事件驱动
+   * 不了才走到视觉这条路的，再用合成事件点等于绕回原地。
+   */
+  if (task.kind === 'cdp_click') {
+    const { x, y } = task.payload || {};
+    if (typeof x !== 'number' || typeof y !== 'number') return { ok: false, error: 'bad_coordinate' };
+    const clicked = await toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y });
+    await new Promise((r) => setTimeout(r, 400));
+    return { ok: Boolean(clicked?.ok), clickedAt: { x, y } };
+  }
+
   if (task.kind === 'submit') {
     const warnings = formWarnings(fields, document);
     if (warnings.includes('verification_required') || warnings.includes('sensitive_questions_require_user_choice') || warnings.includes('resume_requires_user_file_selection')) {
