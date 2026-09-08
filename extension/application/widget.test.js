@@ -615,3 +615,49 @@ describe('疑似空状态时重读一次', () => {
     expect(calls).toBe(1);
   });
 });
+
+/**
+ * 搜索结果要等它加载完再读。
+ *
+ * 真机决定性证据：给「本科学校」搜「北京电影学院」，返回的「选项」是
+ *   ["可多选","可多选","可多选","研究生","搜索中..."]
+ * ——「搜索中...」说明结果还在路上，我们打完字只等 400ms 就去读了。
+ *
+ * 这解释了「之前能搜、后来不能」：不是坏了，是一直有竞态，之前碰巧赢了。
+ */
+describe('搜索结果没回来就等一等', () => {
+  const loadingThenReal = () => {
+    let reads = 0;
+    return {
+      reads: () => reads,
+      panelTexts: () => {
+        reads += 1;
+        return reads <= 2 ? ['搜索中...'] : ['北京电影学院', '北京电影学院现代创意媒体学院'];
+      },
+    };
+  };
+
+  it('面板里还是「搜索中」时重读，不当成没找到', async () => {
+    const src = loadingThenReal();
+    const driver = createWidgetDriver({
+      click: async () => ({}),
+      type: async () => {},
+      wait: async () => {},
+      isVisible: () => true,
+      elementAtCenter: (c) => c,
+      root: {
+        querySelectorAll: () => [{
+          querySelectorAll: () => src.panelTexts().map((t) => ({
+            tagName: 'SPAN', textContent: t, querySelector: () => null,
+          })),
+          querySelector: () => ({ tagName: 'INPUT', focus() {}, value: '' }),
+          parentElement: null,
+        }],
+        body: { dispatchEvent() {} },
+      },
+    });
+    const result = await driver.selectOption({ textContent: '北京电影学院' }, '北京电影学院');
+    expect(src.reads()).toBeGreaterThan(2);
+    expect(result.ok).toBe(true);
+  });
+});

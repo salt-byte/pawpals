@@ -67,3 +67,64 @@ describe('hint', () => {
     expect(c.hint.length).toBeLessThanOrEqual(200);
   });
 });
+
+/**
+ * 去掉标题时不要把正文一起弄没。
+ *
+ * 真机：「本科学校」的页面提示原文是「未搜索到学校名称的同学，请搜索"其他"并选择，
+ * 再填写学校名称」，而模型看到的 hint 只有「"其他"」两个字——恢复办法就写在被扔掉
+ * 的那部分里。
+ *
+ * 原因是用 replace(label, '') 去标题：容器文字是多段拼起来的，标题在中间出现时
+ * 会把两边切断，只剩一小截。
+ */
+describe('hint 不能被截坏', () => {
+  it('标题出现在容器文字中间时，正文要完整保留', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">本科学校</div>
+        <div class="field-desc">未搜索到学校名称的同学，请搜索“其他”并选择，再填写学校名称</div>
+        <div class="field-component"><div class="x-combo-value">请选择</div></div>
+      </div>`);
+    const [c] = snapshotControls(root, { labelSelector: '.field-name' });
+    expect(c.hint).toContain('未搜索到学校名称');
+    expect(c.hint).toContain('再填写学校名称');
+  });
+
+  it('标题在开头时同样完整', () => {
+    const root = html(`
+      <div class="fx-field"><div class="field-name">学号</div>
+        <div class="field-desc">若无学号可填写“无”，不要留空</div>
+        <input name="sid"></div>`);
+    const [c] = snapshotControls(root, { labelSelector: '.field-name' });
+    expect(c.hint).toContain('若无学号可填写');
+    expect(c.hint).toContain('不要留空');
+  });
+});
+
+/**
+ * 裸文本节点也要收进来。
+ *
+ * 真机：「本科学校」的 hint 只有「"其他"」两个字，而页面原文是「未搜索到学校名称
+ * 的同学，请搜索"其他"并选择，再填写学校名称」。结构是这样的——
+ *
+ *   <div class="field-desc">未搜索到…请搜索<span>"其他"</span>并选择，再填写学校名称</div>
+ *
+ * 「其他」被标签包着，前后两段是**裸文本节点**。而收集文字时只走元素叶子
+ * （querySelectorAll('*')），裸文本节点根本看不见，于是只剩被包着的那两个字。
+ * 恢复办法恰恰写在被扔掉的那部分里。
+ */
+describe('裸文本节点不能丢', () => {
+  it('文字被标签切成三段时，三段都要在', () => {
+    document.body.innerHTML = `
+      <div class="fx-field">
+        <div class="field-name">本科学校</div>
+        <div class="field-desc">未搜索到学校名称的同学，请搜索<span class="hl">“其他”</span>并选择，再填写学校名称</div>
+        <div class="field-component"><input name="s"></div>
+      </div>`;
+    const [c] = snapshotControls(document.body, { labelSelector: '.field-name' });
+    expect(c.hint).toContain('未搜索到学校名称');
+    expect(c.hint).toContain('其他');
+    expect(c.hint).toContain('再填写学校名称');
+  });
+});

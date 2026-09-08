@@ -174,9 +174,15 @@ export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisib
         const box = searchBoxIn(panelNodes());
         if (box) {
           await type(box, wanted);
-          await wait(400);
-          candidates = optionsIn(panelNodes());
-          hit = candidates.find((item) => item.text === wanted);
+          // 等结果真的回来，别只等一个固定时长：面板里还挂着「搜索中...」就说明
+          // 还没到，这时候读只会读到旧内容或占位符。
+          for (let i = 0; i < SEARCH_WAIT_MAX; i += 1) {
+            await wait(SEARCH_WAIT_STEP_MS);
+            candidates = optionsIn(panelNodes());
+            const loading = candidates.some((item) => LOADING_MARK.test(item.text));
+            hit = candidates.find((item) => item.text === wanted);
+            if (hit || !loading) break;
+          }
         }
       }
 
@@ -269,6 +275,19 @@ const DEFAULT_PER_FIELD_MS = 8000;
  * 还是空 → 父级没生效，而且 emptyState 会把面板原文带回服务端，不用再猜。
  */
 const EMPTY_STATE = /^(没有可选择的数据|暂无数据|无数据|无可选项|加载中|loading|no data|no options)$/i;
+
+/**
+ * 「结果还在路上」的样子。
+ *
+ * 真机决定性证据：给「本科学校」搜「北京电影学院」，返回的选项是
+ *   ["可多选","可多选","可多选","研究生","搜索中..."]
+ * ——「搜索中...」说明还在加载，而我们打完字只等 400ms 就去读了，读到的当然
+ * 找不到目标。这解释了「之前能搜、后来不能」：不是坏了，是一直有竞态，之前碰巧
+ * 赢了。碰运气的东西必须变成等待条件。
+ */
+const LOADING_MARK = /^(搜索中|加载中|loading|正在搜索)[.．…]*$/i;
+const SEARCH_WAIT_STEP_MS = 400;
+const SEARCH_WAIT_MAX = 8;
 const DEFAULT_EMPTY_RETRY_MS = 1500;
 
 export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, emptyRetryMs = DEFAULT_EMPTY_RETRY_MS, now = () => Date.now(), onProgress } = {}) {

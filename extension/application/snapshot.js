@@ -223,6 +223,27 @@ function tableLabelOf(el, limit, cache) {
  * 所以分开装。**hint 绝不能进句柄**：句柄从 context 派生，页面文案一改句柄就变，
  * 模型作答后一个都定位不到。
  */
+/**
+ * 一个节点的**全部**文字，包括裸文本节点。
+ *
+ * visibleText 只收集元素叶子（querySelectorAll('*')），裸文本节点看不见。真机上
+ * 「本科学校」的说明是这样的结构——
+ *   <div>未搜索到…请搜索<span>"其他"</span>并选择，再填写学校名称</div>
+ * 「其他」被标签包着，前后两段是裸文本，于是 hint 只剩「"其他"」两个字，而恢复
+ * 办法恰恰写在被扔掉的那部分里。
+ *
+ * 用 textContent 拿全，但先挡掉带脚本/样式的容器——它们的内容绝不能进 prompt
+ * （曾经把 window.jdy_access_token 当成字段标签采过一次）。
+ */
+function rawText(node) {
+  try {
+    if (node.querySelector('script,style,noscript')) return '';
+    return tidy(node.textContent);
+  } catch {
+    return '';
+  }
+}
+
 function hintOf(el, label, cache) {
   const parts = [];
   const placeholder = tidy(el.getAttribute?.('placeholder'));
@@ -232,7 +253,8 @@ function hintOf(el, label, cache) {
   // 会直接跳过它，那句「请先选择【意向岗位】」就永远捡不到。
   for (let node = el, depth = 0; node && depth < 4; node = node.parentElement, depth += 1) {
     if (!FIELD_CONTAINER_HINT.test(String(node.className || ''))) continue;
-    const text = textOf(node, HINT_LIMIT * 3, cache);
+    // 用 rawText 而不是 textOf：说明文字常常被 <span> 切成几段，中间夹着裸文本
+    const text = rawText(node) || textOf(node, HINT_LIMIT * 3, cache);
     if (!text) continue;
     // 去掉标题本身：它已经在 context 里了，重复只是浪费 token
     const rest = text.replace(label, '').replace(/^[\s*＊]+/, '').trim();
