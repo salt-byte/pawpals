@@ -68,6 +68,15 @@ const applied = (actual: string, wanted: string) =>
  * 同一个值「产品类」被拦两次才过——它每次换的是 source，而它并不知道问题出在
  * source 上，白白烧掉 2/3 的尝试次数。
  */
+/**
+ * 机制失败时的那句硬话。
+ *
+ * 循环有「把这个字段搞定」的动机，机制失败时它会换一个能成功的答案——真机上
+ * 「学位」填不进「管理学」，第三次换成「工学」就成了，而那是假的。投给真实雇主
+ * 的表单里，一个假学位比空着严重得多。
+ */
+const KEEP_VALUE = "**值大概率是对的，不要换成另一个答案。** 填不进去就 give_up，让用户自己选——空着永远好过填一个假的。";
+
 function describeFailure(last: { ok: boolean; reason?: string; actual?: string }): string {
   if (last.ok) return "上一次成功了。";
   switch (last.reason) {
@@ -85,11 +94,19 @@ function describeFailure(last: { ok: boolean; reason?: string; actual?: string }
         "都不合适就 give_up。",
       ].join("\n");
     case "value_rewritten":
-      return `上一次填进去了，但页面把它改写成了「${last.actual}」——多半是格式不对。换个写法再试（比如日期用 2025-07-01 这种完整格式）。`;
+      return [
+        `上一次填进去了，但页面把它改写成了「${last.actual}」——多半是格式不对。`,
+        KEEP_VALUE,
+        "只换写法（比如日期改成 2025-07-01 这种完整格式），不要换成另一个答案。",
+      ].join("\n");
     case "value_not_applied":
-      return "上一次填了但页面上没有变化——这个控件可能需要先搜索再选（用 search），或者根本点不动。";
+      return [
+        "上一次填了但页面上没有变化——是这个**控件**没接受，跟值对不对没有关系。",
+        KEEP_VALUE,
+        "换填法：用 search 搜同一个值，或者换更短的关键词搜。",
+      ].join("\n");
     case "panel_did_not_open":
-      return "上一次连下拉面板都没打开——这个控件点不动。换个动作试试，或者 give_up 交给用户。";
+      return ["上一次连下拉面板都没打开——这个控件点不动，跟值对不对没有关系。", KEEP_VALUE].join("\n");
     case "option_not_found":
       return "上一次面板打开了，但里面没找到这个值。用 search 输入更短的关键词再看看（比如只输前几个字），或者看看页面说明里有没有「搜索\"其他\"」这类指示。";
     case "probed":

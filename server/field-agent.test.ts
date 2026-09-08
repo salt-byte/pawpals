@@ -284,7 +284,7 @@ describe("失败原因要能指导下一步", () => {
       lastResult: { ok: false, reason: "value_rewritten", actual: "1901-01-01" },
     });
     expect(p).toContain("1901-01-01");
-    expect(p).toContain("换个写法");
+    expect(p).toContain("只换写法");
   });
 });
 
@@ -311,5 +311,47 @@ describe("多选控件的写法", () => {
       lastResult: { ok: false, reason: "option_not_allowed", actual: "" },
     });
     expect(p).toContain("一个");
+  });
+});
+
+/**
+ * 机制失败 ≠ 值不对。填不进去时不许换一个不同的答案。
+ *
+ * 真机：
+ *   学位 #1 fill "管理学" → 页面上是「」
+ *   学位 #2 fill "管理学" → 页面上是「」
+ *   学位 #3 fill "工学"   → 成功
+ *
+ * 填不进「管理学」，于是换了个能填进去的「工学」——**这是假的**。候选人读的不是
+ * 工学。失败原因是 value_not_applied，控件没接受，跟值对不对毫无关系。
+ *
+ * 这是循环特有的失败模式，手写流程反而不会犯：循环有「把这个字段搞定」的动机，
+ * 机制失败时它会换一个能成功的答案。而我给的提示「换个办法，不要原样重来」在这里
+ * 是有害的——它把「换填法」理解成了「换答案」。
+ *
+ * 投给真实雇主的表单里，一个假学位比空着严重得多。
+ */
+describe("填不进去时不许换答案", () => {
+  it("机制失败时明说「值大概率没问题，不要换值」", () => {
+    for (const reason of ["value_not_applied", "value_rewritten", "panel_did_not_open"]) {
+      const p = buildFieldPrompt({
+        field: { context: "学位", options: ["管理学", "工学", "文学"], type: "widget" } as any,
+        profile: "档案", attempt: 2,
+        lastResult: { ok: false, reason, actual: "" },
+      });
+      expect(p, reason).toContain("不要换成另一个答案");
+      expect(p, reason).toContain("give_up");
+    }
+  });
+
+  it("值本身被判有问题时，才该换值", () => {
+    for (const reason of ["unsourced", "option_not_allowed"]) {
+      const p = buildFieldPrompt({
+        field: { context: "学位", options: ["管理学", "工学"], type: "widget" } as any,
+        profile: "档案", attempt: 2,
+        lastResult: { ok: false, reason, actual: "" },
+      });
+      expect(p, reason).not.toContain("不要换成另一个答案");
+    }
   });
 });
