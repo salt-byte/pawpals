@@ -120,6 +120,33 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
     }
 
     /**
+     * 级联：填完父级，当场把「探到空选项」的控件再探一次。
+     *
+     * 真机实验证实（三步）：父级没填时探「意向岗位」返回空状态「没有可选择的数据」；
+     * 填上「意向岗位大类 = 产品类」后再探同一个控件，立刻拿到「全选/产品经理/
+     * 产品运营」。所以级联根本没坏，坏的是**顺序**——一轮里先把所有 widget 探一遍
+     * 再填，子控件永远是在父级还没填的状态下被探的，探到的必然是空。
+     *
+     * 分轮本该在下一轮修正，但那要等一整轮，而且轮次会因为「本轮没推进」提前停。
+     * 真机上跑满四轮「意向岗位」始终是空，就是这么来的。填完当场补探才靠得住。
+     */
+    if (values.length) {
+      const empties = stillOpen(fields, []).filter(
+        (f: any) => f.type === "widget" && !(f.options?.length)
+      );
+      if (empties.length) {
+        const before = new Set(empties.map((f: any) => f.signature));
+        fields = await probeAll(empties, fields, { task, runTask });
+        const unlocked = fields.filter((f: any) => before.has(f.signature) && f.options?.length);
+        if (unlocked.length) {
+          log(`[apply] 第 ${round} 轮：填完父级后 ${unlocked.length} 个控件解锁了选项`);
+          const more = await askModel(fieldsForModel(unlocked), fields);
+          if (more.length) recordFailures(await runFill(more, { task, runTask }, fields), failures);
+        }
+      }
+    }
+
+    /**
      * 本轮推进了多少，**以页面为准**。
      *
      * 不能数任务自报的 filled：派发超时返回的是 {ok:false}，一条 filled 都没有，

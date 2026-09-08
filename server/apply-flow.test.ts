@@ -223,3 +223,88 @@ describe("分批填写", () => {
     expect(out.confirmed.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * 级联：填完父级要当场补探子级。
+ *
+ * 真机实验（三步，决定性）：
+ *   ① 父级还没填 → 探「意向岗位」→ []（空状态：没有可选择的数据）
+ *   ② 填父级「意向岗位大类 = 产品类」→ 回读确认
+ *   ③ 再探同一个「意向岗位」→ ["全选","产品经理","产品运营"]
+ *
+ * 所以级联根本没坏，坏的是**顺序**：一轮里先把所有 widget 探一遍再填，子控件
+ * 永远是在父级还没填的状态下被探的，探到的必然是空。
+ *
+ * 分轮本该在下一轮修正，但那要等一整轮，而且轮次会因为「本轮没推进」提前停——
+ * 真机上就是这样，跑满四轮「意向岗位」始终是空。填完当场补探才靠得住。
+ */
+describe("级联：填完父级当场补探", () => {
+  function cascadeHarness() {
+    const page = new Map<string, string>();
+    const probes: string[][] = [];
+    const controls = [
+      { handle: "h-cat", type: "widget", context: "意向岗位大类", required: true },
+      { handle: "h-job", type: "widget", context: "意向岗位", required: true },
+    ];
+    return {
+      probes, page,
+      deps: {
+        runTask: async (task: any) => {
+          if (task.kind === "inspect") {
+            return { ok: true, formReady: true, warnings: [],
+              snapshot: controls.map((c) => ({ ...c, value: page.get(c.handle) ?? "", options: [] })) };
+          }
+          if (task.kind === "probe") {
+            const wanted: string[] = task.payload?.signatures ?? [];
+            probes.push(wanted);
+            return { ok: true, probed: wanted.map((s) => ({
+              signature: s,
+              // 子级只有在父级已经有值时才有选项——这是页面的真实行为
+              options: s === "h-job"
+                ? (page.get("h-cat") ? ["产品经理", "产品运营"] : [])
+                : ["产品类", "研发类"],
+              timedOut: false,
+            })) };
+          }
+          if (task.kind === "fill") {
+            const filled: string[] = [];
+            for (const v of task.payload?.values ?? []) { page.set(v.signature, v.value); filled.push(v.signature); }
+            return { ok: true, filled, skipped: [] };
+          }
+          return { ok: true };
+        },
+        askModel: async (fields: any[]) =>
+          fields.filter((f: any) => f.options?.length).map((f: any) => ({ signature: f.signature, value: f.options[0] })),
+        readProfile: () => "档案",
+        findResume: () => null,
+        readFile: () => Buffer.from(""),
+        fileSize: () => 0,
+        log: () => {},
+      },
+    };
+  }
+
+  it("父级填上后，子级在同一轮里被重新探到选项并填上", async () => {
+    const h = cascadeHarness();
+    const out = await runApplyFlow(JOB, h.deps as any);
+    expect(h.page.get("h-cat")).toBe("产品类");
+    expect(h.page.get("h-job")).toBe("产品经理");
+    expect(out.confirmed.map((f: any) => f.context)).toContain("意向岗位");
+  });
+
+  it("子级被探了不止一次——第一次是空的，填完父级后才有值", async () => {
+    const h = cascadeHarness();
+    await runApplyFlow(JOB, h.deps as any);
+    const jobProbes = h.probes.filter((batch) => batch.includes("h-job"));
+    expect(jobProbes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("没有空选项控件时不做多余的补探", async () => {
+    const h = harness();
+    const before = h.calls.filter((k) => k === "probe").length;
+    await runApplyFlow(JOB, h.deps as any);
+    const after = h.calls.filter((k) => k === "probe").length;
+    // 普通场景下探测次数不该因为这个机制暴涨
+    expect(after - before).toBeLessThanOrEqual(4);
+  });
+});
