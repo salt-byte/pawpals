@@ -30,6 +30,7 @@ import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manua
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
 import { runApplyFlow } from "./server/apply-flow.ts";
+import { extractApplyTarget } from "./server/apply-target.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
@@ -2889,26 +2890,19 @@ async function streamAgent(
         calledApply = true;
       }
 
-      // 方式 2: 消息里包含投递意图（首席 @投递管家 说"帮我投"），从协作表查 URL
+      // 方式 2: 消息里包含投递意图，找出要投的岗位
       if (!calledApply && /投递|投这|帮.*投|请.*投|apply/i.test(lastUserMsg)) {
-        const board = loadCollaborationBoard();
-        // 从消息里匹配公司名或岗位名
-        const matchedRow = board.find((row: any) => {
-          return row.jdUrl && (
-            (row.company && lastUserMsg.includes(row.company)) ||
-            (row.role && lastUserMsg.includes(row.role))
-          );
-        }) || board.find((row: any) => row.jdUrl && row.workflowStage === "selected");
-        // 如果没匹配到具体岗位，用最近搜索结果的第一个
-        const searchResults = loadLastSearchResults();
-        const currentPage = activeOfficialApplicationPage && Date.now() - activeOfficialApplicationPage.seenAt < 15 * 60_000
-          ? { company: "", role: activeOfficialApplicationPage.title, jdUrl: activeOfficialApplicationPage.url }
-          : null;
-        const targetRow = currentPage || matchedRow || (searchResults.length > 0 ? {
-          company: searchResults[0].company,
-          role: searchResults[0].role,
-          jdUrl: searchResults[0].jdUrl,
-        } : null);
+        // 优先用消息里贴的链接——那是意图最明确的一种，而它此前从来没被用过：
+        // 用户发「帮我投递这个官网申请：https://…」，关键词匹配上了但目标查不到，
+        // 于是什么都没发生。整条端到端链路就断在这一步（见 apply-target.ts）。
+        const targetRow = extractApplyTarget({
+          message: lastUserMsg,
+          board: loadCollaborationBoard(),
+          searchResults: loadLastSearchResults(),
+          activePage: activeOfficialApplicationPage && Date.now() - activeOfficialApplicationPage.seenAt < 15 * 60_000
+            ? { url: activeOfficialApplicationPage.url, title: activeOfficialApplicationPage.title }
+            : null,
+        });
 
         if (targetRow?.jdUrl) {
           emitToolActivity("apply_job", "准备官网申请", "official-site", targetRow.jdUrl);

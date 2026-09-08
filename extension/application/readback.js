@@ -58,10 +58,17 @@ export function dismissPanels(root = document) {
   try {
     const body = root?.body;
     if (!body) return;
-    body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    // 事件要同时打到 document 和 body：很多组件库的「点击外部关闭」监听在
+    // document 上，只派给 body 冒泡不上去（或者它们根本没在 body 上挂）。
+    // 真机上填完「语言特长」多选后面板始终不关，就是因为只派给了 body。
+    const targets = [root, body].filter(Boolean);
+    for (const target of targets) {
+      target.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+        target.dispatchEvent?.(new MouseEvent(type, { bubbles: true, cancelable: true }));
+      }
+    }
   } catch {
-    // 收不起来不影响正确性
+    // 收不起来不影响正确性：跳过浮层那道防线还在
   }
 }

@@ -230,7 +230,10 @@ async function execute(task) {
         driver: widgetDriver,
         findContainer: (signature) => elementForHandle(document, signature, snapOpts()) || widgetContainerFor(document, signature),
       });
-      await new Promise((r) => setTimeout(r, 200));
+      // 填完立刻收浮层：多选控件（combocheck）选完不会自己关，开着的话它那些选项
+      // 会被下一次快照当成表单字段采进去，把 39 个字段虚报成 48。
+      dismissPanels(document);
+      await new Promise((r) => setTimeout(r, 250));
       const check = verifyByHandle(document, [item], snapOpts());
       if (check.confirmed.length) confirmed.push(item.signature);
       else failed.push({
