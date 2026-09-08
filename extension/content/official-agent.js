@@ -44,9 +44,23 @@ const withTimeout = (promise, ms) =>
   Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
 
 async function cdpClick(el) {
-  el.scrollIntoView?.({ block: 'center' });
-  await new Promise((r) => setTimeout(r, 150));
-  const box = el.getBoundingClientRect();
+  /**
+   * 只在需要时滚动。
+   *
+   * 真机根因：选项是浮层里的元素，本来就在视口里；对它调 scrollIntoView 会滚动
+   * 页面，浮层跟着关闭或移位，等我们再量坐标时已经打空了——probe 明明拿到 7 个
+   * 选项，fill 却报 value_not_applied、actual 是空。
+   *
+   * 所以先量一次：已经完整落在视口里就别动页面。
+   */
+  let box = el.getBoundingClientRect();
+  const inView = box.width > 0 && box.height > 0
+    && box.top >= 0 && box.left >= 0 && box.bottom <= innerHeight && box.right <= innerWidth;
+  if (!inView) {
+    el.scrollIntoView?.({ block: 'center' });
+    await new Promise((r) => setTimeout(r, 150));
+    box = el.getBoundingClientRect();
+  }
   const x = box.left + box.width / 2;
   const y = box.top + box.height / 2;
   // 滚动之后仍然不在视口里（被固定头部盖住、或在另一个滚动容器里）就别点：
@@ -188,12 +202,7 @@ async function execute(task) {
 
     const confirmed = [];
     const failed = [];
-    const isWidget = (item) => {
-      const control = snapshotControls(document, snapOpts()).find((c) => c.handle === item.signature);
-      return control?.type === 'widget';
-    };
-
-    // 先分组，避免每个字段都重新采一次快照
+    // 只采一次做分组。回读时必须重新采（页面会变），但分组不用。
     const controls = new Map(snapshotControls(document, snapOpts()).map((c) => [c.handle, c]));
     const natives = values.filter((v) => controls.get(v.signature) && controls.get(v.signature).type !== 'widget');
     const widgetItems = values.filter((v) => controls.get(v.signature)?.type === 'widget');

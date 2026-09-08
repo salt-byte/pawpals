@@ -2606,10 +2606,16 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       };
 
       const runFill = async (batch: Array<{ signature: string; value: string }>) => {
+        // 声明预算：填写现在是逐个字段「填 → 失焦 → 回读」，widget 还要点开面板
+        // 选中，一个字段几百毫秒到几秒。派发层默认那个 20 秒上限是用来检测「标签页
+        // 被丢弃、content script 没了」的，拿来量这里会把正常的长任务判成掉线
+        // ——真机上 16 个字段填到第 11 个就被判超时，前 10 个填好了却报 ok=false。
+        const budgetMs = Math.min(180_000, 15_000 + batch.length * 6_000);
         const fillTask = enqueueOfficialTask({
-          kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""), payload: { values: batch },
+          kind: "fill", url: job_url, company: String(company || ""), title: String(title || ""),
+          payload: { values: batch, budgetMs },
         });
-        return waitForOfficialTask(fillTask.id);
+        return waitForOfficialTask(fillTask.id, budgetMs + 30_000);
       };
 
       for (let round = 1; round <= MAX_ROUNDS; round += 1) {
