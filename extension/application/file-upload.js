@@ -21,6 +21,7 @@
  */
 
 import { collectApplicationFields } from './form.js';
+import { elementForHandle } from './snapshot.js';
 
 const defaultSeams = {
   makeFileList: (files) => {
@@ -51,7 +52,7 @@ export function decodeUpload(upload) {
  * 传错地方比没传更糟——投出去的简历是别人的，或者根本不是简历。
  */
 export function applyFileUploads(root = document, uploads = [], seams = {}) {
-  const { makeFileList, assignFiles } = { ...defaultSeams, ...seams };
+  const { makeFileList, assignFiles, snapshotOpts = {} } = { ...defaultSeams, ...seams };
   const uploaded = [];
   const skipped = [];
   if (!Array.isArray(uploads) || uploads.length === 0) return { uploaded, skipped };
@@ -63,11 +64,16 @@ export function applyFileUploads(root = document, uploads = [], seams = {}) {
 
   for (const upload of uploads) {
     const signature = upload?.signature;
-    const matches = fields.filter((field) => field.signature === signature);
-    if (matches.length === 0) { skip(signature, 'not_found'); continue; }
-    if (matches.length > 1) { skip(signature, 'ambiguous'); continue; }
-
-    const el = controls[matches[0].index];
+    // 快照句柄优先。inspect / probe / fill 都按快照寻址，上传再用 form.js 的签名
+    // 就是第二套寻址——服务端按快照挑中的那个文件框，这里按签名找的是另一个，
+    // 轻则找不到、重则把简历传进「作品集」那个框。旧签名留作兼容。
+    let el = elementForHandle(root, signature, snapshotOpts);
+    if (!el) {
+      const matches = fields.filter((field) => field.signature === signature);
+      if (matches.length === 0) { skip(signature, 'not_found'); continue; }
+      if (matches.length > 1) { skip(signature, 'ambiguous'); continue; }
+      el = controls[matches[0].index];
+    }
     if (!el) { skip(signature, 'not_found'); continue; }
     if ((el.getAttribute('type') || '').toLowerCase() !== 'file') { skip(signature, 'not_file_input'); continue; }
 

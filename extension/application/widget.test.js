@@ -557,3 +557,61 @@ describe('CDP 兜底', () => {
   });
 });
 
+
+/**
+ * 空状态重读。
+ *
+ * 真机：填完「意向岗位大类 = 产品类」后再探「意向岗位」，拿回来的是 1 个选项
+ * 「没有可选择的数据」。两种可能分不清——选项是异步拉的、我们只等 350ms 读太早，
+ * 还是父级的值只是显示上去了、页面内部没更新。
+ *
+ * 与其继续推理，不如让探测自己分辨：看起来像空状态就多等一会儿重读，并把面板
+ * 原文带回来。重读之后有了 → 是异步；还是空 → 是父级没生效。
+ */
+describe('疑似空状态时重读一次', () => {
+  const emptyThenLoaded = () => {
+    let calls = 0;
+    return {
+      probeOptions: async () => {
+        calls += 1;
+        return calls === 1 ? ['没有可选择的数据'] : ['产品经理', '数据产品经理'];
+      },
+      selectOption: async () => ({ ok: true }),
+      probeCalls: () => calls,
+    };
+  };
+
+  it('空状态会重读，拿到真正的选项', async () => {
+    const driver = emptyThenLoaded();
+    const { probed } = await probeWidgets(
+      [{ field: { signature: 's1', label: '意向岗位' }, container: {} }],
+      { driver, emptyRetryMs: 1 }
+    );
+    expect(probed[0].options).toEqual(['产品经理', '数据产品经理']);
+    expect(driver.probeCalls()).toBe(2);
+  });
+
+  it('重读之后还是空，如实报空并标记出来——那说明不是异步的问题', async () => {
+    const driver = {
+      probeOptions: async () => ['没有可选择的数据'],
+      selectOption: async () => ({ ok: true }),
+    };
+    const { probed } = await probeWidgets(
+      [{ field: { signature: 's1', label: '意向岗位' }, container: {} }],
+      { driver, emptyRetryMs: 1 }
+    );
+    expect(probed[0].options).toEqual([]);
+    expect(probed[0].emptyState).toBe('没有可选择的数据');
+  });
+
+  it('正常选项不触发重读，不白等', async () => {
+    let calls = 0;
+    const driver = { probeOptions: async () => { calls += 1; return ['是', '否']; }, selectOption: async () => ({ ok: true }) };
+    const { probed } = await probeWidgets(
+      [{ field: { signature: 's1', label: '性别' }, container: {} }],
+      { driver, emptyRetryMs: 1 }
+    );
+    expect(probed[0].options).toEqual(['是', '否']);
+    expect(calls).toBe(1);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen } from "./apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser } from "./apply-orchestrator.ts";
 
 const field = (over: any = {}) => ({
   signature: `sig-${over.label ?? "x"}`, label: "字段", kind: "custom",
@@ -159,5 +159,47 @@ describe("stillOpen", () => {
   it("上一轮填过的这一轮又出现（页面重渲染换了句柄），按没填算", () => {
     const fields = [f({ label: "意向岗位" })];
     expect(stillOpen(fields, ["s-别的字段"]).map((x: any) => x.label)).toEqual(["意向岗位"]);
+  });
+});
+
+/**
+ * 档案里没有的，要问用户，不能静默留空。
+ *
+ * 用户的原话：「民族、学号、内推码 —— 没有的要问我」。之前把这些算作「正确留空」
+ * 是自作主张：档案里查不到只说明**我们**不知道，不说明用户不知道。必填项尤其
+ * 不能沉默——他以为填好了，一提交才被打回。
+ */
+describe("questionsForUser", () => {
+  const f = (over: any) => ({ signature: `s-${over.label}`, label: over.label, type: "text", ...over });
+
+  it("必填、又没填上的，要问", () => {
+    const fields = [f({ label: "民族", required: true }), f({ label: "手机", required: true })];
+    expect(questionsForUser(fields, ["s-手机"]).map((q) => q.label)).toEqual(["民族"]);
+  });
+
+  it("非必填的也问，但排在后面——用户可以跳过", () => {
+    const fields = [f({ label: "内推码" }), f({ label: "学号", required: true })];
+    expect(questionsForUser(fields, []).map((q) => q.label)).toEqual(["学号", "内推码"]);
+    expect(questionsForUser(fields, [])[1].required).toBe(false);
+  });
+
+  it("安全闸字段不问——那不是「缺信息」，是必须用户自己动手", () => {
+    const fields = [f({ label: "简历", kind: "resume", required: true }), f({ label: "民族", required: true })];
+    expect(questionsForUser(fields, []).map((q) => q.label)).toEqual(["民族"]);
+  });
+
+  it("没标签的框不问——问「请填写第 17 个框」毫无意义", () => {
+    const fields = [f({ label: "", required: true }), f({ label: "民族", required: true })];
+    expect(questionsForUser(fields, []).map((q) => q.label)).toEqual(["民族"]);
+  });
+
+  it("有选项的字段把选项一并给出，用户直接挑", () => {
+    const fields = [f({ label: "是否内推", type: "widget", options: ["是", "否"], required: true })];
+    expect(questionsForUser(fields, [])[0].options).toEqual(["是", "否"]);
+  });
+
+  it("问题条数有上限——一次性甩几十个问题没人会答", () => {
+    const fields = Array.from({ length: 30 }, (_, i) => f({ label: `字段${i}`, required: true }));
+    expect(questionsForUser(fields, []).length).toBeLessThanOrEqual(12);
   });
 });

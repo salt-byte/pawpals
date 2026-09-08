@@ -250,7 +250,20 @@ export async function applyWidgetValues(root = document, values = [], { driver, 
 /** 单个控件最多花多久。超了就跳过，别让一个慢控件吃掉整轮预算。 */
 const DEFAULT_PER_FIELD_MS = 8000;
 
-export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, now = () => Date.now(), onProgress } = {}) {
+/**
+ * 「面板开了，但里面只有一句空状态」的样子。
+ *
+ * 真机：填完「意向岗位大类 = 产品类」后再探「意向岗位」，拿回来的是 1 个选项
+ * 「没有可选择的数据」。这有两种解释，光看一次读不出来——选项是异步拉的、我们
+ * 只等 350ms 读太早；还是父级的值只是显示上去了、页面内部的数据模型没更新。
+ *
+ * 与其推理，不如让探测自己分辨：像空状态就多等一会儿重读。重读后有了 → 异步；
+ * 还是空 → 父级没生效，而且 emptyState 会把面板原文带回服务端，不用再猜。
+ */
+const EMPTY_STATE = /^(没有可选择的数据|暂无数据|无数据|无可选项|加载中|loading|no data|no options)$/i;
+const DEFAULT_EMPTY_RETRY_MS = 1500;
+
+export async function probeWidgets(targets = [], { driver, signatures, budgetMs = 20000, maxOptions = 60, perFieldMs = DEFAULT_PER_FIELD_MS, emptyRetryMs = DEFAULT_EMPTY_RETRY_MS, now = () => Date.now(), onProgress } = {}) {
   const probed = [];
   if (!driver || targets.length === 0) return { probed, partial: false };
 
@@ -267,11 +280,29 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
       // 单字段超时：真机上帆软那两个学校下拉各有 2604 个选项，光渲染就要几秒，
       // 只有总预算的话它们会吃掉全部时间，后面十几个字段一个都探不到。
       const TIMEOUT = Symbol('probe-timeout');
-      let timer;
-      const all = await Promise.race([
-        driver.probeOptions(container),
-        new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), perFieldMs); }),
-      ]).finally(() => clearTimeout(timer));
+      const readOnce = async () => {
+        let timer;
+        return Promise.race([
+          driver.probeOptions(container),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), perFieldMs); }),
+        ]).finally(() => clearTimeout(timer));
+      };
+
+      let all = await readOnce();
+      // 面板里只有一句空状态：等一会儿重读。级联下拉的选项常常是点开后才去拉的。
+      let emptyState = '';
+      if (Array.isArray(all) && all.length === 1 && EMPTY_STATE.test(String(all[0]).trim())) {
+        emptyState = String(all[0]).trim();
+        await new Promise((r) => setTimeout(r, emptyRetryMs));
+        const retried = await readOnce();
+        if (Array.isArray(retried) && !(retried.length === 1 && EMPTY_STATE.test(String(retried[0]).trim()))) {
+          all = retried;
+          emptyState = '';
+        } else {
+          // 重读还是空：不是异步的问题。如实报空，并把面板原文带回去。
+          all = [];
+        }
+      }
 
       if (all === TIMEOUT) {
         probed.push({ signature: field.signature, label: field.label, options: [], optionCount: 0, truncated: false, timedOut: true });
@@ -287,6 +318,7 @@ export async function probeWidgets(targets = [], { driver, signatures, budgetMs 
         optionCount: all.length,
         truncated: all.length > maxOptions,
         timedOut: false,
+        ...(emptyState ? { emptyState } : {}),
       });
       report({ stage: 'probing', completed: index + 1, total: list.length, label: field.label, signature: field.signature });
     } catch (error) {

@@ -20,6 +20,7 @@ const GATED_KINDS = ["resume", "verification", "sensitive_demographic"];
 
 type Field = {
   signature: string;
+  required?: boolean;
   label?: string;
   kind?: string;
   type?: string;
@@ -149,4 +150,39 @@ export function shouldRunAnotherRound(input: { round: number; filledThisRound: n
 export function stillOpen(fields: Field[] = [], filledSignatures: string[] = []): Field[] {
   const done = new Set(filledSignatures);
   return fields.filter((field) => !isGated(field) && !done.has(field.signature));
+}
+
+/** 一次最多问多少个。一口气甩几十个问题没人会答。 */
+const MAX_QUESTIONS = 12;
+
+/**
+ * 档案里没有、需要回头问用户的字段。
+ *
+ * 之前把「档案里查不到」当成「正确留空」，那是自作主张：查不到只说明**我们**不
+ * 知道，不说明用户不知道。民族、学号、内推码都是他张口就能答的，而必填项沉默的
+ * 代价更大——他以为填好了，一提交才被打回。
+ *
+ * 不问两类：
+ *   安全闸字段   那不是「缺信息」，是必须用户亲自动手（简历、人机验证、敏感问题）
+ *   没有标签的框 问「请填写第 17 个框」毫无意义，先修标签再说
+ *
+ * 必填的排前面，非必填的排后面——用户可以只答前面几个。
+ */
+export function questionsForUser(
+  fields: Field[] = [],
+  filledSignatures: string[] = []
+): Array<{ signature: string; label: string; required: boolean; options?: string[] }> {
+  const done = new Set(filledSignatures);
+  const open = fields.filter(
+    (field) => !isGated(field) && !done.has(field.signature) && String(field.label || "").trim()
+  );
+  const toQuestion = (field: Field) => ({
+    signature: field.signature,
+    label: String(field.label || "").trim(),
+    required: field.required === true,
+    ...(field.options?.length ? { options: field.options } : {}),
+  });
+  const required = open.filter((field) => field.required === true).map(toQuestion);
+  const optional = open.filter((field) => field.required !== true).map(toQuestion);
+  return [...required, ...optional].slice(0, MAX_QUESTIONS);
 }

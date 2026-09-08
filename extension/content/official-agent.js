@@ -134,7 +134,7 @@ async function execute(task) {
     reportTaskProgress(task, { stage: 'uploading' });
     // 上传单独成一拍：不少站点解析简历后会把结果覆盖到表单上，上传完立刻填
     // 等于白填。这一拍只装文件，等页面解析完再由后续的 inspect + fill 接手。
-    const { uploaded, skipped } = applyFileUploads(document, task.payload?.uploads || []);
+    const { uploaded, skipped } = applyFileUploads(document, task.payload?.uploads || [], { snapshotOpts: snapOpts() });
     return { ok: true, uploaded, skipped, formReady: readiness.ready, warnings: formWarnings(collectApplicationFields(document), document) };
   }
 

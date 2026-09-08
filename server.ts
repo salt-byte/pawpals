@@ -26,7 +26,9 @@ import { pickAutofillValue , parseAutofillProfile } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
 import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen } from "./server/apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser } from "./server/apply-orchestrator.ts";
+import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
+import { pickResumeFile } from "./server/resume-file.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
 import { runTailorPipeline, type TailorDeps } from "./server/tailor-pipeline.ts";
@@ -2495,10 +2497,57 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       const plan = planApplicationStep(inspection);
       if (plan.action === "abort") return `[ERR] 官网申请页检查失败：${plan.reason}`;
 
-      // 简历还没上传就先停：很多站点解析简历后会把结果覆盖到表单上，
-      // 这一步先填等于白填，还会让「已填写 N 个字段」变成谎报。
-      if (plan.action === "await_resume_upload") {
-        return `这个页面需要先上传简历附件——浏览器不允许脚本代选文件，而且不少网站会用解析结果覆盖已填内容。\n\n请你在页面上手动选好简历文件，完成后再跟我说一次「投递」，我再把其余字段填好并帮你核对解析结果。`;
+      /**
+       * 简历先传。
+       *
+       * 一度以为这做不到（"浏览器不允许脚本代选文件"），其实 input.files 可以赋值，
+       * 只要给的是 DataTransfer 造出来的 FileList——file-upload.js 里那条路真机验证
+       * 过。缺的一直是**文件本身**：我们只存了从 PDF 抽出来的 markdown，原件没留。
+       *
+       * 必须排在填写之前、且单独成一拍：不少站点解析简历后会把结果覆盖到表单上，
+       * 上传完立刻填等于白填。
+       *
+       * 三种情况都如实上报，不含糊过去——用户以为传好了却没传，是投递里代价最大
+       * 的一种误解。
+       */
+      const uploadNotes: string[] = [];
+      {
+        const snap0: any[] = Array.isArray(inspection.snapshot) ? inspection.snapshot : [];
+        const target = pickResumeTarget(snap0);
+        if (target) {
+          const resumePath = pickResumeFile({
+            envPath: process.env.PAWPALS_RESUME_FILE,
+            dirs: [CAREER_DIR, path.join(process.env.HOME || "", "Downloads")],
+            exists: (p: string) => existsSync(p),
+            list: (dir: string) => readdirSync(dir),
+          });
+          if (!resumePath) {
+            uploadNotes.push("没找到你的简历原件（只有抽出来的文本），简历附件需要你自己选一下");
+          } else {
+            const bytes = statSync(resumePath).size;
+            const fits = checkUploadFits(bytes, parseSizeLimit(String(target.context || "")));
+            if (!fits.ok) {
+              // 传上去被网站默默拒掉、用户以为传好了，比当场说不行糟得多
+              uploadNotes.push(`简历没传：${fits.reason}（${path.basename(resumePath)}），请换一份小一点的`);
+            } else {
+              const uploadTask = enqueueOfficialTask({
+                kind: "upload", url: job_url, company: String(company || ""), title: String(title || ""),
+                payload: { uploads: [{
+                  signature: target.handle,
+                  name: path.basename(resumePath),
+                  type: resumePath.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream",
+                  dataBase64: readFileSync(resumePath).toString("base64"),
+                }] },
+              });
+              const up = await waitForOfficialTask(uploadTask.id, 60_000);
+              uploadNotes.push(up?.uploaded?.length
+                ? `已上传简历 ${path.basename(resumePath)}`
+                : `简历上传失败（${up?.skipped?.[0]?.reason || "未知原因"}），需要你自己选一下`);
+              // 等页面解析完再往下走：不少站点会用解析结果覆盖表单
+              if (up?.uploaded?.length) await new Promise((r) => setTimeout(r, 3000));
+            }
+          }
+        }
       }
 
       const fillCtx = { title: String(title || ""), company: String(company || "") };
@@ -2670,14 +2719,29 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       // unsourced / option_not_allowed 说明模型想填但被闸门挡下了，这类字段
       // 页面上是空的，必须让用户知道要手动补，不能沉默。
       const blockedCount = rejected.filter((r) => r.reason === "unsourced" || r.reason === "option_not_allowed").length;
+      /**
+       * 档案里没有的，要问，不能静默留空。
+       *
+       * 之前把「档案里查不到」当成「正确留空」，那是自作主张：查不到只说明我们不
+       * 知道，不说明用户不知道。民族、学号、内推码都是他张口就能答的，而必填项
+       * 沉默的代价更大——他以为填好了，一提交才被打回。
+       */
+      const questions = questionsForUser(planFields, filledSignatures);
+      const askLine = (q: any) => `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
+
       const notes = [
+        ...uploadNotes,
         `已填写 ${filledCount}/${planFields.length} 个字段` + (filledLabels.length ? `（${filledLabels.slice(0, 12).join("、")}${filledLabels.length > 12 ? "…" : ""}）` : ""),
-        needsUser.length ? `${needsUser.length} 个是需要搜索的下拉（${needsUser.map((f: any) => String(f.context || f.label || "").slice(0, 8)).join("、")}），得你自己选` : "",
-        blockedCount ? `${blockedCount} 个字段因档案里查无依据被拦下，需要你手动填` : "",
-        skippedCount ? `${skippedCount} 个字段因页面已变化未能定位，需要你手动补` : "",
-        warnings.includes("resume_requires_user_file_selection") ? "请先在页面上手动选择简历文件" : "",
+        needsUser.length ? `${needsUser.length} 个控件探不到选项，得你自己选（${needsUser.map((f: any) => String(f.context || f.label || "").slice(0, 8)).join("、")}）` : "",
+        blockedCount ? `${blockedCount} 个字段因档案里查无依据被拦下` : "",
+        skippedCount ? `${skippedCount} 个字段因页面已变化未能定位` : "",
+        warnings.includes("resume_requires_user_file_selection") ? "简历附件需要你在页面上手动选择" : "",
       ].filter(Boolean);
-      return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。请检查页面内容，确认无误后再回复“确认投递”。`;
+
+      const askBlock = questions.length
+        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${questions.map(askLine).join("\n")}`
+        : "";
+      return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。${askBlock}\n\n请检查页面内容，确认无误后再回复“确认投递”。`;
 
     }
 
