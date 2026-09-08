@@ -186,8 +186,15 @@ export function createWidgetDriver({ click, type, wait, elementAtCenter, isVisib
         return { ok: false, reason: 'option_not_found', options };
       }
 
-      await click(hit.el);
-      await wait(250);
+      // 选中这一下要「可信」：合成事件能让显示变，但页面内部的数据模型不提交。
+      // 真机对照过——合成事件选完「意向岗位大类=产品类」，显示对了、读回也过了，
+      // 但依赖它的「意向岗位」始终没有选项；换成 CDP 派发的真实事件，当场解锁出
+      // 「全选/产品经理/产品运营」。
+      //
+      // 只有这一下用 CDP：打开面板、读选项用合成事件是好的（真机验证过），全程
+      // 挂调试器反而慢到单字段超时——探 15 个只探完 2 个。
+      await click(hit.el, { trusted: true });
+      await wait(400);
 
       // 回读：值真的落到控件上了才算成功
       const applied = tidy(container.textContent).includes(wanted);

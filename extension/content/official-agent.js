@@ -9,7 +9,7 @@ import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
 /**
- * 点击与打字：**CDP 优先，合成事件兜底**。
+ * 点击与打字：**合成事件开路，选中那一下用 CDP**。
  *
  * 顺序原来是反的（合成优先、CDP 只在「面板没打开」时兜底），真机上因此栽了一个
  * 很难看出来的跟头——
@@ -22,9 +22,13 @@ import { syntheticImpl } from '../act/synthetic.js';
  * 也就是说：合成事件让**显示**变了，页面内部的数据模型没提交。而「面板打开了、
  * 选项点了、显示也变了」这三件都成立，旧的升级条件永远不会触发——失败得极其安静。
  *
+ * 但 CDP 只用在「选中某个选项」那一下，不铺满整条路径。曾经改成全程 CDP，真机上
+ * 每个控件都要挂一次调试器，慢到单字段超时——15 个 widget 只探完 2 个，一个选项
+ * 都没读到，比改之前更糟。打开面板、读选项用合成事件本来就是好的。
+ *
  * 代价是 Chrome 会挂一条「已开始调试此浏览器」的横幅。这是 Claude in Chrome 一直
- * 在付的代价，值得：错填一个必填项的代价比一条横幅大得多。挂载仍然是懒的、用完
- * 即摘（见 background/cdp-input.js）。
+ * 在付的代价，值得：错填一个必填项的代价比一条横幅大得多。挂载是懒的、用完即摘
+ * （见 background/cdp-input.js），所以横幅只在真正选中的那几秒出现。
  *
  * chrome.debugger 只能在 service worker 里用，所以这里负责算视口坐标。
  */
@@ -42,11 +46,12 @@ async function cdpClick(el) {
 }
 
 const widgetDriver = createPageWidgetDriver({
-  click: async (el) => {
-    // CDP 先行；派发不成（没挂上调试器、坐标不在视口）才退回合成事件，
-    // 至少还能驱动那些不挑事件可信度的控件。
-    const dispatched = await cdpClick(el);
-    if (!dispatched) await syntheticImpl.click(el, { fast: true });
+  click: async (el, opts = {}) => {
+    // trusted 只在「选中某个选项」那一下为真——那是唯一需要页面提交内部状态的
+    // 时刻。打开面板、读选项继续走合成事件：真机验证过是好的，而全程挂调试器
+    // 会慢到单字段超时（探 15 个只探完 2 个）。
+    if (opts.trusted && (await cdpClick(el))) return {};
+    await syntheticImpl.click(el, { fast: true });
     return { cdpFallback: () => cdpClick(el) };
   },
   // 搜索框打字：面板带搜索时不枚举，直接搜

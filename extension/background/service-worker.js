@@ -190,11 +190,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
      * captureVisibleTab 需要 activeTab 或 <all_urls> 权限，我们的 host_permissions 已覆盖。
      * 只截可见区域，所以调用方必须先把目标滚进视口。
      */
-    const windowId = sender.tab?.windowId;
-    chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, (dataUrl) => {
-      const failed = chrome.runtime.lastError;
-      sendResponse(failed || !dataUrl ? { ok: false, error: String(failed?.message || '截图失败') } : { ok: true, dataUrl });
-    });
+    const tab = sender.tab;
+    if (!tab?.id) { sendResponse({ ok: false, error: 'no_tab' }); return false; }
+    // captureVisibleTab 截的是**可见**标签页，而申请页是后台开的——不先切到前台
+    // 就会截到用户当前在看的那个页面，模型据此给的坐标全是错的。视觉是最后一招，
+    // 抢一下焦点可以接受，但只在真的走到这一步时才抢。
+    (async () => {
+      try {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+        await new Promise((r) => setTimeout(r, 400));
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        sendResponse(dataUrl ? { ok: true, dataUrl } : { ok: false, error: '截图为空' });
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error?.message || error) });
+      }
+    })();
     return true;
   }
   if (message?.type === 'OFFICIAL_CDP_RELEASE') {
