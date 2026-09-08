@@ -21,6 +21,8 @@ const GATED_KINDS = ["resume", "verification", "sensitive_demographic"];
 type Field = {
   signature: string;
   required?: boolean;
+  /** 页面上这个框当前的值。断线续填全靠它——见 stillOpen。 */
+  value?: string;
   label?: string;
   kind?: string;
   type?: string;
@@ -149,7 +151,35 @@ export function shouldRunAnotherRound(input: { round: number; filledThisRound: n
  */
 export function stillOpen(fields: Field[] = [], filledSignatures: string[] = []): Field[] {
   const done = new Set(filledSignatures);
-  return fields.filter((field) => !isGated(field) && !done.has(field.signature));
+  return fields.filter((field) => {
+    if (isGated(field)) return false;
+    // 页面当前值优先于记忆。记住「填过哪些句柄」不够可靠：service worker 一被
+    // 回收、页面一重渲染，句柄会变、记忆会丢。重新采一次快照，有值的就是填好
+    // 的——这样中途断线、换标签页、甚至隔一天接着做都成立。
+    if (String(field.value ?? "").trim()) return false;
+    // 记得填过、但页面上是空的：以页面为准，重填。
+    if (done.has(field.signature) && field.value !== undefined) return true;
+    return !done.has(field.signature);
+  });
+}
+
+/**
+ * 这一批里还没探到的控件。
+ *
+ * 探测返回 partial 很常见（单控件真机约 2.8 秒，一批的预算有限）。把 partial
+ * 当成「探完了」，那些没轮到的控件就永远没有选项，模型永远答不对它们。
+ *
+ * 超时的也要补探：那不是「没有选项」，是没读完。而探到了、选项确实为空的不补——
+ * 重探还是空，只是白花时间。
+ */
+export function unprobed(
+  wanted: string[] = [],
+  probed: Array<{ signature?: string; options?: string[]; timedOut?: boolean }> = []
+): string[] {
+  const done = new Set(
+    probed.filter((item) => item?.signature && !item.timedOut).map((item) => item.signature as string)
+  );
+  return wanted.filter((signature) => !done.has(signature));
 }
 
 /** 一次最多问多少个。一口气甩几十个问题没人会答。 */

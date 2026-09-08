@@ -71,6 +71,31 @@ function visibleText(container, limit) {
 const LABEL_CLASS_HINT = /label|field-?name|field-?title|form-?item-?label/i;
 /** 找标题时最多看多少个同级节点。字段容器只有几个孩子；上限是为了挡住 body。 */
 const SIBLING_SCAN_CAP = 50;
+/**
+ * 占位符的类名特征。widget 没选值时显示的是「请选择」「可多选」这类灰字，
+ * 那不是值——把它当成值会让回读误判成「已经填好了」。
+ */
+const PLACEHOLDER_HINT = /placeholder|empty|hint/i;
+/** 显示值所在的那一块。 */
+const VALUE_NODE_HINT = /value|text|label|content|selected/i;
+
+/**
+ * widget 当前显示的值。没选值返回空串。
+ *
+ * 不能直接拿整个容器的文字：里面混着标题、提示、单位。取值区里的非占位符文本。
+ */
+function widgetValue(container) {
+  const areas = [...container.querySelectorAll('*')].filter(
+    (node) => VALUE_AREA_HINT.test(String(node.className || '')) || VALUE_NODE_HINT.test(String(node.className || ''))
+  );
+  for (const area of areas.slice(0, 30)) {
+    if (PLACEHOLDER_HINT.test(String(area.className || ''))) continue;
+    if (area.querySelector('*')) continue;
+    const text = tidy(area.textContent);
+    if (text) return text;
+  }
+  return '';
+}
 /** 表格内部的结构件：列头、行、格子。它们也带 title/label 类名，找表名时要跳过。 */
 const GRID_PART_HINT = /subform|grid|table|row|cell|head/i;
 /** 去掉必填星号：页面上写的是「*获奖经历」，标签是「获奖经历」。 */
@@ -226,6 +251,9 @@ export function snapshotEntries(root = document, {
       type,
       required: el.required || el.getAttribute('aria-required') === 'true',
       options: el.tagName === 'SELECT' ? [...el.options].map((option) => tidy(option.textContent)) : [],
+      // 当前值。回读校验靠它——「填进去了吗」只有页面自己说了算，fill 返回 ok
+      // 不算数，模型说填了更不算数。
+      value: typeof el.value === 'string' ? el.value : '',
       context,
     } });
   }
@@ -238,6 +266,7 @@ export function snapshotEntries(root = document, {
       type: 'widget',
       required: [...container.querySelectorAll('[class*="required"]')].some((m) => tidy(m.textContent) === '*'),
       options: [],
+      value: widgetValue(container),
       context,
     } });
   }

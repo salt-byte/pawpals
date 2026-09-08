@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser } from "./apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser, unprobed } from "./apply-orchestrator.ts";
 
 const field = (over: any = {}) => ({
   signature: `sig-${over.label ?? "x"}`, label: "字段", kind: "custom",
@@ -201,5 +201,59 @@ describe("questionsForUser", () => {
   it("问题条数有上限——一次性甩几十个问题没人会答", () => {
     const fields = Array.from({ length: 30 }, (_, i) => f({ label: `字段${i}`, required: true }));
     expect(questionsForUser(fields, []).length).toBeLessThanOrEqual(12);
+  });
+});
+
+/**
+ * 断线续填。
+ *
+ * 记住「填过哪些句柄」是不够的：service worker 一被回收、页面一重渲染，句柄可能
+ * 变，记忆也可能整个丢失。唯一可靠的依据是**页面当前值**——重新采一次快照，有值
+ * 的就是填好的，剩下的才要处理。这样中途断线、换标签页、甚至换一天接着做都成立。
+ */
+describe("alreadyFilled", () => {
+  const f = (over: any) => ({ signature: `s-${over.label}`, label: over.label, type: "text", ...over });
+
+  it("页面上有值的算已填，不管我们记不记得填过", () => {
+    const fields = [f({ label: "姓名", value: "邓雨蝶" }), f({ label: "手机", value: "" })];
+    expect(stillOpen(fields, []).map((x: any) => x.label)).toEqual(["手机"]);
+  });
+
+  it("记忆和页面冲突时以页面为准——记得填过但页面是空的，要重填", () => {
+    const fields = [f({ label: "民族", value: "" })];
+    expect(stillOpen(fields, ["s-民族"]).map((x: any) => x.label)).toEqual(["民族"]);
+  });
+
+  it("只有空白的值不算填过", () => {
+    const fields = [f({ label: "民族", value: "   " })];
+    expect(stillOpen(fields, []).map((x: any) => x.label)).toEqual(["民族"]);
+  });
+});
+
+/**
+ * 探测返回 partial 时要补探，不能当成「探完了」。
+ *
+ * 真机上 partial 很常见（单控件约 2.8 秒，一批的预算有限）。把 partial 当完成，
+ * 那些没轮到的控件就永远没有选项，模型永远答不对它们。
+ */
+describe("unprobed", () => {
+  const w = (label: string, options: string[] = []) => ({ signature: `s-${label}`, label, type: "widget", options });
+
+  it("列出这一批里没被探到的", () => {
+    const wanted = ["s-A", "s-B", "s-C"];
+    const probed = [{ signature: "s-A", options: ["x"] }];
+    expect(unprobed(wanted, probed)).toEqual(["s-B", "s-C"]);
+  });
+
+  it("探到了但选项是空的，也算探过——那是真没有选项，重探还是空", () => {
+    expect(unprobed(["s-A"], [{ signature: "s-A", options: [] }])).toEqual([]);
+  });
+
+  it("超时的要补探——那不是「没有选项」，是没读完", () => {
+    expect(unprobed(["s-A"], [{ signature: "s-A", options: [], timedOut: true }])).toEqual(["s-A"]);
+  });
+
+  it("全探到了返回空", () => {
+    expect(unprobed(["s-A"], [{ signature: "s-A", options: ["x"] }])).toEqual([]);
   });
 });

@@ -5,6 +5,7 @@ import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { waitForFormReady } from '../application/ready.js';
 import { snapshotControls, elementForHandle, fillByHandle, widgetTargets } from '../application/snapshot.js';
+import { verifyByHandle } from '../application/readback.js';
 import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
@@ -32,6 +33,16 @@ import { syntheticImpl } from '../act/synthetic.js';
  *
  * chrome.debugger 只能在 service worker 里用，所以这里负责算视口坐标。
  */
+/**
+ * 给一个可能永不返回的 promise 兜个底。
+ *
+ * chrome.debugger.attach 在某些情况下既不成功也不失败（别的调试器占着、标签页
+ * 正在被丢弃），而 sendMessage 的 await 会一直挂着。真机上一个字段就能拖死整个
+ * fill 任务：日志里两次 progress=filling、没有结果，然后被派发层判超时。
+ */
+const withTimeout = (promise, ms) =>
+  Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
+
 async function cdpClick(el) {
   el.scrollIntoView?.({ block: 'center' });
   await new Promise((r) => setTimeout(r, 150));
@@ -41,7 +52,7 @@ async function cdpClick(el) {
   // 滚动之后仍然不在视口里（被固定头部盖住、或在另一个滚动容器里）就别点：
   // 坐标点击打在别的元素上比不点更糟。
   if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
-  const reply = await toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y });
+  const reply = await withTimeout(toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y }), 4000);
   return Boolean(reply?.ok);
 }
 
@@ -60,7 +71,7 @@ const widgetDriver = createPageWidgetDriver({
     await syntheticImpl.type(el, text, { fast: true });
     if (!el.value || !String(el.value).includes(String(text))) {
       // 合成打字没落到框里，改用 CDP 往当前焦点插入
-      await toBackground({ type: 'OFFICIAL_CDP_TYPE', text });
+      await withTimeout(toBackground({ type: 'OFFICIAL_CDP_TYPE', text }), 4000);
     }
   },
 });
@@ -158,48 +169,76 @@ async function execute(task) {
   }
 
   if (task.kind === 'fill') {
-    reportTaskProgress(task, { stage: 'filling', total: Array.isArray(task.payload?.values) ? task.payload.values.length : 0 });
-    const values = task.payload?.values || [];
-    // 模型是按快照的句柄作答的，先用快照定位；快照里没有的再交给旧的签名路径，
-    // 迁移期两套并存，任何一套能定位到就算数。
-    const bySnapshot = [];
-    const rest = [];
-    for (const item of values) {
-      (elementForHandle(document, item.signature, snapOpts()) ? bySnapshot : rest).push(item);
+    /**
+     * 填一个、回读确认一个，再继续。
+     *
+     * 以前是「一次全填完，最后统一校验」，三个毛病：
+     *   1. 中间任何一个控件挂住，整批都没有结果——真机上 12 个值填进 0 个
+     *   2. 校验走的是 form.js 的另一套签名，和作答用的快照句柄不是一回事，
+     *        于是「填进去了却被判失败」
+     *   3. 出了错说不清是哪一个坏的
+     *
+     * 现在每个字段单独走完「填 → 失焦 → 按同一个句柄回读」，结果当场定性。回读
+     * 是唯一算数的判据：模型说填了不算，赋值没抛错也不算，页面上读回来对了才算。
+     *
+     * 顺序上原生字段先做、widget 后做：点开面板会滚动页面，先做会干扰回读。
+     */
+    const values = Array.isArray(task.payload?.values) ? task.payload.values : [];
+    reportTaskProgress(task, { stage: 'filling', total: values.length });
+
+    const confirmed = [];
+    const failed = [];
+    const isWidget = (item) => {
+      const control = snapshotControls(document, snapOpts()).find((c) => c.handle === item.signature);
+      return control?.type === 'widget';
+    };
+
+    // 先分组，避免每个字段都重新采一次快照
+    const controls = new Map(snapshotControls(document, snapOpts()).map((c) => [c.handle, c]));
+    const natives = values.filter((v) => controls.get(v.signature) && controls.get(v.signature).type !== 'widget');
+    const widgetItems = values.filter((v) => controls.get(v.signature)?.type === 'widget');
+    const unknown = values.filter((v) => !controls.has(v.signature));
+
+    for (const [index, item] of natives.entries()) {
+      reportTaskProgress(task, { stage: 'filling', completed: index, total: values.length, label: controls.get(item.signature)?.context });
+      const result = fillByHandle(document, [item], snapOpts());
+      // 失焦再回读：带延迟校验的表单会在失焦时才决定要不要保留脚本写入的值，
+      // 不失焦就分不清「填进去了」和「填了又被清掉」。
+      document.activeElement?.blur?.();
+      await new Promise((r) => setTimeout(r, 120));
+      const check = verifyByHandle(document, [item], snapOpts());
+      if (check.confirmed.length) confirmed.push(item.signature);
+      else failed.push({ signature: item.signature, reason: result.skipped[0]?.reason || (check.missing.length ? 'handle_lost' : 'value_not_applied'), actual: check.mismatched[0]?.actual });
     }
-    const snap = fillByHandle(document, bySnapshot, snapOpts());
-    const legacy = fillApplicationFields(document, rest);
-    const filled = [...snap.filled, ...legacy.filled];
-    const skipped = [...snap.skipped, ...legacy.skipped];
 
-    // 失焦一次再回读：带延迟校验的表单（Moka 这类）会在失焦时才决定要不要
-    // 保留脚本写入的值，不回读就分不清「填进去了」和「填了又被清掉」。
-    document.activeElement?.blur?.();
-    const { stuck, lost } = verifyFilledFields(document, filled);
+    for (const [index, item] of widgetItems.entries()) {
+      reportTaskProgress(task, { stage: 'filling', completed: natives.length + index, total: values.length, label: controls.get(item.signature)?.context });
+      const applied = await applyWidgetValues(document, [item], {
+        driver: widgetDriver,
+        findContainer: (signature) => elementForHandle(document, signature, snapOpts()) || widgetContainerFor(document, signature),
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      const check = verifyByHandle(document, [item], snapOpts());
+      if (check.confirmed.length) confirmed.push(item.signature);
+      else failed.push({
+        signature: item.signature,
+        reason: applied.skipped[0]?.reason || 'value_not_applied',
+        options: applied.skipped[0]?.options,
+        actual: check.mismatched[0]?.actual,
+      });
+    }
 
-    // 纯 div 模拟的下拉/多选：fillApplicationFields 按 unsupported_widget 跳过
-    // 了它们，这里改用驱动器点开面板选中。放在原生字段之后，因为点开面板会滚动
-    // 页面，先做会干扰上面的回读。
-    const widgetTargets = [
-      ...snap.widgets,
-      ...skipped
-        .filter((item) => item.reason === 'unsupported_widget')
-        .map((item) => values.find((value) => value.signature === item.signature))
-        .filter(Boolean),
-    ];
-    const widgets = await applyWidgetValues(document, widgetTargets, {
-      driver: widgetDriver,
-      // 快照句柄优先；找不到再退回旧签名，迁移期两套并存
-      findContainer: (signature) => elementForHandle(document, signature, snapOpts()) || widgetContainerFor(document, signature),
-    });
+    for (const item of unknown) failed.push({ signature: item.signature, reason: 'handle_not_found' });
 
     const warnings = formWarnings(collectApplicationFields(document), document);
     return {
       ok: true,
-      filled: [...stuck, ...widgets.filled],
-      // widget 的失败带着可选项一起报上去，用户能看到「可选的是这几个」
-      skipped: [...skipped.filter((item) => item.reason !== 'unsupported_widget'), ...widgets.skipped],
-      lost, warnings, formReady: readiness.ready,
+      // filled 一律是**回读确认过**的，不是尝试数。上游据此判断进度，不能掺水。
+      filled: confirmed,
+      skipped: failed,
+      lost: [],
+      warnings,
+      formReady: readiness.ready,
       requiresUserFileSelection: warnings.includes('resume_requires_user_file_selection'),
     };
   }
@@ -237,7 +276,7 @@ async function execute(task) {
     await new Promise((r) => setTimeout(r, 350));
     const box = el.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) return { ok: false, error: 'element_not_visible' };
-    const shot = await toBackground({ type: 'OFFICIAL_CAPTURE' });
+    const shot = await withTimeout(toBackground({ type: 'OFFICIAL_CAPTURE' }), 15000);
     if (!shot?.ok) return { ok: false, error: shot?.error || 'capture_failed' };
     return {
       ok: true,
@@ -257,7 +296,7 @@ async function execute(task) {
   if (task.kind === 'cdp_click') {
     const { x, y } = task.payload || {};
     if (typeof x !== 'number' || typeof y !== 'number') return { ok: false, error: 'bad_coordinate' };
-    const clicked = await toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y });
+    const clicked = await withTimeout(toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y }), 6000);
     await new Promise((r) => setTimeout(r, 400));
     return { ok: Boolean(clicked?.ok), clickedAt: { x, y } };
   }

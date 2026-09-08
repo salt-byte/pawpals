@@ -24,6 +24,17 @@
  */
 const AUTO_OPEN_KINDS = ['inspect', 'probe', 'upload', 'fill', 'vision', 'cdp_click'];
 
+/**
+ * 超时后可以安全刷新页面的任务类型。
+ *
+ * 刷新是用来解开「标签页被丢弃、content script 没了」这个死局的，对只读任务没有
+ * 代价。但 fill 和 upload 已经在页面上留下了内容，一刷全没——真机上就是这么白干
+ * 的：前面填好的几个字段，因为后面一个控件挂住超时，整页被刷回空白。
+ *
+ * 所以写入类任务超时就如实上报超时，让上层重新采一次页面去核对实际填进去了什么。
+ */
+const RELOAD_SAFE_KINDS = ['inspect', 'probe', 'vision'];
+
 /** 任务 URL 的 origin；解析不了返回空串。 */
 function originOf(url) {
   try {
@@ -135,6 +146,12 @@ export function createOfficialDispatcher({ listTabs, sendToTab, openTab, reportR
     // 挂住多半是标签页被丢弃了。光等没用——content script 已经没了，PAGE_READY
     // 永远不会来。主动刷一下把它请回来，刷完的 PAGE_READY 会带着待办任务重来。
     if (result === TIMEOUT) {
+      // 写入类任务绝不刷页面：页面上已经有填好的内容，刷了就白干（见
+      // RELOAD_SAFE_KINDS）。如实上报超时，让上层重新采页面去核对实际状态。
+      if (!RELOAD_SAFE_KINDS.includes(task.kind)) {
+        reportResult(task.id, { ok: false, error: 'dispatch_timeout', timedOut: true });
+        return true;
+      }
       if (reloadTab && !reloadedFor.has(task.id)) {
         reloadedFor.add(task.id);
         try { await reloadTab(tabId); } catch { /* 标签页没了 */ }

@@ -400,3 +400,55 @@ describe('复用已经上线的标签页', () => {
     expect(opened).toHaveLength(1);
   });
 });
+
+/**
+ * 填写类任务超时**不能刷页面**。
+ *
+ * 刷新是为了把「标签页被丢弃、content script 没了」的死局解开，对只读任务
+ * （inspect/probe）没有代价。但 fill 和 upload 已经在页面上留下了内容，一刷全没
+ * ——真机上就是这么白干的：前面填好的几个字段，因为后面一个控件挂住超时，整页
+ * 被刷回空白。
+ *
+ * 超时了就如实上报超时，让上层重新采一次页面去核对到底填进去了什么。
+ */
+describe('填写类任务超时不刷页面', () => {
+  function harness(kind) {
+    const reloaded = [];
+    const reported = [];
+    return {
+      reloaded, reported,
+      run: () => createOfficialDispatcher({
+        listTabs: async () => [{ id: 1, url: 'https://form.example.com/a' }],
+        sendToTab: () => new Promise(() => {}),   // 永不返回，模拟挂住
+        openTab: async () => ({ id: 1 }),
+        reportResult: (id, result) => reported.push({ id, result }),
+        reloadTab: async (tabId) => { reloaded.push(tabId); },
+        sendTimeoutMs: 30,
+      }).accept({ id: `t-${kind}`, kind, url: 'https://form.example.com/a' }),
+    };
+  }
+
+  it('inspect 超时仍然刷页面——只读任务刷了不亏', async () => {
+    const h = harness('inspect');
+    await h.run();
+    expect(h.reloaded).toEqual([1]);
+  });
+
+  it('fill 超时不刷页面，已经填好的内容要留着', async () => {
+    const h = harness('fill');
+    await h.run();
+    expect(h.reloaded).toEqual([]);
+  });
+
+  it('upload 超时也不刷——刷掉就得重传', async () => {
+    const h = harness('upload');
+    await h.run();
+    expect(h.reloaded).toEqual([]);
+  });
+
+  it('fill 超时如实上报，让上层去核对页面实际状态', async () => {
+    const h = harness('fill');
+    await h.run();
+    expect(h.reported).toEqual([{ id: 't-fill', result: { ok: false, error: 'dispatch_timeout', timedOut: true } }]);
+  });
+});

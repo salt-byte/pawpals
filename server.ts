@@ -26,7 +26,7 @@ import { pickAutofillValue , parseAutofillProfile } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
 import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
-import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser } from "./server/apply-orchestrator.ts";
+import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser, unprobed } from "./server/apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
@@ -2577,6 +2577,8 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       let rejected: Array<{ signature: string; reason: string }> = [];
       let needsUser: any[] = [];
       let skippedCount = 0;
+      /** 最后一轮 fill 报回来的失败，用于收尾时把「控件操作失败」和「缺资料」分开。 */
+      let lastFailures: any[] = [];
       let lastInspection: any = inspection;
 
       const labelOf = (signature: string) => {
@@ -2643,14 +2645,25 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
          * 必须分批：单个控件真机约 2.8 秒。派发层会按任务自己声明的 budgetMs 等，
          * 但一次探太多仍然会拖长整轮。
          */
-        const probeList = widgetsToProbe(open);
-        for (let i = 0; i < probeList.length; i += 5) {
-          const probeTask = enqueueOfficialTask({
-            kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
-            payload: { signatures: probeList.slice(i, i + 5), budgetMs: 15000 },
-          });
-          const probed = await waitForOfficialTask(probeTask.id, 40_000);
-          if (Array.isArray(probed?.probed)) planFields = mergeProbedOptions(planFields, probed.probed);
+        let probeList = widgetsToProbe(open);
+        // 补探：探测返回 partial 很常见（单控件真机约 2.8 秒，一批预算有限）。把
+        // partial 当成「探完了」，没轮到的控件就永远没有选项，模型永远答不对它们。
+        for (let pass = 0; pass < 3 && probeList.length; pass += 1) {
+          const gotThisPass: any[] = [];
+          for (let i = 0; i < probeList.length; i += 5) {
+            const probeTask = enqueueOfficialTask({
+              kind: "probe", url: job_url, company: String(company || ""), title: String(title || ""),
+              payload: { signatures: probeList.slice(i, i + 5), budgetMs: 15000 },
+            });
+            const probed = await waitForOfficialTask(probeTask.id, 40_000);
+            if (Array.isArray(probed?.probed)) {
+              gotThisPass.push(...probed.probed);
+              planFields = mergeProbedOptions(planFields, probed.probed);
+            }
+          }
+          const left = unprobed(probeList, gotThisPass);
+          if (left.length === probeList.length) break; // 一个都没推进，再试也没用
+          probeList = left;
         }
 
         /**
@@ -2735,6 +2748,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
               filledThisRound += 1;
             }
             skippedCount += (filled.skipped?.length ?? 0) + (filled.lost?.length ?? 0);
+            lastFailures = [...lastFailures, ...(filled.skipped ?? [])];
 
             /**
              * 值不在选项里而被执行侧拒掉的，带着**真实选项**重问一次。
@@ -2777,20 +2791,41 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
        * 知道，不说明用户不知道。民族、学号、内推码都是他张口就能答的，而必填项
        * 沉默的代价更大——他以为填好了，一提交才被打回。
        */
-      const questions = questionsForUser(planFields, filledSignatures);
+      /**
+       * 收尾时按**页面实际状态**验收，不按我们记了什么。
+       *
+       * 重新采一次快照，有值的就是真的填上了。这样「filled=8」这种数字不会掺水
+       * ——之前它是「fill 任务返回的条数」，而 fill 返回 ok 只说明赋值没抛错。
+       */
+      const finalInspect = await waitForOfficialTask(
+        enqueueOfficialTask({ kind: "inspect", url: job_url, company: String(company || ""), title: String(title || "") }).id
+      );
+      const finalFields: any[] = Array.isArray(finalInspect?.snapshot)
+        ? finalInspect.snapshot.map((c: any) => ({ ...c, signature: c.handle, label: c.context }))
+        : planFields;
+
+      const done = finalFields.filter((f: any) => String(f.value ?? "").trim());
+      const open2 = stillOpen(finalFields, []);
+      // 三类，分开说清楚，不混成一句「还有 31 个没填」
+      const brokenReasons = new Map(lastFailures.map((x: any) => [x.signature, x.reason]));
+      const broken = open2.filter((f: any) => brokenReasons.has(f.signature));
+      const askable = questionsForUser(
+        open2.filter((f: any) => !brokenReasons.has(f.signature)),
+        []
+      );
       const askLine = (q: any) => `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
+      const label = (f: any) => String(f.context || f.label || "").slice(0, 12);
 
       const notes = [
         ...uploadNotes,
-        `已填写 ${filledCount}/${planFields.length} 个字段` + (filledLabels.length ? `（${filledLabels.slice(0, 12).join("、")}${filledLabels.length > 12 ? "…" : ""}）` : ""),
-        needsUser.length ? `${needsUser.length} 个控件探不到选项，得你自己选（${needsUser.map((f: any) => String(f.context || f.label || "").slice(0, 8)).join("、")}）` : "",
-        blockedCount ? `${blockedCount} 个字段因档案里查无依据被拦下` : "",
-        skippedCount ? `${skippedCount} 个字段因页面已变化未能定位` : "",
+        `页面上确认填好 ${done.length}/${finalFields.length} 个字段` +
+          (done.length ? `（${done.slice(0, 12).map(label).join("、")}${done.length > 12 ? "…" : ""}）` : ""),
+        broken.length ? `${broken.length} 个控件操作失败：${broken.slice(0, 6).map((f: any) => `${label(f)}(${brokenReasons.get(f.signature)})`).join("、")}` : "",
         warnings.includes("resume_requires_user_file_selection") ? "简历附件需要你在页面上手动选择" : "",
       ].filter(Boolean);
 
-      const askBlock = questions.length
-        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${questions.map(askLine).join("\n")}`
+      const askBlock = askable.length
+        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${askable.map(askLine).join("\n")}`
         : "";
       return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。${askBlock}\n\n请检查页面内容，确认无误后再回复“确认投递”。`;
 
