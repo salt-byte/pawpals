@@ -2991,6 +2991,13 @@ async function streamAgent(
         });
 
         for (const step of loop.executed) toolInjections.push(`【${step.name}】\n${step.result}`);
+        // 记下是模型选的还是没选：接入工具循环后，两条路（模型自选 / 正则兜底）
+        // 产生的下游日志一模一样，不记这一行就分不清到底谁触发的。
+        if (loop.executed.length) {
+          console.log(`[tool-loop] ${agent.id} 模型自选：${loop.executed.map((e) => e.name).join("、")}（${loop.rounds} 轮）`);
+        } else {
+          console.log(`[tool-loop] ${agent.id} 模型没选工具，交给规则兜底`);
+        }
         for (const bad of loop.rejected) {
           console.log(`[tool-loop] 拦下 ${bad.name}：${bad.reason}`);
         }
@@ -3002,6 +3009,7 @@ async function streamAgent(
 
     // apply_job: 模型没选工具时的兜底——按关键词判断（接入工具循环前的老路径）
     if (!calledApply && allowedToolNames.includes("apply_job")) {
+      if (/投递|投这|帮.*投|请.*投|apply/i.test(lastUserMsg)) console.log(`[tool-loop] ${agent.id} 走规则兜底触发 apply_job`);
       // 方式 1: AI 回复中的 APPLY_JOB:: 指令 + 用户确认
       const sessionKey = agent.id;
       const pending = pendingApplyCommands.get(sessionKey);
