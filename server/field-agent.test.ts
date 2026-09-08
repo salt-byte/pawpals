@@ -162,8 +162,10 @@ describe("buildFieldPrompt", () => {
       lastResult: { ok: false, reason: "option_not_found", actual: "" },
     });
     expect(p).toContain("请搜索");
-    expect(p).toContain("option_not_found");
     expect(p).toContain("第 2 次");
+    // 失败要翻译成「下一步该怎么改」，不是把机器码原样贴给模型——
+    // 真机上「失败（unsourced）」这种码让它去换值，而问题在出处上。
+    expect(p).toContain("面板打开了，但里面没找到");
   });
 
   it("列出可用动作，模型只能从里面选", () => {

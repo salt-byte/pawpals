@@ -34,10 +34,16 @@ const ALLOWED = new Set(["fill", "search", "probe", "give_up"]);
 export type FieldTools = {
   /** 探这个控件的可选项。 */
   probe: () => Promise<{ options: string[] }>;
-  /** 直接填值；返回页面回读到的实际值。 */
-  fill: (value: string) => Promise<{ value: string }>;
-  /** 在控件的搜索框里搜再选；返回页面回读到的实际值。 */
-  search: (query: string) => Promise<{ value: string }>;
+  /**
+   * 直接填值。返回页面回读到的实际值，以及**失败原因**。
+   *
+   * reason 一开始被我丢了：tools.fill 只取回读值，于是 panel_did_not_open /
+   * option_not_found / value_not_applied 三种完全不同的失败，在 trace 里长得
+   * 一模一样（都是「页面上是空」），根本没法判断该换什么办法。
+   */
+  fill: (value: string) => Promise<{ value: string; reason?: string }>;
+  /** 在控件的搜索框里搜再选。同上，失败原因要带回来。 */
+  search: (query: string) => Promise<{ value: string; reason?: string }>;
 };
 
 export type FieldOutcome = {
@@ -82,6 +88,10 @@ function describeFailure(last: { ok: boolean; reason?: string; actual?: string }
       return `上一次填进去了，但页面把它改写成了「${last.actual}」——多半是格式不对。换个写法再试（比如日期用 2025-07-01 这种完整格式）。`;
     case "value_not_applied":
       return "上一次填了但页面上没有变化——这个控件可能需要先搜索再选（用 search），或者根本点不动。";
+    case "panel_did_not_open":
+      return "上一次连下拉面板都没打开——这个控件点不动。换个动作试试，或者 give_up 交给用户。";
+    case "option_not_found":
+      return "上一次面板打开了，但里面没找到这个值。用 search 输入更短的关键词再看看（比如只输前几个字），或者看看页面说明里有没有「搜索\"其他\"」这类指示。";
     case "probed":
       return "刚探过可选项，见上面。";
     default:
@@ -201,14 +211,15 @@ export async function runFieldAgent(input: {
     attempts += 1;
     const result = action.action === "fill" ? await tools.fill(wanted) : await tools.search(wanted);
     const actual = String(result?.value ?? "");
+    const why = String(result?.reason ?? "");
 
     // 成功只以页面回读为准。模型说成了不算，工具返回 ok 也不算。
     if (applied(actual, wanted)) {
       note({ attempt, action: action.action, value: wanted, result: "成功" });
       return { ok: true, value: actual, attempts };
     }
-    note({ attempt, action: action.action, value: wanted, result: `页面上是「${actual}」` });
-    last = { ok: false, reason: actual ? "value_rewritten" : "value_not_applied", actual };
+    note({ attempt, action: action.action, value: wanted, result: `页面上是「${actual}」${why ? `（${why}）` : ""}` });
+    last = { ok: false, reason: actual ? "value_rewritten" : (why || "value_not_applied"), actual };
   }
 
   return { ok: false, value: String(last?.actual ?? ""), reason: last?.reason || "max_attempts", attempts };

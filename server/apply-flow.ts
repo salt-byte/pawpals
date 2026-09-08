@@ -230,21 +230,26 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
             },
             fill: async (value: string) => {
               intended.set(target.signature, value);
-              await runFill([{ signature: target.signature, value }], { task, runTask }, fields);
+              // 失败原因要一路带回循环：panel_did_not_open / option_not_found /
+              // value_not_applied 是三种完全不同的失败，该换的办法也不同。只报
+              // 「页面上是空」的话，模型看到的三种失败长得一模一样。
+              const result = await runFill([{ signature: target.signature, value }], { task, runTask }, fields);
               const after = await runTask(task("inspect"));
               if (after?.ok) fields = toFields(after.snapshot);
               const now = fields.find((f: any) => f.signature === target.signature);
-              return { value: String(now?.value ?? "") };
+              const failure = (result?.skipped ?? []).find((x: any) => x.signature === target.signature);
+              return { value: String(now?.value ?? ""), reason: failure?.reason };
             },
             // 扩展侧 selectOption 在精确匹配不到时本来就会走搜索框，所以搜索
             // 和填写走同一条路——区别只在模型给的是搜索词还是完整值。
             search: async (query: string) => {
               intended.set(target.signature, query);
-              await runFill([{ signature: target.signature, value: query }], { task, runTask }, fields);
+              const result = await runFill([{ signature: target.signature, value: query }], { task, runTask }, fields);
               const after = await runTask(task("inspect"));
               if (after?.ok) fields = toFields(after.snapshot);
               const now = fields.find((f: any) => f.signature === target.signature);
-              return { value: String(now?.value ?? "") };
+              const failure = (result?.skipped ?? []).find((x: any) => x.signature === target.signature);
+              return { value: String(now?.value ?? ""), reason: failure?.reason };
             },
           },
         });
