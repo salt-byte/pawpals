@@ -404,3 +404,142 @@ describe("探不到选项就换下一个", () => {
 
 /** 与 apply-flow 里的 CASCADE_PASSES 对应：每一遍最多重试一次被跳过的控件。 */
 const CASCADE_SWEEPS_MAX = 4;
+
+/**
+ * 给模型看的字段，和拿去校验的字段，必须是同一份。
+ *
+ * 真机：本科学校 / 研究生学校 被判成「模型答不出」，可档案里明明写着北京电影学院、
+ * 清华大学。链条是——fieldsForModel 对可搜索控件去掉 options（那是几千个选项的
+ * 下拉，只能搜不能枚举），模型据此答出学校名；但校验拿的是**原始字段**，还带着
+ * 被截断的 60 个选项，于是「北京电影学院」不在这 60 个里，判 option_not_allowed
+ * 丢弃。给模型看一份、拿另一份校验，答对了也会被自己拒掉。
+ */
+describe("模型看到的和校验用的是同一份字段", () => {
+  it("可搜索控件：模型答出的值不该被截断后的选项列表拒掉", async () => {
+    const asked: any[] = [];
+    const validatedAgainst: any[] = [];
+    const page = new Map<string, string>();
+    const school = { handle: "h-school", type: "widget", context: "本科学校",
+      options: Array.from({ length: 60 }, (_, i) => `学校${i}`), truncated: true };
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: [{ ...school, value: page.get("h-school") ?? "" }] };
+        }
+        if (task.kind === "probe") {
+          return { ok: true, probed: [{ signature: "h-school", options: school.options, truncated: true }] };
+        }
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: (task.payload?.values ?? []).map((v: any) => v.signature), skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async (ask: any[], all: any[]) => {
+        asked.push(...ask);
+        validatedAgainst.push(...all);
+        return [{ signature: "h-school", value: "北京电影学院" }];
+      },
+      readProfile: () => "本科：北京电影学院", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    await runApplyFlow(JOB, deps as any);
+
+    // 给模型看的那份已经去掉了 options（可搜索控件只能搜不能枚举）
+    expect(asked.find((f) => f.signature === "h-school")?.options).toBeUndefined();
+    // 拿去校验的必须是同一份，否则模型答对了也会被截断的选项列表拒掉
+    expect(validatedAgainst.find((f) => f.signature === "h-school")?.options).toBeUndefined();
+    expect(page.get("h-school")).toBe("北京电影学院");
+  });
+});
+
+/**
+ * 「模型答不出」和「控件操作失败」是两回事。
+ *
+ * 真机把 __ask_user__（内部标记）报进了【控件操作失败】。两类的处理完全不同：
+ * 前者要回头问用户，后者是我们自己驱动不了这个控件。混在一起，用户既不知道该
+ * 补什么，也不知道哪里真出了故障。
+ */
+describe("答不出 ≠ 操作失败", () => {
+  it("模型答不出的进「缺少用户资料」，不进「控件操作失败」", async () => {
+    const page = new Map<string, string>();
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: [{ handle: "h-x", type: "widget", context: "籍贯", required: true,
+              options: ["江苏", "浙江"], value: page.get("h-x") ?? "" }] };
+        }
+        if (task.kind === "probe") return { ok: true, probed: [{ signature: "h-x", options: ["江苏", "浙江"] }] };
+        return { ok: true, filled: [], skipped: [] };
+      },
+      askModel: async () => [],   // 档案里没有籍贯，答不出
+      readProfile: () => "档案", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    const out = await runApplyFlow(JOB, deps as any);
+    expect(out.broken.map((b: any) => b.field.context)).not.toContain("籍贯");
+    expect(out.questions.map((q: any) => q.label)).toContain("籍贯");
+    // 而且要把可选项带上，用户直接挑
+    expect(out.questions.find((q: any) => q.label === "籍贯")?.options).toEqual(["江苏", "浙江"]);
+  });
+});
+
+/**
+ * 有值 ≠ 填对了。
+ *
+ * 真机：「结束时间」最后是 1901-01-01，明显是垃圾——多半模型给了「至今」之类，
+ * 日期控件把它强转了。而它进了【已确认填写】，因为收尾只看「这个框有没有值」。
+ *
+ * 投给真实雇主的表单里，一个错的毕业时间比空着更糟：空着人家会问，错的直接就
+ * 当真了。所以要记住每个字段**打算填什么**，收尾时和页面上的实际值比一遍，对不
+ * 上的单独报出来让用户看一眼。
+ */
+describe("填错了要报出来，不能算成填好了", () => {
+  it("页面上的值和我们打算填的对不上时，单独列出来", async () => {
+    const page = new Map<string, string>();
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: [{ handle: "h-end", type: "text", context: "结束时间", value: page.get("h-end") ?? "" }] };
+        }
+        if (task.kind === "fill") {
+          // 页面把「至今」强转成了 1901-01-01
+          for (const v of task.payload?.values ?? []) page.set(v.signature, "1901-01-01");
+          return { ok: true, filled: [], skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async () => [{ signature: "h-end", value: "至今" }],
+      readProfile: () => "2025-07 至今", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    const out = await runApplyFlow(JOB, deps as any);
+    expect(out.mismatched.map((m: any) => m.field.context)).toContain("结束时间");
+    expect(out.mismatched[0]).toMatchObject({ intended: "至今", actual: "1901-01-01" });
+  });
+
+  it("填对了的不进这个列表", async () => {
+    const page = new Map<string, string>();
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: [{ handle: "h-n", type: "text", context: "姓名", value: page.get("h-n") ?? "" }] };
+        }
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: [], skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async () => [{ signature: "h-n", value: "张小明" }],
+      readProfile: () => "姓名: 张小明", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    const out = await runApplyFlow(JOB, deps as any);
+    expect(out.mismatched).toEqual([]);
+  });
+});

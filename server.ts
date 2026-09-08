@@ -2552,6 +2552,9 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           (outcome.confirmed.length
             ? `（${outcome.confirmed.slice(0, 12).map(label).join("、")}${outcome.confirmed.length > 12 ? "…" : ""}）`
             : ""),
+        outcome.mismatched.length
+          ? `⚠ ${outcome.mismatched.length} 个字段被页面改写了值，请核对：${outcome.mismatched.slice(0, 6).map((m: any) => `${label(m.field)}(想填「${m.intended}」→ 实际「${m.actual}」)`).join("、")}`
+          : "",
         outcome.broken.length
           ? `${outcome.broken.length} 个控件操作失败：${outcome.broken.slice(0, 6).map((b: any) => `${label(b.field)}(${b.reason})`).join("、")}`
           : "",

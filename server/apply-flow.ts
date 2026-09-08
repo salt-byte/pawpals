@@ -38,6 +38,8 @@ export type ApplyDeps = {
 export type ApplyOutcome = {
   /** 页面上回读确认有值的字段。 */
   confirmed: any[];
+  /** 有值、但和打算填的对不上（控件强转了值）。既不是填好，也不是没填。 */
+  mismatched: Array<{ field: any; intended: string; actual: string }>;
   /** 控件操作失败的（带原因）。 */
   broken: Array<{ field: any; reason: string }>;
   /** 档案里没有、要问用户的。 */
@@ -70,6 +72,9 @@ const CASCADE_PASSES = 4;
 /** 一轮里最多处理多少个自定义控件。逐个处理很慢，给个上限别让一轮无限长。 */
 const MAX_WIDGETS_PER_ROUND = 20;
 
+/** 内部标记：模型答不出（档案里没依据）。这不是控件故障，收尾时归到「要问用户」。 */
+const ASK_USER = "__ask_user__";
+
 
 
 /** 快照控件 → 决策用的字段。补 signature/label 两个别名，下游按它们认字段。 */
@@ -86,6 +91,14 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
 
   const uploadNotes: string[] = [];
   const failures = new Map<string, string>();
+  /**
+   * 每个字段**打算填什么**。
+   *
+   * 收尾只看「这个框有没有值」是不够的：真机上「结束时间」最后是 1901-01-01
+   * ——多半模型给了「至今」，日期控件强转了。有值就算填好，等于把垃圾值当成功。
+   * 投给真实雇主的表单里，错的毕业时间比空着更糟：空着人家会问，错的直接当真。
+   */
+  const intended = new Map<string, string>();
   // 账本：只记「声称的结果」和「页面实际状态」的差。这个项目栽过太多次
   // 「所有指标都说成功、只有结果是错的」，那类静默失败不记差就看不出来。
   const runLog = createRunLog(`${job.company}-${Date.now().toString(36)}`);
@@ -116,8 +129,13 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
      * 文本框批量走：它们之间没有依赖，探也不用探。
      */
     const texts = stillOpen(fields, []).filter((f: any) => f.type !== "widget");
-    const textValues = await askModel(fieldsForModel(texts), fields);
+    // 给模型看的和拿去校验的必须是同一份：fieldsForModel 会给可搜索控件去掉
+    // options（几千个选项只能搜不能枚举），若校验仍用原始字段，模型答对的值会被
+    // 截断后的选项列表判成 option_not_allowed 丢掉。真机上本科学校就是这么丢的。
+    const textAsk = fieldsForModel(texts);
+    const textValues = await askModel(textAsk, textAsk);
     if (textValues.length) {
+      for (const v of textValues) intended.set(v.signature, v.value);
       recordFailures(await runFill(textValues, { task, runTask }, fields), failures);
       const seen = await runTask(task("inspect"));
       if (seen?.ok) fields = toFields(seen.snapshot);
@@ -174,13 +192,15 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
           continue;
         }
 
-        const [value] = await askModel(fieldsForModel([current]), fields);
+        const ask = fieldsForModel([current]);
+        const [value] = await askModel(ask, ask);
         if (!value) {
           // 模型答不出（档案里没依据）：这不是控件失败，交给收尾按「缺资料」归类
-          failures.set(target.signature, "__ask_user__");
+          failures.set(target.signature, ASK_USER);
           continue;
         }
 
+        intended.set(value.signature, value.value);
         recordFailures(await runFill([value], { task, runTask }, fields), failures);
         widgetFilled += 1;
         filledThisSweep += 1;
@@ -220,15 +240,37 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
   // ── 验收：以页面实际状态为准 ─────────────────────────────────────
   // 上面每轮结束都刚采过一次，直接用，不再多派一个任务
   if (fresh?.ok) fields = toFields(fresh.snapshot);
-  const confirmed = fields.filter((f: any) => String(f.value ?? "").trim());
+  const has = (f: any) => String(f.value ?? "").trim();
+  const strip = (t: string) => String(t ?? "").replace(/\s+/g, "");
+  /**
+   * 有值、但和我们打算填的对不上——多半是控件把值强转了（日期控件把「至今」转成
+   * 1901-01-01）。这类要单独报：它既不是「填好了」，也不是「没填上」。
+   */
+  const mismatched = fields
+    .filter((f: any) => has(f) && intended.has(f.signature))
+    .filter((f: any) => !strip(f.value).includes(strip(intended.get(f.signature) as string)))
+    .map((f: any) => ({ field: f, intended: intended.get(f.signature) as string, actual: String(f.value) }));
+  const mismatchedSet = new Set(mismatched.map((m: any) => m.field.signature));
+  const confirmed = fields.filter((f: any) => has(f) && !mismatchedSet.has(f.signature));
   const open = stillOpen(fields, []);
+  /**
+   * 「模型答不出」和「控件操作失败」是两回事，分开报。
+   *
+   * 前者要回头问用户（而且要把可选项带上，他直接挑），后者是我们驱动不了这个控件。
+   * 混在一起，用户既不知道该补什么，也不知道哪里真出了故障——真机上 __ask_user__
+   * 这个内部标记就直接印进了【控件操作失败】。
+   */
+  const isAskUser = (signature: string) => failures.get(signature) === ASK_USER;
   const broken = open
-    .filter((f: any) => failures.has(f.signature))
+    .filter((f: any) => failures.has(f.signature) && !isAskUser(f.signature))
     .map((f: any) => ({ field: f, reason: failures.get(f.signature) as string }));
-  const questions = questionsForUser(open.filter((f: any) => !failures.has(f.signature)), []);
+  const questions = questionsForUser(
+    open.filter((f: any) => !failures.has(f.signature) || isAskUser(f.signature)),
+    []
+  );
 
   log(runLog.summary());
-  return { confirmed, broken, questions, uploadNotes, totalFields: fields.length, rounds, runLog: runLog.snapshot() };
+  return { confirmed, mismatched, broken, questions, uploadNotes, totalFields: fields.length, rounds, runLog: runLog.snapshot() };
 }
 
 /**
