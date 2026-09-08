@@ -151,3 +151,52 @@ describe('单选控件没选中时不能报出值', () => {
     expect(w.value).toBe('研究生');
   });
 });
+
+/**
+ * 单选按钮组的选项就摆在 DOM 里，不用探。
+ *
+ * 修好「没选中不能报出值」之后，那三个「是否有…经历」第一次被当成待填字段。但
+ * 它们是单选组，不是下拉框——探测走的是「点开面板读选项」，单选根本没有面板可开，
+ * 于是全部 no_options，白白吃掉尝试次数和时间预算，后面的字段跟着 dispatch_timeout。
+ * 那一轮从 25 掉到 12。
+ *
+ * 而它们的选项一直明摆在页面上：「是」「否」两个标签。采快照时直接读出来，
+ * 既不用探，模型也能当场作答。
+ */
+describe('单选组直接带出选项', () => {
+  it('两个选项都读出来', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">是否有获奖经历</div>
+        <div class="field-component">
+          <div class="x-radio-item"><span class="radio-label">是</span></div>
+          <div class="x-radio-item"><span class="radio-label">否</span></div>
+        </div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.options).toEqual(['是', '否']);
+  });
+
+  it('下拉框不受影响——它的选项要点开才有，仍然留空等探测', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">学历</div>
+        <div class="field-component"><div class="x-combo-value placeholder">请选择</div></div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.options).toEqual([]);
+  });
+
+  it('选项文字为空的不算', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">是否内推</div>
+        <div class="field-component">
+          <div class="x-radio-item"><span class="radio-label">是</span></div>
+          <div class="x-radio-item"><span class="radio-label"></span></div>
+        </div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.options).toEqual(['是']);
+  });
+});

@@ -102,6 +102,25 @@ const CHECKED_HINT = /checked|selected|active|current|is-on/i;
 const OPTION_ITEM = /radio|checkbox|option|choice|item/i;
 
 /**
+ * 单选/多选按钮组的选项——它们一直摆在页面上，不用点开面板去探。
+ *
+ * 修好「没选中不能报出值」之后，那三个「是否有…经历」第一次被当成待填字段，
+ * 结果探测走的是「点开面板读选项」，单选根本没有面板可开，全部 no_options，
+ * 白白吃掉尝试次数和时间预算，后面的字段跟着超时——那一轮从 25 掉到 12。
+ *
+ * 直接读出来：既省掉探测，模型也能当场作答。
+ */
+function inlineOptions(container) {
+  const items = [...container.querySelectorAll('*')].filter((node) =>
+    OPTION_ITEM.test(String(node.className || ''))
+  );
+  if (items.length < 2) return [];
+  const texts = items.map((node) => tidy(node.textContent)).filter(Boolean);
+  // 去重并保持顺序：嵌套结构会让同一个选项被数两遍
+  return [...new Set(texts)];
+}
+
+/**
  * widget 当前显示的值。没选值返回空串。
  *
  * 不能直接拿整个容器的文字：里面混着标题、提示、单位。取值区里的非占位符文本。
@@ -358,7 +377,7 @@ export function snapshotEntries(root = document, {
       handle: fieldSignature({ name: '', id: container.id, type: 'widget', label: context.split(' ')[0] || '' }),
       type: 'widget',
       required: [...container.querySelectorAll('[class*="required"]')].some((m) => tidy(m.textContent) === '*'),
-      options: [],
+      options: inlineOptions(container),
       value: widgetValue(container),
       context,
       hint: hintOf(container, context, textCache),
