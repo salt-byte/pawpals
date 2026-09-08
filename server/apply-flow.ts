@@ -48,6 +48,8 @@ export type ApplyOutcome = {
   mismatched: Array<{ field: any; intended: string; actual: string }>;
   /** 控件操作失败的（带原因）。 */
   broken: Array<{ field: any; reason: string }>;
+  /** 有条目、没识别出标签、还空着的——它们会从其它分类里漏掉，必须单独说。 */
+  unlabeled: any[];
   /** 档案里没有、要问用户的。 */
   questions: Array<{ signature: string; label: string; required: boolean; options?: string[] }>;
   /** 简历上传的结论，一句话。 */
@@ -324,8 +326,21 @@ async function runApplyFlowInner(job: JobRef, deps: ApplyDeps): Promise<ApplyOut
     []
   );
 
+  /**
+   * 有条目、没标签、还空着的字段。
+   *
+   * 真机上出生年月 / 本科毕业时间 / 研究生毕业时间就是这样：日期控件嵌套太深，
+   * 标签没找到，于是模型看不见它们是什么（填不了），questionsForUser 又会过滤掉
+   * 没标签的（问「请填写第 7 个框」毫无意义）——两头都不管，直接从报告里消失。
+   *
+   * 用户是看着页面发现「毕业时间还是空白」才问起来的。**报告里没有它，比报告里
+   * 说「填不上」更糟**：后者至少你知道要去补。所以单列一类，如实说「这几个我
+   * 没认出是什么，你去页面上看一眼」。
+   */
+  const unlabeled = open.filter((f: any) => !String(f.context || f.label || "").trim());
+
   log(runLog.summary());
-  return { confirmed, mismatched, broken, questions, uploadNotes, totalFields: fields.length, rounds, runLog: runLog.snapshot() };
+  return { confirmed, mismatched, broken, questions, unlabeled, uploadNotes, totalFields: fields.length, rounds, runLog: runLog.snapshot() };
 }
 
 /**

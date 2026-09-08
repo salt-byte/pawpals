@@ -64,6 +64,8 @@ console.log(`\n【已确认填写】${outcome.confirmed.length}`);
 for(const f of outcome.confirmed) console.log(`  ✓ ${lb(f).padEnd(18)} = ${String(f.value).slice(0,30)}`);
 console.log(`\n【值被页面改写】${outcome.mismatched.length}`);
 for(const m of outcome.mismatched) console.log(`  ⚠ ${lb(m.field).padEnd(18)} 想填「${m.intended}」→ 实际「${m.actual}」`);
+console.log(`\n【没认出标签】${outcome.unlabeled.length}`);
+for(const f of outcome.unlabeled) console.log(`  ? [${String(f.type)}] ${String(f.signature).slice(0,50)}`);
 console.log(`\n【控件操作失败】${outcome.broken.length}`);
 for(const b of outcome.broken) console.log(`  ✗ ${lb(b.field).padEnd(18)} ${b.reason}`);
 console.log(`\n【缺少用户资料】${outcome.questions.length}`);

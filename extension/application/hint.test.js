@@ -128,3 +128,47 @@ describe('裸文本节点不能丢', () => {
     expect(c.hint).toContain('再填写学校名称');
   });
 });
+
+/**
+ * 日期控件的标签藏在更深的地方。
+ *
+ * 真机实测：普通文本框从 input 到字段容器是 **5 层**，日期控件是 **7 层**——
+ * input-inner → x-inner-wrapper → x-input → datetime-label → x-datetime →
+ * fx-form-datetime → field-component。而向上找标签的窗口正好是 5 层，日期控件
+ * 恰好落在外面。
+ *
+ * 后果比「填不上」更糟：这三个字段（出生年月、本科毕业时间、研究生毕业时间）在
+ * 快照里**有条目但没标签**，模型看不见它们是什么所以填不了，而「问用户」那一步又
+ * 会过滤掉没标签的字段——两头都不管，就这么从报告里消失了。
+ */
+describe('嵌套很深的控件也要找得到标签', () => {
+  it('日期控件（7 层）的标签能取到', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-label"><span class="field-required">*</span><div class="field-name">出生年月</div></div>
+        <div class="field-component">
+          <div class="fx-form-datetime">
+            <div class="x-datetime datetime-trigger-input">
+              <div class="datetime-label">
+                <div class="x-input x-date-input">
+                  <div class="x-inner-wrapper"><input class="input-inner" name="birth"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`);
+    const [c] = snapshotControls(root, { labelSelector: '.field-name' });
+    expect(c.context).toBe('出生年月');
+  });
+
+  it('普通文本框（5 层）不受影响', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-label"><div class="field-name">姓名</div></div>
+        <div class="field-component"><div class="x-input"><div class="x-inner-wrapper"><input name="n"></div></div></div>
+      </div>`);
+    const [c] = snapshotControls(root, { labelSelector: '.field-name' });
+    expect(c.context).toBe('姓名');
+  });
+});

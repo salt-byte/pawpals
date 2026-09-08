@@ -625,3 +625,49 @@ describe("单字段循环的校验也用模型看的那份", () => {
     expect(page.get("h-school")).toBe("北京电影学院");
   });
 });
+
+/**
+ * 没标签的字段不能静默消失。
+ *
+ * 真机：出生年月 / 本科毕业时间 / 研究生毕业时间 三个字段在快照里**有条目但没
+ * 标签**（日期控件嵌套 7 层，超出了找标签的窗口）。结果是——模型看不见它们是
+ * 什么所以填不了，questionsForUser 又会过滤掉没标签的字段（问「请填写第 7 个框」
+ * 毫无意义），于是两头都不管，直接从报告里消失。
+ *
+ * 用户是看着页面发现「毕业时间还是空白」才问起来的。报告里没有它，比报告里说
+ * 「填不上」更糟——后者至少你知道要去补。
+ */
+describe("识别不出标签的字段要单独报出来", () => {
+  it("有条目、没标签、还空着的，单列一类", async () => {
+    const page = new Map<string, string>();
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [], snapshot: [
+            { handle: "h-name", type: "text", context: "姓名", value: page.get("h-name") ?? "" },
+            { handle: "h-mystery", type: "text", context: "", value: "" },
+          ] };
+        }
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: [], skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async () => [{ signature: "h-name", value: "张小明" }],
+      decideField: async () => ({ action: "give_up", reason: "n/a" }),
+      validateValue: () => ({ ok: true }),
+      readProfile: () => "姓名: 张小明", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    const out = await runApplyFlow(JOB, deps as any);
+    expect(out.unlabeled).toHaveLength(1);
+    expect(out.unlabeled[0].signature).toBe("h-mystery");
+  });
+
+  it("有标签的不进这一类", async () => {
+    const h = harness();
+    const out = await runApplyFlow(JOB, h.deps as any);
+    expect(out.unlabeled).toEqual([]);
+  });
+});

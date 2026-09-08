@@ -33,7 +33,20 @@ const VALUE_AREA_HINT = /value|combo|select|picker|input|control|upload|checkbox
 
 const DEFAULT_CONTEXT_LIMIT = 200;
 const DEFAULT_MAX_CONTROLS = 200;
-const CONTAINER_DEPTH = 5;
+/**
+ * 向上找标签最多走几层。
+ *
+ * 真机量过：普通文本框从 input 到字段容器是 5 层，而日期控件是 **7 层**——
+ * input-inner → x-inner-wrapper → x-input → datetime-label → x-datetime →
+ * fx-form-datetime → field-component。原来定的 5 让日期控件恰好落在窗口外面，
+ * 出生年月 / 本科毕业时间 / 研究生毕业时间三个字段因此**有条目但没标签**：模型
+ * 看不见它们是什么所以填不了，「问用户」那一步又会过滤掉没标签的字段，两头都
+ * 不管，直接从报告里消失。
+ *
+ * 放宽到 10 只影响「精确标签」的搜索范围；兜底那条（第一个有文字的祖先）仍然
+ * 停在最内层，不会因为放宽而抓到更远的无关文案。
+ */
+const CONTAINER_DEPTH = 10;
 /**
  * 抓原文时最多走多少个节点。
  *
