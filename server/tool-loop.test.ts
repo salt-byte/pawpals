@@ -157,3 +157,35 @@ describe("写回历史的形状", () => {
     expect(toolMsg).toMatchObject({ tool_call_id: "c1", content: "done" });
   });
 });
+
+/**
+ * provider 返回的原始工具调用要原样回放。
+ *
+ * 真机 400：「Function call is missing a thought_signature in functionCall parts」。
+ * Gemini 会在 extra_content.google.thought_signature 里塞一段不透明签名，我们解析
+ * 时只留了 id/name/args 把它丢了，回放时自己拼一个新的——第一轮好好的，第二轮炸。
+ *
+ * 这类 provider 特有的字段不该由循环去理解，原样带回去就好。
+ */
+describe("原始工具调用原样回放", () => {
+  it("有 raw 就用 raw，不自己拼", async () => {
+    const raw = { id: "c1", type: "function", extra_content: { google: { thought_signature: "SIG" } },
+      function: { name: "apply_job", arguments: '{"job_url":"https://a.com"}' } };
+    const seen: any[] = [];
+    await runToolLoop({
+      messages: [{ role: "user", content: "投递" }],
+      tools: [{ name: "apply_job", description: "", parameters: {} }],
+      allowed: ["apply_job"],
+      callModel: async (history) => {
+        seen.push(history);
+        return seen.length === 1
+          ? { toolCalls: [{ id: "c1", name: "apply_job", args: { job_url: "https://a.com" }, raw }] }
+          : { content: "好了" };
+      },
+      executeTool: async () => "done",
+      maxRounds: 3,
+    });
+    const assistant = seen[1].find((m: any) => m.role === "assistant");
+    expect(assistant.tool_calls[0]).toBe(raw);
+  });
+});

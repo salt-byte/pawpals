@@ -20,7 +20,19 @@
  */
 export type ToolSpec = { name: string; description: string; parameters: Record<string, unknown> };
 
-export type ToolCall = { id: string; name: string; args: Record<string, unknown> };
+export type ToolCall = {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  /**
+   * 服务端返回的原始工具调用对象。有就原样回放，没有才自己拼。
+   *
+   * Gemini 会在 extra_content.google.thought_signature 里塞一段不透明签名，
+   * 回放时少了它第二轮直接 400。这类 provider 特有的字段不该由循环去理解，
+   * 原样带回去就好。
+   */
+  raw?: unknown;
+};
 
 export type ModelReply = { content?: string; toolCalls?: ToolCall[] };
 
@@ -66,11 +78,13 @@ export async function runToolLoop(input: {
     history.push({
       role: "assistant",
       content: reply?.content ?? "",
-      tool_calls: calls.map((call) => ({
-        id: call.id,
-        type: "function",
-        function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
-      })),
+      tool_calls: calls.map((call) =>
+        call.raw ?? {
+          id: call.id,
+          type: "function",
+          function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
+        }
+      ),
     });
 
     for (const call of calls) {

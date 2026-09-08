@@ -100,7 +100,20 @@ export type ChatCompletionResult = {
    * 一段 JSON 字符串，模型偶尔会写出解析不了的东西，那种情况当成没选工具处理，
    * 不让一次坏输出把整轮打断。
    */
-  toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    /**
+     * 服务端返回的**原始**工具调用对象，原样保留。
+     *
+     * 回放到对话历史时必须用它，不能拿 id/name/args 重新拼一个：Gemini 会在
+     * extra_content.google.thought_signature 里塞一段不透明签名，少了它第二轮
+     * 直接 400「Function call is missing a thought_signature」。这类字段是
+     * provider 特有的，今天没有的明天也可能有——所以原样留着，别自作聪明。
+     */
+    raw: unknown;
+  }>;
   model: string;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 };
@@ -180,7 +193,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
             return null;
           }
           const name = String(call?.function?.name || "");
-          return name ? { id: String(call?.id || name), name, args } : null;
+          return name ? { id: String(call?.id || name), name, args, raw: call } : null;
         })
         .filter(Boolean)
     : undefined;
