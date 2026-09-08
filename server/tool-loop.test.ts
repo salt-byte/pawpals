@@ -117,3 +117,43 @@ describe("runToolLoop", () => {
     expect(out.content).toContain("投递失败");
   });
 });
+
+/**
+ * 写回历史的工具调用必须是接口认的形状。
+ *
+ * 真机 400「Request contains an invalid argument」：第一轮好好的，第二轮就炸。
+ * 因为把工具调用记回对话历史时用的是循环内部的简化形状 {id, name, args}，而接口
+ * 要的是 OpenAI 原始格式 {id, type:"function", function:{name, arguments}}——
+ * arguments 还得是 JSON **字符串**，不是对象。
+ *
+ * 单测里 callModel 是假的，怎么写都不会报错，所以这一条必须显式断言形状。
+ */
+describe("写回历史的形状", () => {
+  it("assistant 消息里的 tool_calls 用 OpenAI 原始格式", async () => {
+    const seen: any[] = [];
+    await runToolLoop({
+      messages: [{ role: "user", content: "投递" }],
+      tools: [{ name: "apply_job", description: "", parameters: {} }],
+      allowed: ["apply_job"],
+      callModel: async (history) => {
+        seen.push(history);
+        return seen.length === 1
+          ? { toolCalls: [{ id: "c1", name: "apply_job", args: { job_url: "https://a.com" } }] }
+          : { content: "好了" };
+      },
+      executeTool: async () => "done",
+      maxRounds: 3,
+    });
+
+    const second = seen[1];
+    const assistant = second.find((m: any) => m.role === "assistant");
+    expect(assistant.tool_calls[0]).toEqual({
+      id: "c1",
+      type: "function",
+      function: { name: "apply_job", arguments: '{"job_url":"https://a.com"}' },
+    });
+    // tool 结果消息也要带上 tool_call_id，接口靠它对上是哪一次调用
+    const toolMsg = second.find((m: any) => m.role === "tool");
+    expect(toolMsg).toMatchObject({ tool_call_id: "c1", content: "done" });
+  });
+});

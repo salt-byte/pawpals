@@ -60,7 +60,18 @@ export async function runToolLoop(input: {
       return { content: String(reply?.content ?? ""), executed, rejected, stoppedBy: "model", rounds: round };
     }
 
-    history.push({ role: "assistant", content: reply?.content ?? "", tool_calls: calls });
+    // 写回历史时必须还原成接口认的 OpenAI 形状：{id, type, function:{name, arguments}}，
+    // 且 arguments 是 JSON **字符串**。用循环内部的简化形状 {id, name, args} 写回去，
+    // 第一轮不报错、第二轮直接 400（真机上就是这样）。
+    history.push({
+      role: "assistant",
+      content: reply?.content ?? "",
+      tool_calls: calls.map((call) => ({
+        id: call.id,
+        type: "function",
+        function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
+      })),
+    });
 
     for (const call of calls) {
       // 两道白名单：模型看得见的（declared）和这个 agent 被分配的（allowSet）。
