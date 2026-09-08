@@ -5,7 +5,7 @@ import { applyFileUploads } from '../application/file-upload.js';
 import { applyWidgetValues, createPageWidgetDriver, probeWidgets } from '../application/widget.js';
 import { waitForFormReady } from '../application/ready.js';
 import { snapshotControls, elementForHandle, fillByHandle, widgetTargets } from '../application/snapshot.js';
-import { verifyByHandle } from '../application/readback.js';
+import { verifyByHandle, dismissPanels } from '../application/readback.js';
 import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
@@ -162,6 +162,10 @@ async function execute(task) {
   const fields = collectApplicationFields(document);
   if (task.kind === 'inspect') {
     reportTaskProgress(task, { stage: 'inspecting' });
+    // 先收起浮层再采：开着的下拉面板里的选项会被当成表单字段采进来，每个都
+    // 「有值」（俄语四级 = 俄语四级），把 39 个字段虚报成 48 甚至 52 个。
+    dismissPanels(document);
+    await new Promise((r) => setTimeout(r, 200));
     // provider 以适配器为准：它是真机抓过 DOM 才收录的，比 URL 启发式可靠
     const provider = siteSelectors().provider !== 'generic'
       ? siteSelectors().provider

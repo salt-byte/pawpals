@@ -77,3 +77,30 @@ describe('verifyByHandle', () => {
     expect(verifyByHandle(root(), [])).toEqual({ confirmed: [], mismatched: [], missing: [] });
   });
 });
+
+import { dismissPanels } from './readback.js';
+
+/**
+ * 采快照前先收起浮层。
+ *
+ * 快照已经会跳过浮层里的东西，但那依赖认得出「什么是浮层」——真机上仍然漏掉过
+ * 一类（一轮报 48 个字段，实际 39）。与其继续往选择器里加 class，不如在采之前
+ * 主动把浮层关掉：关掉了就没有认不认得出的问题。
+ *
+ * 关不掉也不影响正确性，跳过浮层那道防线还在——这是两道，不是替换。
+ */
+describe('dismissPanels', () => {
+  it('按 Esc 并点一下空白处', () => {
+    const keys = [];
+    const clicks = [];
+    document.body.addEventListener('keydown', (e) => keys.push(e.key));
+    document.body.addEventListener('mousedown', () => clicks.push(1));
+    dismissPanels(document);
+    expect(keys).toContain('Escape');
+    expect(clicks.length).toBeGreaterThan(0);
+  });
+
+  it('页面没有 body 时不炸', () => {
+    expect(() => dismissPanels({})).not.toThrow();
+  });
+});

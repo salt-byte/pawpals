@@ -42,3 +42,26 @@ export function verifyByHandle(root = document, values = [], opts = {}) {
   }
   return { confirmed, mismatched, missing };
 }
+
+/**
+ * 收起页面上打开着的浮层。
+ *
+ * 快照已经会跳过浮层里的东西，但那依赖认得出「什么是浮层」——真机上仍然漏掉过
+ * 一类（一轮报 48 个字段，实际 39，多出来的是某个没被选择器覆盖的面板里的选项）。
+ * 与其继续往选择器里加 class 名，不如在采快照之前主动把浮层关掉：关掉了就没有
+ * 认不认得出的问题。
+ *
+ * 这是两道防线不是替换：关不掉时，跳过浮层那道还在。
+ * 尽力而为，任何异常都不该打断采集。
+ */
+export function dismissPanels(root = document) {
+  try {
+    const body = root?.body;
+    if (!body) return;
+    body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  } catch {
+    // 收不起来不影响正确性
+  }
+}
