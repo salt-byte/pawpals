@@ -26,6 +26,7 @@ import { pickAutofillValue , parseAutofillProfile } from "./server/autofill.ts";
 import { planApplicationStep } from "./server/application-flow.ts";
 import { boardInstruction } from "./server/job-pipeline.ts";
 import { buildAutofillPrompt, validateAutofillPlan } from "./server/autofill-plan.ts";
+import { buildFieldPrompt } from "./server/field-agent.ts";
 import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser, unprobed } from "./server/apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
@@ -2529,6 +2530,41 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
               console.warn("[autofill] LLM 取值失败:", error);
               return [];
             }
+          },
+          /**
+           * 单字段循环的决策器：看着上一次的失败原因决定下一步。
+           *
+           * 这是「自己想办法」的落点——页面写的说明（「请搜索"其他"并选择」）、
+           * 上次失败的原因、真实选项，全在 prompt 里，由它决定 fill / search /
+           * probe / give_up。
+           */
+          decideField: async (ctx: any) => {
+            try {
+              return await chatExtractJson<any>(
+                "你在填一个网申表单的框。只输出 JSON，不要解释。",
+                buildFieldPrompt(ctx),
+                { max_tokens: 600, reasoning_effort: "minimal" }
+              );
+            } catch (error) {
+              console.warn("[apply] 字段决策失败:", error);
+              return { action: "give_up", reason: "model_unavailable" };
+            }
+          },
+          /**
+           * 反编造的闸，挡在写入之前。
+           *
+           * 交给模型自己想办法之后它可以给出任意值，这道校验若留在循环外面就等于
+           * 没有了。复用同一套规则：值必须能在档案原文里指出出处，有选项时必须
+           * 命中其一。
+           */
+          validateValue: (value: string, field: any, source: string) => {
+            const plan = validateAutofillPlan(
+              [{ signature: field.signature, value, source: source || value }],
+              [field],
+              profileText
+            );
+            if (plan.values.length) return { ok: true };
+            return { ok: false, reason: plan.rejected[0]?.reason || "rejected" };
           },
           readProfile: () => profileText,
           findResume: () => pickResumeFile({

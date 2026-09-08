@@ -51,12 +51,29 @@ function harness(overrides: any = {}) {
     readFile: () => Buffer.from("x"),
     fileSize: () => 100,
     log: () => {},
+    ...defaultAgentSeams(overrides.answer),
     ...overrides.deps,
   };
   return { calls, page, deps, inspectCount: () => inspectCount };
 }
 
 const JOB = { url: "https://form.example.com/a", company: "帆软", title: "秋招" };
+
+/**
+ * 测试里的默认接缝：模型直接给出档案里的值，闸门一律放行。
+ *
+ * 单字段循环把「决定下一步做什么」和「这个值许不许写」分成了两个注入点。绝大多数
+ * 用例关心的是编排（顺序、级联、断线），所以这里给出最简单的实现；要测循环本身的
+ * 恢复行为，看 field-agent.test.ts。
+ */
+const defaultAgentSeams = (answer?: (field: any) => string) => ({
+  decideField: async (ctx: any) => {
+    const v = answer ? answer(ctx.field) : (ctx.options?.[0] ?? ctx.field?.options?.[0] ?? "");
+    return v ? { action: "fill", value: v, source: "档案" } : { action: "give_up", reason: "无依据" };
+  },
+  validateValue: () => ({ ok: true }),
+});
+
 
 describe("runApplyFlow 顺序", () => {
   it("先采页面；自定义控件一定是先探到选项才问模型", async () => {
@@ -76,7 +93,12 @@ describe("runApplyFlow 顺序", () => {
   });
 
   it("一轮都没填进去就停，不空转", async () => {
-    const h = harness({ askModel: async () => [] });
+    // 文本框和自定义控件走两条路：askModel 管文本框，decideField 管控件。
+    // 「模型什么都答不出」要两边都答不出才成立。
+    const h = harness({
+      askModel: async () => [],
+      deps: { decideField: async () => ({ action: "give_up", reason: "无依据" }) },
+    });
     await runApplyFlow(JOB, h.deps as any);
     expect(h.calls.filter((k) => k === "fill")).toHaveLength(0);
   });
@@ -282,6 +304,7 @@ describe("级联：填完父级当场补探", () => {
         readFile: () => Buffer.from(""),
         fileSize: () => 0,
         log: () => {},
+        ...defaultAgentSeams(),
       },
     };
   }
@@ -336,6 +359,7 @@ describe("级联：填完父级当场补探", () => {
         fields.filter((f: any) => f.options?.length).map((f: any) => ({ signature: f.signature, value: f.options[0] })),
       readProfile: () => "档案", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      ...defaultAgentSeams(),
     };
     await runApplyFlow(JOB, deps as any);
     expect(page.get("h-cat")).toBe("产品类");
@@ -391,6 +415,7 @@ describe("探不到选项就换下一个", () => {
         fields.filter((f: any) => f.options?.length).map((f: any) => ({ signature: f.signature, value: f.options[0] })),
       readProfile: () => "档案", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      ...defaultAgentSeams(),
     };
     await runApplyFlow(JOB, deps as any);
 
@@ -443,6 +468,8 @@ describe("模型看到的和校验用的是同一份字段", () => {
       },
       readProfile: () => "本科：北京电影学院", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      decideField: async () => ({ action: "fill", value: "北京电影学院", source: "档案" }),
+      validateValue: () => ({ ok: true }),
     };
     await runApplyFlow(JOB, deps as any);
 
@@ -477,6 +504,7 @@ describe("答不出 ≠ 操作失败", () => {
       askModel: async () => [],   // 档案里没有籍贯，答不出
       readProfile: () => "档案", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      ...defaultAgentSeams(),
     };
     const out = await runApplyFlow(JOB, deps as any);
     expect(out.broken.map((b: any) => b.field.context)).not.toContain("籍贯");
@@ -515,6 +543,7 @@ describe("填错了要报出来，不能算成填好了", () => {
       askModel: async () => [{ signature: "h-end", value: "至今" }],
       readProfile: () => "2025-07 至今", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      ...defaultAgentSeams(),
     };
     const out = await runApplyFlow(JOB, deps as any);
     expect(out.mismatched.map((m: any) => m.field.context)).toContain("结束时间");
@@ -538,6 +567,7 @@ describe("填错了要报出来，不能算成填好了", () => {
       askModel: async () => [{ signature: "h-n", value: "张小明" }],
       readProfile: () => "姓名: 张小明", findResume: () => null,
       readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+      ...defaultAgentSeams(),
     };
     const out = await runApplyFlow(JOB, deps as any);
     expect(out.mismatched).toEqual([]);

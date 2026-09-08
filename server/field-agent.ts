@@ -23,8 +23,9 @@
  */
 
 export type FieldAction =
-  | { action: "fill"; value: string }
-  | { action: "search"; value: string }
+  /** source：这个值出自档案原文的哪一段。反编造的闸靠它——引不出原文就不放行。 */
+  | { action: "fill"; value: string; source?: string }
+  | { action: "search"; value: string; source?: string }
   | { action: "probe" }
   | { action: "give_up"; reason?: string };
 
@@ -85,9 +86,10 @@ export function buildFieldPrompt(input: {
     "",
     "规则：",
     "1. 只做映射，不做创作。档案里没有的信息不要编——留空永远好过填错。",
-    "2. 有可选项时，value 必须是其中之一。",
-    "3. 上一次失败了就换个办法，不要原样再来一遍：页面写的说明里常常就有答案。",
-    "4. 只输出 JSON，不要解释。",
+    "2. fill / search 必须给 source：档案原文里**逐字出现**的一段，用来证明这个值有出处。引不出原文的，选 give_up。",
+    "3. 有可选项时，value 必须是其中之一。",
+    "4. 上一次失败了就换个办法，不要原样再来一遍：页面写的说明里常常就有答案。",
+    "5. 只输出 JSON，不要解释。",
   ].filter(Boolean).join("\n");
 }
 
@@ -104,7 +106,7 @@ export async function runFieldAgent(input: {
    *
    * 没传 validate 时一律不放行：闸门不能因为调用方忘了传就消失。
    */
-  validate?: (value: string, field: any) => { ok: boolean; reason?: string };
+  validate?: (value: string, field: any, source: string) => { ok: boolean; reason?: string };
   /** 决策器。真实实现是一次模型调用；测试里注入假的。 */
   decide: (ctx: {
     field: any; profile: string; attempt: number;
@@ -144,7 +146,7 @@ export async function runFieldAgent(input: {
     // 闸门：档案里查无依据、或不在真实选项里的值，绝不写进页面。
     // 没传 validate 就一律不放行——它不能因为调用方忘了传就消失。
     if (!validate) return { ok: false, value: "", reason: "no_validator", attempts };
-    const gate = validate(wanted, field);
+    const gate = validate(wanted, field, String((action as any).source ?? ""));
     if (!gate.ok) {
       // 把拦下的原因告诉模型，让它换个答案，而不是原样再来一遍
       last = { ok: false, reason: gate.reason || "rejected", actual: "" };

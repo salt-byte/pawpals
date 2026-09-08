@@ -20,6 +20,7 @@ import {
 } from "./apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./upload-plan.ts";
 import { createRunLog } from "./apply-log.ts";
+import { runFieldAgent } from "./field-agent.ts";
 
 export type JobRef = { url: string; company: string; title: string };
 
@@ -28,6 +29,10 @@ export type ApplyDeps = {
   runTask: (task: { kind: string; url: string; company: string; title: string; payload?: any }, timeoutMs?: number) => Promise<any>;
   /** 问模型要值。已经过完校验，返回的都是可填的。 */
   askModel: (fields: any[], allFields: any[]) => Promise<Array<{ signature: string; value: string }>>;
+  /** 单字段循环的决策器：看着失败原因决定下一步做什么。 */
+  decideField: (ctx: any) => Promise<any>;
+  /** 反编造的闸：值有没有出处、是不是真实选项之一。挡在写入之前。 */
+  validateValue: (value: string, field: any, source: string) => { ok: boolean; reason?: string };
   readProfile: () => string;
   findResume: () => string | null;
   readFile: (path: string) => Buffer;
@@ -72,6 +77,9 @@ const CASCADE_PASSES = 4;
 /** 一轮里最多处理多少个自定义控件。逐个处理很慢，给个上限别让一轮无限长。 */
 const MAX_WIDGETS_PER_ROUND = 20;
 
+/** 单个字段最多试几次。真实雇主的表单，不能无限试。 */
+const FIELD_ATTEMPTS = 3;
+
 /** 内部标记：模型答不出（档案里没依据）。这不是控件故障，收尾时归到「要问用户」。 */
 const ASK_USER = "__ask_user__";
 
@@ -85,7 +93,7 @@ const toFields = (snapshot: any[]) =>
 const fillBudget = (n: number) => Math.min(180_000, 20_000 + n * 15_000);
 
 export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyOutcome> {
-  const { runTask, askModel, readProfile, findResume, readFile, fileSize, log } = deps;
+  const { runTask, askModel, decideField, validateValue, readProfile, findResume, readFile, fileSize, log } = deps;
   const task = (kind: string, payload?: any) => ({ kind, url: job.url, company: job.company, title: job.title, payload });
   const profileText = readProfile();
 
@@ -192,21 +200,57 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
           continue;
         }
 
-        const ask = fieldsForModel([current]);
-        const [value] = await askModel(ask, ask);
-        if (!value) {
-          // 模型答不出（档案里没依据）：这不是控件失败，交给收尾按「缺资料」归类
-          failures.set(target.signature, ASK_USER);
-          continue;
-        }
+        /**
+         * 交给单字段循环：填砸了带着失败原因重来，而不是记下就放弃。
+         *
+         * 原先是「问一次、填一次、失败记下」。真机上这样丢掉的：本科学校
+         * option_not_found（页面上明写着「请搜索"其他"并选择」）、获奖时间换个
+         * 日期格式就成、结束时间「至今」被控件转成 1901-01-01、研究生成绩排名
+         * 想填前10% 实际选中前5%。这些恢复办法开放式且随页面而变，写不完。
+         *
+         * 闸门没有松：值仍要过 validateAutofillPlan，而且挡在写入之前（见
+         * field-agent.ts 的 validate）。
+         */
+        const outcome = await runFieldAgent({
+          field: current,
+          profile: profileText,
+          maxAttempts: FIELD_ATTEMPTS,
+          decide: (ctx) => decideField(ctx),
+          validate: (value: string, _f: any, source: string) => validateValue(value, current, source),
+          tools: {
+            probe: async () => {
+              const r = await runTask(task("probe", { signatures: [target.signature], budgetMs: 15_000 }), 40_000);
+              const hit = r?.probed?.[0];
+              return { options: hit?.options ?? [] };
+            },
+            fill: async (value: string) => {
+              intended.set(target.signature, value);
+              await runFill([{ signature: target.signature, value }], { task, runTask }, fields);
+              const after = await runTask(task("inspect"));
+              if (after?.ok) fields = toFields(after.snapshot);
+              const now = fields.find((f: any) => f.signature === target.signature);
+              return { value: String(now?.value ?? "") };
+            },
+            // 扩展侧 selectOption 在精确匹配不到时本来就会走搜索框，所以搜索
+            // 和填写走同一条路——区别只在模型给的是搜索词还是完整值。
+            search: async (query: string) => {
+              intended.set(target.signature, query);
+              await runFill([{ signature: target.signature, value: query }], { task, runTask }, fields);
+              const after = await runTask(task("inspect"));
+              if (after?.ok) fields = toFields(after.snapshot);
+              const now = fields.find((f: any) => f.signature === target.signature);
+              return { value: String(now?.value ?? "") };
+            },
+          },
+        });
 
-        intended.set(value.signature, value.value);
-        recordFailures(await runFill([value], { task, runTask }, fields), failures);
-        widgetFilled += 1;
-        filledThisSweep += 1;
-        // 填完重新采页面：下一个控件的选项可能刚刚解锁
-        const after = await runTask(task("inspect"));
-        if (after?.ok) fields = toFields(after.snapshot);
+        if (outcome.ok) {
+          widgetFilled += 1;
+          filledThisSweep += 1;
+        } else {
+          // give_up / 档案里查无依据 → 问用户；其余是控件真的驱动不了
+          failures.set(target.signature, outcome.reason === "max_attempts" ? "value_not_applied" : ASK_USER);
+        }
       }
 
       if (!deferred.length) break;

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chatExtractJson } from './llm.ts';
 import { buildAutofillPrompt, validateAutofillPlan } from './server/autofill-plan.ts';
 import { runApplyFlow } from './server/apply-flow.ts';
+import { buildFieldPrompt } from './server/field-agent.ts';
 import { pickResumeFile } from './server/resume-file.ts';
 
 const B='http://localhost:3000';
@@ -36,6 +37,16 @@ const outcome = await runApplyFlow(job, {
         {max_tokens:4000,reasoning_effort:'minimal'} as any);
       return validateAutofillPlan(raw?.values,all,profileText).values;
     }catch(e){console.log('  LLM 失败',String(e).slice(0,70));return [];}
+  },
+  decideField: async (ctx:any) => {
+    try{
+      return await chatExtractJson('你在填一个网申表单的框。只输出 JSON，不要解释。',
+        buildFieldPrompt(ctx), {max_tokens:600, reasoning_effort:'minimal'} as any);
+    }catch(e){ console.log('  决策失败', String(e).slice(0,60)); return {action:'give_up',reason:'model_unavailable'}; }
+  },
+  validateValue: (value:string, field:any, source:string) => {
+    const plan = validateAutofillPlan([{signature:field.signature, value, source: source||value}], [field], profileText);
+    return plan.values.length ? {ok:true} : {ok:false, reason: plan.rejected[0]?.reason || 'rejected'};
   },
   readProfile: () => profileText,
   findResume: () => pickResumeFile({envPath:process.env.PAWPALS_RESUME_FILE,
