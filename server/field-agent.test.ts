@@ -355,3 +355,28 @@ describe("填不进去时不许换答案", () => {
     }
   });
 });
+
+/**
+ * 成段的框要照抄，不要总结。
+ *
+ * 用户纠正：「工作描述」不是改写，就是直接复制粘贴——档案里那几条 bullet 本来
+ * 就是为简历写的。让它抄，「引用必须包含值」这条约束自然成立，闸门一点都不用松。
+ */
+describe("长文本照抄", () => {
+  it("textarea 明确要求抄原文", () => {
+    const p = buildFieldPrompt({
+      field: { context: "工作描述", type: "textarea" } as any,
+      profile: "档案", attempt: 1, lastResult: null,
+    });
+    expect(p).toContain("原文抄过去");
+    expect(p).toContain("不要总结");
+  });
+
+  it("短字段不加这句，省 token", () => {
+    const p = buildFieldPrompt({
+      field: { context: "性别", type: "widget", options: ["男", "女"] } as any,
+      profile: "档案", attempt: 1, lastResult: null,
+    });
+    expect(p).not.toContain("原文抄过去");
+  });
+});

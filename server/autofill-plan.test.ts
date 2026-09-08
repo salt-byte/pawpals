@@ -328,32 +328,23 @@ describe("说明文字进 prompt", () => {
 });
 
 /**
- * 「不许编造事实」和「不许改写措辞」是两条规则，不能混成一条。
+ * 工作描述这类字段，**照抄**就好。
  *
- * 真机：「工作描述」始终填不上，被归进「缺少用户资料」。可档案里写得很详细——
- * 「主导一款面向 Z 世代的消费级多模态 AI 陪伴产品 0-1 产品定义…推动产品进入内部
- * Beta（1500+ 用户）并在 WAIC2025 展示」。
+ * 我一度以为它天然要改写——把三段 bullet 压成一句话，压出来的句子不可能在原文里
+ * 逐字出现，于是想为长文本放开「引用必须包含值」。用户纠正了：本来就是直接复制
+ * 粘贴，档案里那几条 bullet 就是为简历写的。
  *
- * 挡住它的是我们自己的规则：source 必须**包含要填的值**、逐字出现在档案里。而
- * 「工作描述」天然是改写——把三段 bullet 压成一句话，压出来的句子当然不可能逐字
- * 出现在原文里。这条规则挡住的是所有需要组织语言的字段，不只是工作描述。
- *
- * 正确的分法：
- *   短字段（姓名、手机、学校、日期、选项）——值必须能在原文里逐字指出，防编造
- *   长文本（工作描述、自我介绍、项目描述）——允许改写，但**引用必须成立**：
- *       source 要在档案里逐字出现，证明这段话是基于真实经历改写的
+ * 让它抄，约束自然成立，闸门一点都不用松——而放松它恰恰是在最该防的地方开口子：
+ * 大段自由文本是编造成本最低、也最难被人一眼看穿的地方。
  */
-describe("长文本允许改写，但引用必须成立", () => {
+describe("长文本照抄就能过门", () => {
   const profile = "## 实习经历\n### AI 产品经理 | 智谱华章\n- 主导一款面向 Z 世代的消费级多模态 AI 陪伴产品 0-1 产品定义，推动产品进入内部 Beta（1500+ 用户）";
   const longField = { signature: "sig-desc", label: "工作描述", type: "textarea", kind: "custom" };
 
-  it("改写过的工作描述可以通过——只要引用在档案里成立", () => {
+  it("原文抄过去，通过", () => {
+    const value = "主导一款面向 Z 世代的消费级多模态 AI 陪伴产品 0-1 产品定义，推动产品进入内部 Beta（1500+ 用户）";
     const plan = validateAutofillPlan(
-      [{
-        signature: "sig-desc",
-        value: "负责多模态 AI 陪伴产品的 0-1 定义，推动产品进入内部 Beta 并积累 1500+ 用户。",
-        source: "主导一款面向 Z 世代的消费级多模态 AI 陪伴产品 0-1 产品定义",
-      }],
+      [{ signature: "sig-desc", value, source: value }],
       [longField],
       profile
     );
@@ -361,12 +352,12 @@ describe("长文本允许改写，但引用必须成立", () => {
     expect(plan.values).toHaveLength(1);
   });
 
-  it("引用引不出原文的，长文本也不放行——改写不等于可以编", () => {
+  it("总结压缩过的仍然被拒——因为不该总结，该抄", () => {
     const plan = validateAutofillPlan(
       [{
         signature: "sig-desc",
-        value: "带领 20 人团队完成千万级营收项目。",
-        source: "带领 20 人团队完成千万级营收项目",
+        value: "负责多模态 AI 陪伴产品的 0-1 定义并推动上线。",
+        source: "主导一款面向 Z 世代的消费级多模态 AI 陪伴产品 0-1 产品定义",
       }],
       [longField],
       profile
@@ -375,14 +366,25 @@ describe("长文本允许改写，但引用必须成立", () => {
     expect(plan.rejected[0].reason).toBe("unsourced");
   });
 
-  it("短字段仍然要求值本身能在原文里指出——防的是编造事实", () => {
-    const shortField = { signature: "sig-school", label: "本科学校", type: "text", kind: "custom" };
+  it("编的内容照样被拒", () => {
     const plan = validateAutofillPlan(
-      [{ signature: "sig-school", value: "清华大学", source: "主导一款面向 Z 世代的消费级多模态" }],
-      [shortField],
+      [{ signature: "sig-desc", value: "带领 20 人团队完成千万级营收项目。", source: "带领 20 人团队完成千万级营收项目" }],
+      [longField],
       profile
     );
     expect(plan.values).toEqual([]);
     expect(plan.rejected[0].reason).toBe("unsourced");
+  });
+});
+
+/** prompt 要明说「照抄」，不然模型默认会去总结。 */
+describe("prompt 要求照抄", () => {
+  it("成段的框明确说直接抄原文，不要总结", () => {
+    const p = buildAutofillPrompt({
+      controls: [{ handle: "h1", type: "textarea", context: "工作描述" } as any],
+      profileText: "档案",
+    });
+    expect(p).toContain("直接把档案里对应的原文抄过去");
+    expect(p).toContain("不要总结");
   });
 });

@@ -31,6 +31,10 @@ export type FieldAction =
 
 const ALLOWED = new Set(["fill", "search", "probe", "give_up"]);
 
+/** 成段的框：这些要的是一段话，而那段话档案里已经写好了，抄就行。 */
+const LONG_TEXT = new Set(["textarea"]);
+const LONG_TEXT_LABEL = /描述|简介|介绍|说明|自述|职责/;
+
 export type FieldTools = {
   /** 探这个控件的可选项。 */
   probe: () => Promise<{ options: string[] }>;
@@ -145,6 +149,9 @@ export function buildFieldPrompt(input: {
     "",
     "规则：",
     "1. 只做映射，不做创作。档案里没有的信息不要编——留空永远好过填错。",
+    ...(LONG_TEXT.has(String(field.type || "")) || LONG_TEXT_LABEL.test(String(field.context || ""))
+      ? ["1b. 这是个成段的框：**直接把档案里对应的原文抄过去**，不要总结、不要改写、不要压缩成一句话。档案里那些内容本来就是为简历写的。source 就填你抄的那段。"]
+      : []),
     "2. fill / search 必须给 source：档案原文里**逐字出现**的一段，用来证明这个值有出处。引不出原文的，选 give_up。",
     "3. 有可选项时，value 必须**恰好等于**其中一个，一字不差。即使是多选控件，也一次只填一个——不要用逗号或顿号拼接多个值。",
     "4. 上一次失败了就换个办法，不要原样再来一遍：页面写的说明里常常就有答案。",
