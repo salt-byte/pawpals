@@ -8,23 +8,34 @@ import { snapshotControls, elementForHandle, fillByHandle, widgetTargets } from 
 import { createAdapterRegistry } from '../application/adapters.js';
 import { syntheticImpl } from '../act/synthetic.js';
 
-/** 驱动纯 div 模拟控件用的点击实现。合成事件在真机上验证过是有效的。 */
 /**
- * 点击与打字：**合成事件优先，CDP 兜底**。
+ * 点击与打字：**CDP 优先，合成事件兜底**。
  *
- * 合成事件在简道云上验证过可用，而且不会让 Chrome 挂「已开始调试此浏览器」的
- * 横幅。只有当合成事件没能让页面产生反应时，才请 service worker 用
- * chrome.debugger 派发真实事件（Claude in Chrome 全程走的就是这条路，代价就是
- * 那条横幅）。
+ * 顺序原来是反的（合成优先、CDP 只在「面板没打开」时兜底），真机上因此栽了一个
+ * 很难看出来的跟头——
+ *
+ * 帆软的「意向岗位」依赖「意向岗位大类」。我们用合成事件选完「产品类」，页面上
+ * 确实显示了「产品类」，读回校验也过了，看起来完全成功；但「意向岗位」始终探不到
+ * 选项。用 Claude in Chrome 的坐标点击（底层是 CDP 派发的真实事件）重做同一件事，
+ * 「意向岗位」当场解锁出「全选 / 产品经理 / 产品运营」。
+ *
+ * 也就是说：合成事件让**显示**变了，页面内部的数据模型没提交。而「面板打开了、
+ * 选项点了、显示也变了」这三件都成立，旧的升级条件永远不会触发——失败得极其安静。
+ *
+ * 代价是 Chrome 会挂一条「已开始调试此浏览器」的横幅。这是 Claude in Chrome 一直
+ * 在付的代价，值得：错填一个必填项的代价比一条横幅大得多。挂载仍然是懒的、用完
+ * 即摘（见 background/cdp-input.js）。
  *
  * chrome.debugger 只能在 service worker 里用，所以这里负责算视口坐标。
  */
 async function cdpClick(el) {
   el.scrollIntoView?.({ block: 'center' });
-  await new Promise((r) => setTimeout(r, 120));
+  await new Promise((r) => setTimeout(r, 150));
   const box = el.getBoundingClientRect();
   const x = box.left + box.width / 2;
   const y = box.top + box.height / 2;
+  // 滚动之后仍然不在视口里（被固定头部盖住、或在另一个滚动容器里）就别点：
+  // 坐标点击打在别的元素上比不点更糟。
   if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
   const reply = await toBackground({ type: 'OFFICIAL_CDP_CLICK', x, y });
   return Boolean(reply?.ok);
@@ -32,7 +43,10 @@ async function cdpClick(el) {
 
 const widgetDriver = createPageWidgetDriver({
   click: async (el) => {
-    await syntheticImpl.click(el, { fast: true });
+    // CDP 先行；派发不成（没挂上调试器、坐标不在视口）才退回合成事件，
+    // 至少还能驱动那些不挑事件可信度的控件。
+    const dispatched = await cdpClick(el);
+    if (!dispatched) await syntheticImpl.click(el, { fast: true });
     return { cdpFallback: () => cdpClick(el) };
   },
   // 搜索框打字：面板带搜索时不枚举，直接搜
@@ -271,6 +285,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // 扩展侧此前完全无日志：任务到没到页面、执行了多久，只能靠服务端超时反推。
     const startedAt = Date.now();
     console.log(`[pawpals] 收到任务 ${message.task.kind} ${String(message.task.id).slice(0, 20)}`);
+    /**
+     * 任务结束就摘掉调试器。
+     *
+     * CDP 现在是 widget 的主路径（合成事件让显示变了但页面内部没提交，级联因此
+     * 静默失效——见文件顶部），代价是 Chrome 会挂一条「已开始调试此浏览器」的
+     * 横幅。那条横幅只该在真正操作的那几秒出现，不能一直挂在用户眼前，所以
+     * 成功失败都要摘。
+     */
+    const releaseDebugger = () => { void toBackground({ type: 'OFFICIAL_CDP_RELEASE' }); };
     execute(message.task)
       .then((result) => {
         console.log(`[pawpals] 任务完成 ${message.task.kind} 耗时 ${Date.now() - startedAt}ms`, result);
@@ -279,7 +302,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => {
         console.warn(`[pawpals] 任务失败 ${message.task.kind} 耗时 ${Date.now() - startedAt}ms`, error);
         sendResponse({ ok: false, error: String(error?.message || error) });
-      });
+      })
+      .finally(releaseDebugger);
     return true;
   }
   return false;
