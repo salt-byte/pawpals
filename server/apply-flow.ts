@@ -53,6 +53,24 @@ export type ApplyOutcome = {
 const MAX_ROUNDS = 4;
 const PROBE_BATCH = 5;
 const PROBE_PASSES = 3;
+/**
+ * 补探的层数上限。
+ *
+ * 帆软那张表是三级：意向岗位大类 → 意向岗位 → 意向工作地点。留点余量给更深的表，
+ * 但要有上限——每一层都要真机往返若干次，不能因为某个控件永远探不到就无限转。
+ */
+/**
+ * 「先跳过、稍后重试」最多来回几遍。
+ *
+ * DOM 顺序不保证等于依赖顺序，子控件可能排在父控件前面。留几遍余量让依赖链自然
+ * 解开，但要有上限——不能因为某个控件永远探不到就无限转。
+ */
+const CASCADE_PASSES = 4;
+
+/** 一轮里最多处理多少个自定义控件。逐个处理很慢，给个上限别让一轮无限长。 */
+const MAX_WIDGETS_PER_ROUND = 20;
+
+
 
 /** 快照控件 → 决策用的字段。补 signature/label 两个别名，下游按它们认字段。 */
 const toFields = (snapshot: any[]) =>
@@ -94,57 +112,85 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
     if (!open.length) break;
 
     const wantProbe = widgetsToProbe(open).length;
-    fields = await probeAll(open, fields, { task, runTask });
-    const gotOptions = fields.filter((f: any) => f.type === "widget" && f.options?.length).length;
-    runLog.claim(`probe#${round}`, { claimed: wantProbe, actual: gotOptions });
-
-    const refreshed = stillOpen(fields, []);
-    const values = await askModel(fieldsForModel(refreshed), fields);
-
-    let claimedFilled = 0;
-    if (values.length) {
-      const result = await runFill(values, { task, runTask }, fields);
-      claimedFilled += countFilled(result);
-      recordFailures(result, failures);
-
-      // 值不在选项里而被拒的，带**真实选项**重问一次——不把模型该干的事推给人。
-      const retryable = retryTargets(result?.skipped ?? [], fields);
-      if (retryable.length) {
-        const second = await askModel(retryable, fields);
-        if (second.length) {
-          const again = await runFill(second, { task, runTask }, fields);
-          claimedFilled += countFilled(again);
-          recordFailures(again, failures);
-        }
-      }
+    /**
+     * 文本框批量走：它们之间没有依赖，探也不用探。
+     */
+    const texts = stillOpen(fields, []).filter((f: any) => f.type !== "widget");
+    const textValues = await askModel(fieldsForModel(texts), fields);
+    if (textValues.length) {
+      recordFailures(await runFill(textValues, { task, runTask }, fields), failures);
+      const seen = await runTask(task("inspect"));
+      if (seen?.ok) fields = toFields(seen.snapshot);
     }
 
     /**
-     * 级联：填完父级，当场把「探到空选项」的控件再探一次。
+     * 自定义控件**逐个处理**：探一个、问一个、填一个，再看下一个。
      *
-     * 真机实验证实（三步）：父级没填时探「意向岗位」返回空状态「没有可选择的数据」；
-     * 填上「意向岗位大类 = 产品类」后再探同一个控件，立刻拿到「全选/产品经理/
-     * 产品运营」。所以级联根本没坏，坏的是**顺序**——一轮里先把所有 widget 探一遍
-     * 再填，子控件永远是在父级还没填的状态下被探的，探到的必然是空。
+     * 不能先全探完再全填。真机三步实验证实：父级没填时探「意向岗位」返回空状态
+     * 「没有可选择的数据」，填上「意向岗位大类 = 产品类」后再探同一个控件，立刻
+     * 拿到「全选/产品经理/产品运营」。批量探的话，子控件永远是在父级还没填的
+     * 状态下被探的，探到的必然是空。
      *
-     * 分轮本该在下一轮修正，但那要等一整轮，而且轮次会因为「本轮没推进」提前停。
-     * 真机上跑满四轮「意向岗位」始终是空，就是这么来的。填完当场补探才靠得住。
+     * 而这张表是**三级**：意向岗位大类 → 意向岗位 → 意向工作地点（页面原话
+     * 「请先选择【意向岗位】，再查看可选工作地点」）。逐个处理不必知道依赖图有
+     * 几层，也不必为每张表写死它的依赖关系——填完上一个，下一个的选项自然就在了。
+     *
+     * 代价是每个控件一次探测 + 一次模型调用 + 一次填写，比批量慢。值得：批量快
+     * 但填不上，慢一点但填得上。
      */
-    if (values.length) {
-      const empties = stillOpen(fields, []).filter(
-        (f: any) => f.type === "widget" && !(f.options?.length)
-      );
-      if (empties.length) {
-        const before = new Set(empties.map((f: any) => f.signature));
-        fields = await probeAll(empties, fields, { task, runTask });
-        const unlocked = fields.filter((f: any) => before.has(f.signature) && f.options?.length);
-        if (unlocked.length) {
-          log(`[apply] 第 ${round} 轮：填完父级后 ${unlocked.length} 个控件解锁了选项`);
-          const more = await askModel(fieldsForModel(unlocked), fields);
-          if (more.length) recordFailures(await runFill(more, { task, runTask }, fields), failures);
+    let widgetFilled = 0;
+    /**
+     * 「探不到选项」不等于「这个控件不行」——很可能只是它的父级还没轮到。
+     *
+     * DOM 顺序不保证等于依赖顺序：子控件完全可能排在父控件前面。第一遍遇到探不到
+     * 的就永久跳过，那种表单会整片填不上。所以先记进 deferred，等这一遍填成了东西
+     * 再回头重试；一遍下来一个都没填成，才认定它们是真的不行。
+     */
+    let deferred: string[] = [];
+    for (let sweep = 0; sweep < CASCADE_PASSES; sweep += 1) {
+      const skipThisSweep = new Set(deferred);
+      deferred = [];
+      let filledThisSweep = 0;
+
+      for (let i = 0; i < MAX_WIDGETS_PER_ROUND; i += 1) {
+        const pending = stillOpen(fields, []).filter(
+          (f: any) => f.type === "widget" && !failures.has(f.signature) && !skipThisSweep.has(f.signature)
+        );
+        if (!pending.length) break;
+        const target = pending[0];
+
+        // 没有选项就先探它——此刻它的父级（如果有）多半已经填好了
+        let current = target;
+        if (!(current.options?.length)) {
+          fields = await probeAll([current], fields, { task, runTask });
+          current = fields.find((f: any) => f.signature === target.signature) ?? current;
         }
+        if (!(current.options?.length)) { deferred.push(target.signature); continue; }
+
+        const [value] = await askModel(fieldsForModel([current]), fields);
+        if (!value) {
+          // 模型答不出（档案里没依据）：这不是控件失败，交给收尾按「缺资料」归类
+          failures.set(target.signature, "__ask_user__");
+          continue;
+        }
+
+        recordFailures(await runFill([value], { task, runTask }, fields), failures);
+        widgetFilled += 1;
+        filledThisSweep += 1;
+        // 填完重新采页面：下一个控件的选项可能刚刚解锁
+        const after = await runTask(task("inspect"));
+        if (after?.ok) fields = toFields(after.snapshot);
+      }
+
+      if (!deferred.length) break;
+      // 这一遍什么都没填成，再来一遍也是同样的结果：认定它们探不到选项
+      if (!filledThisSweep) {
+        for (const signature of deferred) failures.set(signature, "no_options");
+        break;
       }
     }
+
+    const claimedFilled = textValues.length + widgetFilled;
 
     /**
      * 本轮推进了多少，**以页面为准**。
@@ -160,7 +206,7 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
     // 自报数和页面推进数对不上就是线索——真机上派发超时那次自报 0、页面其实
     // 填进去 10 个，按自报数判定「没推进」当场就停了。
     runLog.claim(`fill#${round}`, { claimed: claimedFilled, actual: filledThisRound });
-    log(`[apply] 第 ${round} 轮：字段 ${fields.length} 待填 ${open.length} 模型给 ${values.length} → 自报 ${claimedFilled} / 页面推进 ${filledThisRound}`);
+    log(`[apply] 第 ${round} 轮：字段 ${fields.length} 待填 ${open.length} 文本 ${textValues.length} 控件 ${widgetFilled} → 自报 ${claimedFilled} / 页面推进 ${filledThisRound}`);
     if (!shouldRunAnotherRound({ round, filledThisRound, maxRounds: MAX_ROUNDS })) break;
   }
 

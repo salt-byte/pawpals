@@ -59,12 +59,14 @@ function harness(overrides: any = {}) {
 const JOB = { url: "https://form.example.com/a", company: "帆软", title: "秋招" };
 
 describe("runApplyFlow 顺序", () => {
-  it("先采页面，再探选项，最后才填——不先看就问，模型只能瞎猜", async () => {
+  it("先采页面；自定义控件一定是先探到选项才问模型", async () => {
     const h = harness();
     await runApplyFlow(JOB, h.deps as any);
     const order = h.calls.filter((k) => ["inspect", "probe", "fill"].includes(k));
     expect(order[0]).toBe("inspect");
-    expect(order.indexOf("probe")).toBeLessThan(order.indexOf("fill"));
+    // 控件逐个处理：探它 → 问模型 → 填它。所以 probe 必须出现在某次 fill 之前。
+    expect(order.indexOf("probe")).toBeGreaterThan(-1);
+    expect(order.indexOf("probe")).toBeLessThan(order.lastIndexOf("fill"));
   });
 
   it("填进去的值以页面回读为准", async () => {
@@ -292,11 +294,53 @@ describe("级联：填完父级当场补探", () => {
     expect(out.confirmed.map((f: any) => f.context)).toContain("意向岗位");
   });
 
-  it("子级被探了不止一次——第一次是空的，填完父级后才有值", async () => {
+  it("子级是在父级填好之后才被探的——逐个处理天然保证这个顺序", async () => {
     const h = cascadeHarness();
     await runApplyFlow(JOB, h.deps as any);
     const jobProbes = h.probes.filter((batch) => batch.includes("h-job"));
-    expect(jobProbes.length).toBeGreaterThanOrEqual(2);
+    // 至少探到过一次，而且那次拿到了选项（否则 h-job 不会被填上）
+    expect(jobProbes.length).toBeGreaterThanOrEqual(1);
+    expect(h.page.get("h-job")).toBe("产品经理");
+  });
+
+  it("三级级联：大类 → 岗位 → 工作地点，一轮里全部解锁", async () => {
+    const page = new Map<string, string>();
+    const controls = [
+      { handle: "h-cat", type: "widget", context: "意向岗位大类" },
+      { handle: "h-job", type: "widget", context: "意向岗位" },
+      { handle: "h-city", type: "widget", context: "意向工作地点" },
+    ];
+    // 真实依赖：岗位要先有大类，工作地点要先有岗位（页面原话「请先选择【意向岗位】」）
+    const optionsOf = (h: string) =>
+      h === "h-cat" ? ["产品类"]
+      : h === "h-job" ? (page.get("h-cat") ? ["产品经理"] : [])
+      : (page.get("h-job") ? ["南京"] : []);
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: controls.map((c) => ({ ...c, value: page.get(c.handle) ?? "", options: [] })) };
+        }
+        if (task.kind === "probe") {
+          return { ok: true, probed: (task.payload?.signatures ?? []).map((h: string) => ({
+            signature: h, options: optionsOf(h), timedOut: false })) };
+        }
+        if (task.kind === "fill") {
+          const filled: string[] = [];
+          for (const v of task.payload?.values ?? []) { page.set(v.signature, v.value); filled.push(v.signature); }
+          return { ok: true, filled, skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async (fields: any[]) =>
+        fields.filter((f: any) => f.options?.length).map((f: any) => ({ signature: f.signature, value: f.options[0] })),
+      readProfile: () => "档案", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    await runApplyFlow(JOB, deps as any);
+    expect(page.get("h-cat")).toBe("产品类");
+    expect(page.get("h-job")).toBe("产品经理");
+    expect(page.get("h-city")).toBe("南京");
   });
 
   it("没有空选项控件时不做多余的补探", async () => {
