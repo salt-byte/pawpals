@@ -104,3 +104,50 @@ describe('dismissPanels', () => {
     expect(() => dismissPanels({})).not.toThrow();
   });
 });
+
+/**
+ * 选项标签不是「当前值」。
+ *
+ * 用户截图发现的：页面上「是否有获奖经历 ○是 ○否」两个都没选中，而我们报告说
+ * 「已确认填写 = 是」。因为读当前值时把选项标签「是」当成了已选中的值。
+ *
+ * 后果有两层：一是数字虚高，二是**系统认为它已经填好了，从此再也不会去填它**
+ * ——那一轮的 trace 里这三个字段根本没出现过。三个必填项就这么永久漏掉了。
+ */
+describe('单选控件没选中时不能报出值', () => {
+  it('两个选项都没选中 → 值为空', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">是否有获奖经历</div>
+        <div class="field-component">
+          <div class="x-radio-item"><span class="radio-dot"></span><span class="radio-label">是</span></div>
+          <div class="x-radio-item"><span class="radio-dot"></span><span class="radio-label">否</span></div>
+        </div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.value).toBe('');
+  });
+
+  it('选中了才报那个值', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">是否有获奖经历</div>
+        <div class="field-component">
+          <div class="x-radio-item is-checked"><span class="radio-label">是</span></div>
+          <div class="x-radio-item"><span class="radio-label">否</span></div>
+        </div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.value).toBe('是');
+  });
+
+  it('普通下拉不受影响——它只有一段显示文字', () => {
+    const root = html(`
+      <div class="fx-field">
+        <div class="field-name">学历</div>
+        <div class="field-component"><div class="x-combo-value">研究生</div></div>
+      </div>`);
+    const w = snapshotControls(root, { labelSelector: '.field-name' }).find((c) => c.type === 'widget');
+    expect(w.value).toBe('研究生');
+  });
+});

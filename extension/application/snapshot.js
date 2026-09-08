@@ -96,6 +96,10 @@ function insidePanel(el) {
 const PLACEHOLDER_HINT = /placeholder|empty|hint/i;
 /** 显示值所在的那一块。 */
 const VALUE_NODE_HINT = /value|text|label|content|selected/i;
+/** 「已选中」写在 class 上：is-checked / active / selected …… */
+const CHECKED_HINT = /checked|selected|active|current|is-on/i;
+/** 一组选项的样子：radio / checkbox / option / item。 */
+const OPTION_ITEM = /radio|checkbox|option|choice|item/i;
 
 /**
  * widget 当前显示的值。没选值返回空串。
@@ -106,6 +110,24 @@ function widgetValue(container) {
   const areas = [...container.querySelectorAll('*')].filter(
     (node) => VALUE_AREA_HINT.test(String(node.className || '')) || VALUE_NODE_HINT.test(String(node.className || ''))
   );
+  /**
+   * 单选/多选控件：**选项标签不是当前值**。
+   *
+   * 用户截图发现的：页面上「是否有获奖经历 ○是 ○否」两个都没选中，我们却报
+   * 「已确认填写 = 是」——因为把第一个选项的标签当成了值。后果不止是数字虚高：
+   * 系统会认为它已经填好，从此再也不去填它，三个必填项就这么永久漏掉。
+   *
+   * 有两个以上选项时，只认带选中标记（is-checked / active / selected）的那个；
+   * 一个都没选中就如实返回空。
+   */
+  const items = [...container.querySelectorAll('*')].filter((node) =>
+    OPTION_ITEM.test(String(node.className || ''))
+  );
+  if (items.length >= 2) {
+    const picked = items.find((node) => CHECKED_HINT.test(String(node.className || '')));
+    return picked ? tidy(picked.textContent) : '';
+  }
+
   for (const area of areas.slice(0, 30)) {
     if (PLACEHOLDER_HINT.test(String(area.className || ''))) continue;
     if (area.querySelector('*')) continue;

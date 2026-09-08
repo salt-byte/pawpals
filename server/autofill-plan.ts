@@ -60,6 +60,11 @@ export type AutofillPlan = {
  */
 const SOURCE_MIN_LENGTH = 2;
 
+/** 天然需要改写的控件类型：多行文本框装的就是成段的话。 */
+const COMPOSABLE_TYPES = new Set(["textarea"]);
+/** 天然需要改写的字段：这些框要的是一段话，不是一个可以照抄的词。 */
+const COMPOSABLE_LABELS = /描述|简介|介绍|说明|自述|经历概述|职责|收获|总结/;
+
 /**
  * 由代码把关、绝不交给模型的字段。
  *
@@ -214,7 +219,26 @@ export function validateAutofillPlan(
     // 引用必须包含要填的值——「指给我看这个值出自哪里」。
     // 有 options 的字段例外：值来自表单给的选项（已在上面校验过命中），引用的
     // 职责只是证明选这个选项的依据在档案里，比如据「双硕士项目」选「研究生」。
-    const anchored = Boolean(field.options?.length) || source.includes(strip(value));
+    /**
+     * 引用要不要「包含」要填的值。
+     *
+     * 这一条原本是无条件的，结果挡住了所有需要**组织语言**的字段：真机上「工作
+     * 描述」始终填不上，被归成「缺少用户资料」，可档案里写得很详细——问题是把
+     * 三段 bullet 压成一句话，压出来的句子当然不可能逐字出现在原文里。
+     *
+     * 「不许编造事实」和「不许改写措辞」是两条规则，混成一条就会误伤后者，而
+     * 改写恰恰是简历该做的事。所以分开：
+     *
+     *   短字段（姓名/学校/日期/选项）  值必须能在原文里逐字指出 —— 防编造
+     *   有选项的字段                  值已由选项列表把关，引用只需证明依据
+     *   长文本（工作描述/自我介绍）    允许改写，但 source 仍必须逐字出现在档案里
+     *
+     * 最后一条是关键：放开的是「措辞可以变」，没有放开「内容可以编」——引不出
+     * 原文的长文本照样被拒（见测试「引用引不出原文的，长文本也不放行」）。
+     */
+    const composable = COMPOSABLE_TYPES.has(String((field as any).type || "")) ||
+      COMPOSABLE_LABELS.test(String(field.label || ""));
+    const anchored = Boolean(field.options?.length) || composable || source.includes(strip(value));
     if (!quoted || !anchored) { reject("unsourced"); continue; }
 
     values.push({ signature, value });
