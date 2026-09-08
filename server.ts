@@ -32,6 +32,8 @@ import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/uplo
 import { pickResumeFile } from "./server/resume-file.ts";
 import { runApplyFlow } from "./server/apply-flow.ts";
 import { extractApplyTarget } from "./server/apply-target.ts";
+import { upsertAnswers } from "./server/profile-answers.ts";
+import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
@@ -156,6 +158,16 @@ let bossLoginPlatform = "boss";
 
 // Step 3：AI 结构化投递指令暂存（app-tracker 回复里嵌入，用户确认后执行）
 // key = 会话 groupId，value = 最近一条待确认的投递指令
+/**
+ * 上一次投递问了用户哪些字段。
+ *
+ * 用户回答后存进 profile.md，下一张表就不用再问——「求职信息需要反复填写」正是
+ * 这个产品要解决的痛点，而在这之前每投一次都要重问一遍民族、学号、出差意向。
+ *
+ * 单用户产品，一个变量够了；多用户时这里要按用户分。
+ */
+let lastAskedProfileLabels: string[] = [];
+
 const pendingApplyCommands = new Map<string, {
   url: string; company: string; title: string; timestamp: number;
   officialConfirmationId?: string;
@@ -2600,8 +2612,12 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
 
       const askLine = (q: any) =>
         `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
+      // 记下问了什么：用户下一句回答里认出这些字段，就能存进档案，下次不再问
+      if (outcome.questions.length) {
+        lastAskedProfileLabels = outcome.questions.map((q: any) => q.label);
+      }
       const askBlock = outcome.questions.length
-        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填：\n${outcome.questions.map(askLine).join("\n")}`
+        ? `\n\n还差这些，我档案里没有——你告诉我，我接着填（答过一次以后就记住了，不会再问）：\n${outcome.questions.map(askLine).join("\n")}`
         : "";
 
       return `[OFFICIAL_CONFIRM:${confirmationId}] ${notes.join("；")}。${askBlock}\n\n请检查页面内容，确认无误后再回复“确认投递”。`;
@@ -2891,6 +2907,27 @@ async function streamAgent(
       const result = await executeTool("search_jobs", { query, location: cityCode });
       console.log(`[search_jobs] result length=${result.length}, preview="${result.slice(0,100)}"`);
       toolInjections.push(`【搜索结果】\n${result}`);
+    }
+
+    /**
+     * 用户回答了上一轮问的那些字段 → 存进 profile.md，下次不再问。
+     *
+     * 只认我们**问过的**字段名，不做开放式抽取：存错了比不存更糟，那会变成一条
+     * 假信息跟着他一路投出去（见 answer-reply.ts）。
+     */
+    if (lastAskedProfileLabels.length) {
+      const answers = parseUserAnswers(lastUserMsg, lastAskedProfileLabels);
+      if (Object.keys(answers).length) {
+        try {
+          const current = existsSync(PROFILE_FILE) ? readFileSync(PROFILE_FILE, "utf8") : "";
+          writeFileSync(PROFILE_FILE, upsertAnswers(current, answers), "utf-8");
+          lastAskedProfileLabels = lastAskedProfileLabels.filter((label) => !(label in answers));
+          toolInjections.push(`【已记住】${Object.entries(answers).map(([k, v]) => `${k}: ${v}`).join("；")}——以后投递不会再问这几项。`);
+          console.log(`[profile] 记住 ${Object.keys(answers).join("、")}`);
+        } catch (error) {
+          console.warn("[profile] 存档失败:", error);
+        }
+      }
     }
 
     // apply_job: 投递管家收到投递任务时，自动从协作表查 URL 并执行
