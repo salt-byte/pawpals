@@ -239,3 +239,49 @@ describe("闸门在循环里", () => {
     expect(out.reason).toBe("no_validator");
   });
 });
+
+/**
+ * 被闸门拦下时，要说清楚错在哪。
+ *
+ * 真机 trace：
+ *   意向岗位大类 #1 "产品类" → unsourced
+ *   意向岗位大类 #2 "产品类" → unsourced
+ *   意向岗位大类 #3 "产品类" → 成功
+ *
+ * 同一个值三次不同判决——因为模型每次给的 source 不一样，前两次引的原文档案里
+ * 没有。它把 2/3 的尝试次数花在猜「什么样的出处能过关」上。
+ *
+ * 「失败（unsourced）」这种机器码对模型没有帮助。告诉它具体该怎么改。
+ */
+describe("失败原因要能指导下一步", () => {
+  it("unsourced 说清楚是 source 的问题，不是值的问题", () => {
+    const p = buildFieldPrompt({
+      field: { context: "意向岗位大类", options: ["产品类", "研发类"], type: "widget" } as any,
+      profile: "档案", attempt: 2,
+      lastResult: { ok: false, reason: "unsourced", actual: "" },
+    });
+    expect(p).toContain("source");
+    expect(p).toContain("逐字");
+    // 而且要提示「值本身可能没问题」，否则模型会去换值
+    expect(p).toContain("值可能没问题");
+  });
+
+  it("option_not_allowed 提示值要从可选项里挑", () => {
+    const p = buildFieldPrompt({
+      field: { context: "学历", options: ["本科", "研究生"], type: "widget" } as any,
+      profile: "档案", attempt: 2,
+      lastResult: { ok: false, reason: "option_not_allowed", actual: "" },
+    });
+    expect(p).toContain("可选项");
+  });
+
+  it("控件改写了值时，提示换个写法", () => {
+    const p = buildFieldPrompt({
+      field: { context: "结束时间", type: "text" } as any,
+      profile: "档案", attempt: 2,
+      lastResult: { ok: false, reason: "value_rewritten", actual: "1901-01-01" },
+    });
+    expect(p).toContain("1901-01-01");
+    expect(p).toContain("换个写法");
+  });
+});

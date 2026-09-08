@@ -55,6 +55,35 @@ const strip = (text: unknown) => String(text ?? "").replace(/\s+/g, "");
 const applied = (actual: string, wanted: string) =>
   Boolean(strip(wanted)) && strip(actual).includes(strip(wanted));
 
+/**
+ * 把失败原因翻译成「下一步该怎么改」。
+ *
+ * 「失败（unsourced）」这种机器码对模型没有帮助。真机 trace 里「意向岗位大类」
+ * 同一个值「产品类」被拦两次才过——它每次换的是 source，而它并不知道问题出在
+ * source 上，白白烧掉 2/3 的尝试次数。
+ */
+function describeFailure(last: { ok: boolean; reason?: string; actual?: string }): string {
+  if (last.ok) return "上一次成功了。";
+  switch (last.reason) {
+    case "unsourced":
+      return [
+        "上一次被拦下了：**source 在档案原文里找不到**。",
+        "值可能没问题，问题在出处——请把 source 换成档案里**逐字出现**的一段原话（至少四个字），",
+        "不要改写、不要总结。引不出原文的，就选 give_up。",
+      ].join("\n");
+    case "option_not_allowed":
+      return "上一次被拦下了：这个值不在**可选项**里。请从上面列出的可选项中挑一个；都不合适就 give_up。";
+    case "value_rewritten":
+      return `上一次填进去了，但页面把它改写成了「${last.actual}」——多半是格式不对。换个写法再试（比如日期用 2025-07-01 这种完整格式）。`;
+    case "value_not_applied":
+      return "上一次填了但页面上没有变化——这个控件可能需要先搜索再选（用 search），或者根本点不动。";
+    case "probed":
+      return "刚探过可选项，见上面。";
+    default:
+      return `上一次失败了（${last.reason || "未知"}），页面上现在是「${last.actual ?? ""}」。换个办法，不要原样重来。`;
+  }
+}
+
 export function buildFieldPrompt(input: {
   field: { context?: string; hint?: string; options?: string[]; type?: string; required?: boolean };
   profile: string;
@@ -74,9 +103,7 @@ export function buildFieldPrompt(input: {
     "【候选人档案】",
     profile,
     "",
-    lastResult
-      ? `上一次的结果：${lastResult.ok ? "成功" : `失败（${lastResult.reason || "未知"}），页面上现在是「${lastResult.actual ?? ""}」`}`
-      : "还没试过。",
+    lastResult ? describeFailure(lastResult) : "还没试过。",
     "",
     "可以做的动作，只能选一个：",
     '  {"action":"fill","value":"要填的内容"}      直接填',

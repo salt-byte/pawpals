@@ -573,3 +573,55 @@ describe("填错了要报出来，不能算成填好了", () => {
     expect(out.mismatched).toEqual([]);
   });
 });
+
+/**
+ * 单字段循环里，校验也要用「给模型看的那一份」。
+ *
+ * 真机 trace：
+ *   本科学校 #1 "其他"       → option_not_allowed
+ *   本科学校 #2 "其他"       → option_not_allowed
+ *   本科学校 #3 "北京电影学院" → option_not_allowed
+ *
+ * 而页面上明写着「未搜索到学校名称的同学，请搜索"其他"并选择」。**模型读懂了提示、
+ * 做对了事，是闸门拦错了**——它拿被截断的 60 个选项去校验，而这是个可搜索控件，
+ * 正确答案本来就不在那 60 个里。
+ *
+ * 这个 bug 在批量那条路上修过一次，单字段这条路漏了：同一个错误换个入口又来一遍。
+ */
+describe("单字段循环的校验也用模型看的那份", () => {
+  it("可搜索控件：校验不该拿被截断的选项列表挡住答案", async () => {
+    const validated: any[] = [];
+    const page = new Map<string, string>();
+    const school = {
+      handle: "h-school", type: "widget", context: "本科学校",
+      hint: '未搜索到学校名称的同学，请搜索"其他"并选择',
+      options: Array.from({ length: 60 }, (_, i) => `学校${i}`), truncated: true,
+    };
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [],
+            snapshot: [{ ...school, value: page.get("h-school") ?? "" }] };
+        }
+        if (task.kind === "probe") return { ok: true, probed: [{ signature: "h-school", options: school.options, truncated: true }] };
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: [], skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async () => [],
+      decideField: async () => ({ action: "fill", value: "北京电影学院", source: "本科：北京电影学院" }),
+      validateValue: (_v: string, field: any) => {
+        validated.push(field);
+        return { ok: true };
+      },
+      readProfile: () => "本科：北京电影学院", findResume: () => null,
+      readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    await runApplyFlow(JOB, deps as any);
+    // 交给闸门的那份字段必须已经去掉了截断的选项，否则正确答案会被判越界
+    expect(validated[0]?.options).toBeUndefined();
+    expect(page.get("h-school")).toBe("北京电影学院");
+  });
+});

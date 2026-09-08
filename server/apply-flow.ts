@@ -211,13 +211,17 @@ export async function runApplyFlow(job: JobRef, deps: ApplyDeps): Promise<ApplyO
          * 闸门没有松：值仍要过 validateAutofillPlan，而且挡在写入之前（见
          * field-agent.ts 的 validate）。
          */
+        // 给模型看的那一份：可搜索控件在这里已经去掉了被截断的选项。校验必须用
+        // 同一份，否则模型按页面提示答出的「其他」「北京电影学院」会被那 60 个
+        // 截断选项判成越界——真机 trace 里这个字段连挂三次就是这么来的。
+        const forModel = fieldsForModel([current])[0] ?? current;
         const outcome = await runFieldAgent({
-          field: current,
+          field: forModel,
           profile: profileText,
           maxAttempts: FIELD_ATTEMPTS,
           decide: (ctx) => decideField(ctx),
           trace: (step) => log(`[field] ${String(current.context).slice(0, 12)} #${step.attempt} ${step.action}${step.value ? ` "${String(step.value).slice(0, 20)}"` : ""} → ${step.result}`),
-          validate: (value: string, _f: any, source: string) => validateValue(value, current, source),
+          validate: (value: string, _f: any, source: string) => validateValue(value, forModel, source),
           tools: {
             probe: async () => {
               const r = await runTask(task("probe", { signatures: [target.signature], budgetMs: 15_000 }), 40_000);
