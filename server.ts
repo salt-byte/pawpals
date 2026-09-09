@@ -290,11 +290,14 @@ const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
  * "已知风险"：开放注册前必须定下来。
  */
 const DAILY_TOKEN_LIMIT = process.env.PAWPALS_DAILY_TOKEN_LIMIT ? Number(process.env.PAWPALS_DAILY_TOKEN_LIMIT) : null;
+if (process.env.PAWPALS_DAILY_TOKEN_LIMIT && !Number.isFinite(DAILY_TOKEN_LIMIT as number)) {
+  console.warn("[quota] PAWPALS_DAILY_TOKEN_LIMIT 配置值无法识别：\"" + process.env.PAWPALS_DAILY_TOKEN_LIMIT + "\"——没有设置每用户日额度上限");
+}
 const quotaFile = () => path.join(userDataDir(), "quota.json");
 const quota = createQuota({
   dailyLimit: Number.isFinite(DAILY_TOKEN_LIMIT as number) ? DAILY_TOKEN_LIMIT : null,
   load: (userId) => runWithUser(userId, () => {
-    try { return existsSync(quotaFile()) ? JSON.parse(readFileSync(quotaFile(), "utf-8")) : null; } catch { return null; }
+    try { return existsSync(quotaFile()) ? JSON.parse(readFileSync(quotaFile(), "utf-8")) : null; } catch (e: any) { console.warn("[quota] 读取失败（用户：" + userId + "）：" + e?.message + "——该用户今日计数清零，当日上限失效"); return null; }
   }),
   save: (userId, rec) => runWithUser(userId, () => {
     try { ensureDir(path.dirname(quotaFile())); writeFileSync(quotaFile(), JSON.stringify(rec)); } catch (e: any) { console.warn("[quota] 写入失败：", e?.message); }
