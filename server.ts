@@ -4,7 +4,8 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 import os from "os";
 import path from "path";
-import { chatCompletion, chatCompletionStream, chatExtractJson, chatExtractJsonWithImage, getTokenStats, resetTokenStats } from "./llm.ts";
+import { chatCompletion, chatCompletionStream, chatExtractJson, chatExtractJsonWithImage, getTokenStats, resetTokenStats, setUsageHook } from "./llm.ts";
+import { createQuota } from "./server/quota.ts";
 import { OfficialApplicationQueue, parseRequestedKind } from "./server/official-application-queue.ts";
 import { resolveRoute, detectExplicitAgentId } from "./server/routing.ts";
 import {
@@ -282,6 +283,26 @@ const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
     pendingApplyCommands: new Map(),
     pendingWorkflowSelections: new Map(),
   })),
+});
+
+/**
+ * 每日 token 上限。未设 = 不限（单人版默认不限）。数字尚未定量——见设计稿
+ * "已知风险"：开放注册前必须定下来。
+ */
+const DAILY_TOKEN_LIMIT = process.env.PAWPALS_DAILY_TOKEN_LIMIT ? Number(process.env.PAWPALS_DAILY_TOKEN_LIMIT) : null;
+const quotaFile = () => path.join(userDataDir(), "quota.json");
+const quota = createQuota({
+  dailyLimit: Number.isFinite(DAILY_TOKEN_LIMIT as number) ? DAILY_TOKEN_LIMIT : null,
+  load: (userId) => runWithUser(userId, () => {
+    try { return existsSync(quotaFile()) ? JSON.parse(readFileSync(quotaFile(), "utf-8")) : null; } catch { return null; }
+  }),
+  save: (userId, rec) => runWithUser(userId, () => {
+    try { ensureDir(path.dirname(quotaFile())); writeFileSync(quotaFile(), JSON.stringify(rec)); } catch (e: any) { console.warn("[quota] 写入失败：", e?.message); }
+  }),
+});
+setUsageHook((usage) => {
+  const userId = currentUserId();
+  if (userId) quota.record(userId, usage.total_tokens || 0);
 });
 
 /** 取当前用户的进程内状态。没有用户上下文一律抛错，绝不回退到某个"默认用户"。 */
@@ -4935,7 +4956,7 @@ async function startServer() {
     const userId = resolveRequestUser(req);
     if (!userId) return res.status(401).json({ ok: false });
     const user = MULTI_USER ? userStore!.findById(userId) : null;
-    res.json({ ok: true, mode: MULTI_USER ? "multi" : "single", user: user ? { id: user.id, email: user.email } : { id: userId } });
+    res.json({ ok: true, mode: MULTI_USER ? "multi" : "single", user: user ? { id: user.id, email: user.email } : { id: userId }, quota: { used: quota.used(userId), limit: quota.limit() } });
   });
 
   app.post("/api/auth/logout", (req: any, res: any) => {
@@ -5523,6 +5544,17 @@ async function startServer() {
     });
 
     socket.on("send_message", (msg) => {
+      // 超额判定只在一轮开始时做：一轮 3 次调用，中途掐断用户看到的是半截对话
+      const userId = currentUserId();
+      if (userId && quota.exceeded(userId)) {
+        emitTo("receive_message", {
+          id: `quota-${Date.now()}`, sender: "系统", avatar: "/avatars/system.png",
+          content: `今天的 AI 用量已经用完（${quota.limit()} tokens/天），明天再来吧 🐾`,
+          groupId: msg?.groupId || "job", timestamp: new Date().toISOString(), isBot: true,
+        });
+        return;
+      }
+
       const newMessage = { ...msg, id: Date.now().toString(), timestamp: new Date().toISOString() };
       messages.push(newMessage);
       saveMessages(messages);

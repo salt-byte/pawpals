@@ -46,12 +46,24 @@ export function resetTokenStats() {
   tokenStats.startedAt = new Date().toISOString();
 }
 
-function trackUsage(usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) {
+type Usage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+
+/**
+ * 用量钩子。llm.ts 不知道用户是谁——由 server.ts 挂一个从异步上下文取用户的
+ * 函数进来。钩子抛错不能影响模型调用，所以 try/catch。
+ */
+let usageHook: ((usage: Usage) => void) | null = null;
+export function setUsageHook(fn: ((usage: Usage) => void) | null) {
+  usageHook = fn;
+}
+
+function trackUsage(usage?: Usage) {
   if (!usage) return;
   tokenStats.prompt += usage.prompt_tokens || 0;
   tokenStats.completion += usage.completion_tokens || 0;
   tokenStats.total += usage.total_tokens || 0;
   tokenStats.calls += 1;
+  try { usageHook?.(usage); } catch (e: any) { console.warn("[llm] usage hook 抛错：", e?.message || e); }
 }
 
 /**
