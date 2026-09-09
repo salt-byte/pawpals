@@ -36,7 +36,10 @@ import { upsertAnswers } from "./server/profile-answers.ts";
 import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
-import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo } from "./server/tenancy.ts";
+import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo, isValidUserId } from "./server/tenancy.ts";
+import { createUserStore, createSessionStore } from "./server/auth.ts";
+import { renderAuthPage } from "./server/auth-page.ts";
+import * as nodeFs from "fs";
 import { createUserStateStore, type UserStateStore } from "./server/user-state.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
@@ -225,6 +228,14 @@ type UserState = {
     officialConfirmationId?: string;
   }>;
   pendingWorkflowSelections: Map<string, { rowIds: string[]; timestamp: number }>;
+  /**
+   * 首次进入这个用户的上下文时补做的启动动作（建目录、铺人设、同步协作看板）。
+   *
+   * 单人模式这些在 startServer() 里做过了；多用户模式没有「启动期的用户」，
+   * 那时求值 careerDir() 会抛，只能挪到这个用户的状态第一次被创建时——此刻正在
+   * runWithUser(userId) 里。值本身没人读，靠字段初始化的副作用。
+   */
+  _bootstrapped: boolean;
 };
 
 /** 30 分钟无活动即卸载；有 socket 或插件连接的用户不卸。 */
@@ -235,6 +246,17 @@ const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
   // create 在 get(userId) 时被调用，而 get 只在用户上下文里调用，所以这里的
   // loadMessages() 读的是该用户自己的文件。
   create: (userId) => runWithUser(userId, () => ({
+    // 这些在单人模式的 startServer() 里做过了，不重复；多用户模式只能在这做。
+    _bootstrapped: MULTI_USER
+      ? (() => {
+          ensureDir(careerDir());
+          seedAgentSouls();
+          syncJobsToCollaborationBoard();
+          syncApplicationsToCollaborationBoard();
+          syncContactsToCollaborationBoard();
+          return true;
+        })()
+      : false,
     messages: (() => { const saved = loadMessages(); return saved.length > 0 ? saved : defaultMessagesFor(); })(),
     studyRoomUsers: [],
     treeHolePosts: [
@@ -465,6 +487,37 @@ setInterval(() => {
   for (const [k, s] of _sessions.entries())
     if (now - s.createdAt > kSessionTtlMs) _sessions.delete(k);
 }, 60 * 60 * 1000);
+
+// ── 多用户账号系统 ──────────────────────────────────────────────────────
+/** 多用户模式的用户表与会话表。单人模式不创建——PIN 那套原样保留。 */
+const USERS_FILE = path.join(APP_DATA_DIR, "users.json");
+const SESSIONS_FILE = path.join(APP_DATA_DIR, "sessions.json");
+const userStore = MULTI_USER ? createUserStore({ file: USERS_FILE, fs: nodeFs }) : null;
+const sessionStore = MULTI_USER ? createSessionStore({ file: SESSIONS_FILE, fs: nodeFs, ttlMs: kSessionTtlMs }) : null;
+
+/**
+ * 请求属于谁。返回 null 表示未认证。
+ *
+ * 单人模式：沿用改造前的 _isAuthenticated（含 localhost 放行、PIN 未启用放行），
+ * 通过即是 local——「本地单人版行为与改造前一致」是验收项。
+ * 多用户模式：只认会话 cookie / Bearer。没有 localhost 放行；开发期用
+ * PAWPALS_DEV_NO_AUTH=1 显式打开，默认关闭。
+ *
+ * userId 只能来自会话表，绝不来自请求体、query 或调用方随手塞的头。
+ */
+function resolveRequestUser(req: any): string | null {
+  if (!MULTI_USER) return _isAuthenticated(req) ? LOCAL_USER_ID : null;
+  if (process.env.PAWPALS_DEV_NO_AUTH === "1") return LOCAL_USER_ID;
+  const token = _getSessionToken(req);
+  if (!token) return null;
+  const userId = sessionStore!.resolve(token);
+  return userId && isValidUserId(userId) ? userId : null;
+}
+
+function sessionCookie(token: string): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `paw_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${kSessionTtlMs / 1000}${secure}`;
+}
 
 const MODEL_PRESETS = [
   {
@@ -1376,7 +1429,7 @@ function loadOnboardingState(): OnboardingState {
 function saveOnboardingState(state: OnboardingState, io?: Server) {
   try { writeFileSync(onboardingStateFile(), JSON.stringify(state, null, 2)); } catch {}
   // 通知前端更新进度条
-  if (io) io.emit("onboarding_phase", { phase: state.phase, completed: state.completed });
+  if (io) emitTo("onboarding_phase", { phase: state.phase, completed: state.completed });
 }
 
 function handleOnboardingNavigationCommand(
@@ -1681,7 +1734,7 @@ function emitBotMessage(
   };
   messages.push(botMsg);
   saveMessages(messages);
-  io.emit("receive_message", botMsg);
+  emitTo("receive_message", botMsg);
 }
 
 function applyBoardUpdate(update: any) {
@@ -2888,7 +2941,7 @@ async function streamAgent(
     agentId: agent.id,
   };
   allMessages.push(placeholder);
-  io.emit("receive_message", placeholder);
+  emitTo("receive_message", placeholder);
 
   // Helper: emit structured tool activity (transparent AI operation log)
   const emitToolActivity = (
@@ -2897,7 +2950,7 @@ async function streamAgent(
     permission: "workspace" | "network" | "boss" | "official-site",
     detail?: string
   ) => {
-    io.emit("tool_activity", {
+    emitTo("tool_activity", {
       id: `${msgId}-${tool}-${Date.now()}`,
       msgId,
       groupId,
@@ -3256,9 +3309,9 @@ async function streamAgent(
             allMessages[idx].isLoading = false;
           }
           for (const char of loginMsg) {
-            io.emit("stream_chunk", { id: msgId, token: char, groupId });
+            emitTo("stream_chunk", { id: msgId, token: char, groupId });
           }
-          io.emit("stream_done", { id: msgId });
+          emitTo("stream_done", { id: msgId });
           saveMessages(allMessages);
           return { reply: loginMsg, calledApply: false };
         }
@@ -3273,9 +3326,9 @@ async function streamAgent(
             allMessages[idx].isLoading = false;
           }
           for (const char of tableContent) {
-            io.emit("stream_chunk", { id: msgId, token: char, groupId });
+            emitTo("stream_chunk", { id: msgId, token: char, groupId });
           }
-          io.emit("stream_done", { id: msgId });
+          emitTo("stream_done", { id: msgId });
           saveMessages(allMessages);
           appendChatLog(agent, messages[messages.length-1]?.content ?? "", tableContent);
           return { reply: tableContent, calledApply: false };
@@ -3346,7 +3399,7 @@ async function streamAgent(
           const token = chunk.choices?.[0]?.delta?.content ?? "";
           if (!token) continue;
           fullText += token;
-          io.emit("stream_chunk", { id: msgId, token, groupId });
+          emitTo("stream_chunk", { id: msgId, token, groupId });
         } catch {}
       }
     }
@@ -3448,7 +3501,7 @@ async function streamAgent(
       allMessages[idx].isLoading = false;
     }
     console.log(`[stream] ${agent.id} done, fullText length=${fullText.length}, preview="${fullText.slice(0,100)}"`);
-    io.emit("stream_done", { id: msgId });
+    emitTo("stream_done", { id: msgId });
     saveMessages(allMessages);
 
     // Bot @mention 触发：如果 agent 回复里 @了其他 agent，自动触发被 @的 agent
@@ -3485,7 +3538,7 @@ async function streamAgent(
           score: review.score,
           issueCount: review.issues?.length || 0,
         });
-        io.emit("review_result", { msgId, agentId: agent.id, passed: review.passed, score: review.score });
+        emitTo("review_result", { msgId, agentId: agent.id, passed: review.passed, score: review.score });
       }).catch(() => {});
     }
 
@@ -3501,7 +3554,7 @@ async function streamAgent(
     return { reply: rawReply, calledApply };
   } catch (e) {
     console.error(`[stream] ${agent.id} error:`, e);
-    io.emit("stream_done", { id: msgId, error: true });
+    emitTo("stream_done", { id: msgId, error: true });
     return { reply: null, calledApply: false };
   }
 }
@@ -3556,7 +3609,7 @@ async function runAgentChain(
     ).join("\n");
 
     // ── 十二用 LLM 回复，sessions_spawn 由 LLM 自行决定 ──
-    io.emit("agent_thinking", { agentName: petName, groupId });
+    emitTo("agent_thinking", { agentName: petName, groupId });
 
     // 多专家并行判断：只有消息里明确同时提到多个任务领域时才调 orchestrate（避免额外 LLM 调用）
     const needsMultiAgent = /(?:简历|resume).*(?:搜|岗位|job)|(?:搜|岗位|job).*(?:简历|resume)|(?:面试|interview).*(?:投递|apply)|同时|一起帮我.*和/.test(userMsg);
@@ -3581,12 +3634,12 @@ async function runAgentChain(
       await Promise.all(tasks.map(async ({ agentId, task }) => {
         const expert = JOB_AGENTS.find(a => a.id === agentId);
         if (!expert) return;
-        io.emit("agent_thinking", { agentName: expert.name, groupId });
+        emitTo("agent_thinking", { agentName: expert.name, groupId });
         const expertMessages = [
           { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${sharedProfileCtx}\n\n你的任务：${task}` }
         ];
         const { reply } = await streamAgent(expert, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
-        io.emit("agent_done", { agentName: expert.name, groupId });
+        emitTo("agent_done", { agentName: expert.name, groupId });
         if (reply) expertResults.push({ agentId, reply });
       }));
 
@@ -3623,7 +3676,7 @@ async function runAgentChain(
       route,
     });
     if (routeTarget.id !== "career-planner") {
-      io.emit("agent_thinking", { agentName: routeTarget.name, groupId });
+      emitTo("agent_thinking", { agentName: routeTarget.name, groupId });
       let profileCtx = "";
       try {
         const profile = existsSync(path.join(careerDir(), "profile.md")) ? readFileSync(path.join(careerDir(), "profile.md"), "utf8") : "";
@@ -3633,7 +3686,7 @@ async function runAgentChain(
         { role: "user", content: `【来自${petName}的任务】\n背景：\n${contextSummary}${profileCtx}\n\n请处理：${userMsg}` }
       ];
       await streamAgent(routeTarget, expertMessages, depth, io, groupId, allMessages, petName, petPersonality);
-      io.emit("agent_done", { agentName: routeTarget.name, groupId });
+      emitTo("agent_done", { agentName: routeTarget.name, groupId });
       return;
     }
   }
@@ -3662,7 +3715,7 @@ async function runAgentChain(
     const filteredAgents = nextAgents.filter(a => !SKIP_FOR_BOSS.has(a.id));
     for (const nextAgent of filteredAgents) {
       await new Promise(r => setTimeout(r, 150));
-      io.emit("agent_thinking", { agentName: nextAgent.name, groupId });
+      emitTo("agent_thinking", { agentName: nextAgent.name, groupId });
       const spawnMatch = reply.match(new RegExp(`sessions_spawn\\s+${nextAgent.id}[^\\n]*\\n?([^\\n]+)?`));
       const spawnTask = spawnMatch?.[1]?.trim() || "";
       // 优先用 sessions_spawn 里的描述，其次用原始用户消息
@@ -3674,7 +3727,7 @@ async function runAgentChain(
           { role: "user", content: `用户原始请求：${taskDesc}${profileCtx}` }],
         depth + 1, io, groupId, allMessages, petName, petPersonality
       );
-      io.emit("agent_done", { agentName: nextAgent.name, groupId });
+      emitTo("agent_done", { agentName: nextAgent.name, groupId });
     }
   }
 
@@ -3683,13 +3736,13 @@ async function runAgentChain(
     const chiefAgent = JOB_AGENTS.find(a => a.id === "career-planner");
     if (chiefAgent) {
       await new Promise(r => setTimeout(r, 300));
-      io.emit("agent_thinking", { agentName: petName, groupId });
+      emitTo("agent_thinking", { agentName: petName, groupId });
       await streamAgent(
         { ...chiefAgent, name: petName },
         [{ role: "user", content: `${agent.name} 刚刚完成了任务。请接住结果、总结给用户、推进下一步。不要重复专家说过的内容。` }],
         0, io, groupId, allMessages, petName, petPersonality
       );
-      io.emit("agent_done", { agentName: petName, groupId });
+      emitTo("agent_done", { agentName: petName, groupId });
     }
   }
 }
@@ -3809,7 +3862,7 @@ async function executePlan(
           return null;
         }
 
-        io.emit("agent_thinking", { agentName: expert.name, groupId });
+        emitTo("agent_thinking", { agentName: expert.name, groupId });
         try {
           const { reply } = await streamAgent(
             expert,
@@ -3822,7 +3875,7 @@ async function executePlan(
           console.warn(`[orchestration] ${expert.id} 执行失败：`, e?.message || e);
           return null;
         } finally {
-          io.emit("agent_done", { agentName: expert.name, groupId });
+          emitTo("agent_done", { agentName: expert.name, groupId });
         }
       })
     );
@@ -3916,7 +3969,7 @@ async function runOrchestratedTurn(
 
   // 首席独自作答：没有专家可派，或专家一个都没产出。两处共用，避免又拼出两份不一样的上下文。
   const chiefAlone = async () => {
-    io.emit("agent_thinking", { agentName: petName, groupId });
+    emitTo("agent_thinking", { agentName: petName, groupId });
     try {
       await streamAgent(
         chiefWithName,
@@ -3927,7 +3980,7 @@ async function runOrchestratedTurn(
         "", undefined, userMsg
       );
     } finally {
-      io.emit("agent_done", { agentName: petName, groupId });
+      emitTo("agent_done", { agentName: petName, groupId });
     }
   };
 
@@ -3948,7 +4001,7 @@ async function runOrchestratedTurn(
 
   // 综合。allowMore 只在第一次为 true —— 追加轮硬上限一次。
   const synthesize = async (allowMore: boolean): Promise<string> => {
-    io.emit("agent_thinking", { agentName: petName, groupId });
+    emitTo("agent_thinking", { agentName: petName, groupId });
     try {
       const { reply } = await streamAgent(
         chiefWithName,
@@ -3969,7 +4022,7 @@ async function runOrchestratedTurn(
       console.warn("[orchestration] 综合失败：", e?.message || e);
       return "";
     } finally {
-      io.emit("agent_done", { agentName: petName, groupId });
+      emitTo("agent_done", { agentName: petName, groupId });
     }
   };
 
@@ -4130,7 +4183,7 @@ async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[
       profileData,
     };
     allMessages.push(cardMsg);
-    io.emit("receive_message", cardMsg);
+    emitTo("receive_message", cardMsg);
     console.log("[phase] emitted profile_card");
   }
 }
@@ -4214,7 +4267,7 @@ async function handleSelectedJobsWorkflow(
     },
     runBeat: async (agentId, prompt) => {
       const agent = jobAgentById(agentId);
-      io.emit("agent_thinking", { agentName: agent.name, groupId: "job" });
+      emitTo("agent_thinking", { agentName: agent.name, groupId: "job" });
       await runAgentChain(
         agent,
         [{ role: "user", content: prompt }],
@@ -4225,7 +4278,7 @@ async function handleSelectedJobsWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { agentName: agent.name, groupId: "job" });
+      emitTo("agent_done", { agentName: agent.name, groupId: "job" });
     },
     readRow: (row) =>
       loadCollaborationBoard().find(
@@ -4369,7 +4422,7 @@ async function handleApplyReadyWorkflow(
       notes: [row.notes, `渠道：${applicationChannel === "boss_chat" ? "Boss直聘打招呼" : "简历投递"}`, recordSummary, applySummary].filter(Boolean).join(" | "),
     });
 
-    io.emit("agent_thinking", { agentName: appTracker.name, groupId: "job" });
+    emitTo("agent_thinking", { agentName: appTracker.name, groupId: "job" });
     await runAgentChain(
       appTracker,
       [{
@@ -4393,10 +4446,10 @@ async function handleApplyReadyWorkflow(
       petName,
       petPersonality
     );
-    io.emit("agent_done", { agentName: appTracker.name, groupId: "job" });
+    emitTo("agent_done", { agentName: appTracker.name, groupId: "job" });
 
     if (shouldRunNetworker) {
-      io.emit("agent_thinking", { agentName: networker.name, groupId: "job" });
+      emitTo("agent_thinking", { agentName: networker.name, groupId: "job" });
       await runAgentChain(
         networker,
         [{
@@ -4418,7 +4471,7 @@ async function handleApplyReadyWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { agentName: networker.name, groupId: "job" });
+      emitTo("agent_done", { agentName: networker.name, groupId: "job" });
     }
   }
 
@@ -4480,7 +4533,7 @@ async function handlePipelineSignalWorkflow(
 
     const interviewCoach = JOB_AGENTS.find((a) => a.id === "interview-coach")!;
     for (const row of matchedRows) {
-      io.emit("agent_thinking", { agentName: interviewCoach.name, groupId: "job" });
+      emitTo("agent_thinking", { agentName: interviewCoach.name, groupId: "job" });
       await runAgentChain(
         interviewCoach,
         [{
@@ -4514,7 +4567,7 @@ async function handlePipelineSignalWorkflow(
         petName,
         petPersonality
       );
-      io.emit("agent_done", { agentName: interviewCoach.name, groupId: "job" });
+      emitTo("agent_done", { agentName: interviewCoach.name, groupId: "job" });
     }
     return true;
   }
@@ -4579,19 +4632,30 @@ async function startServer() {
     },
   });
 
+  setEmitter(io);
+
   /**
-   * 把每个进来的 socket 包放进用户上下文。
+   * socket 鉴权 + 把每个进来的 socket 包放进用户上下文。
+   *
+   * 握手 cookie / Bearer 里的会话 → userId → 加入以 userId 命名的房间，之后
+   * emitTo() 只往这个房间发。认不出人直接拒绝连接。
    *
    * AsyncLocalStorage 传得到 Express 处理器，但**传不到** socket.io 的
    * connection 回调和 socket.on 处理器——engine.io 的连接生命周期走的是它自己的
    * 异步资源，链在那里断了。实测过：`[PawPals] 聊天记录已清空` 打印了，
    * pawpals_messages.json 根本没写出来，因为 saveMessages 的空 catch 把
-   * careerDir() 的抛错吞掉了。
+   * careerDir() 的抛错吞掉了。所以这里显式 socket.use 包一层。
    *
-   * 多用户模式接进来之后，这里的固定用户会换成握手认出来的那个人。
+   * 只能有这一个 io.use：再加一个就是两层 runWithUser 嵌套，内层那个说了算，
+   * 多用户模式下所有人都会被当成 local，隔离静默失效。
    */
   io.use((socket, next) => {
-    socket.use((_packet, nextPacket) => runWithUser(LOCAL_USER_ID, () => nextPacket()));
+    const fakeReq = { headers: socket.handshake.headers, socket: { remoteAddress: socket.handshake.address } };
+    const userId = resolveRequestUser(fakeReq);
+    if (!userId) return next(new Error("未登录"));
+    (socket.data as any).userId = userId;
+    socket.join(userId);
+    socket.use((_packet, nextPacket) => runWithUser(userId, () => nextPacket()));
     next();
   });
 
@@ -4677,25 +4741,44 @@ async function startServer() {
   // 静态头像文件
   const avatarsDir = path.join(process.env.PAWPALS_APP_UNPACKED_ROOT || process.env.PAWPALS_APP_ROOT || process.cwd(), "resources", "avatars");
   app.use("/avatars", express.static(avatarsDir));
-  syncJobsToCollaborationBoard();
-  syncApplicationsToCollaborationBoard();
-  syncContactsToCollaborationBoard();
+  // 启动期没有用户上下文（多用户模式），careerDir() 会抛；单人模式照旧在这里同步一次。
+  // 多用户模式改为每个用户首次 state() 创建时同步，见 userStates 的 create。
+  if (!MULTI_USER) {
+    syncJobsToCollaborationBoard();
+    syncApplicationsToCollaborationBoard();
+    syncContactsToCollaborationBoard();
+  }
 
-  // ── Auth 中间件：非 localhost 访问需要 PIN ─────────────────────────
-  const AUTH_EXEMPT = ["/api/auth/", "/api/health"];
+  // ── Auth 中间件：单人模式非 localhost 访问需要 PIN；多用户模式需要会话 ──
+  const AUTH_EXEMPT_PREFIX = ["/api/auth/", "/api/health"];
+  // 精确匹配：前缀匹配会把需要登录的 /api/extension/pair-code 一起放过去
+  const AUTH_EXEMPT_EXACT = ["/api/extension/pair"];
   app.use((req: any, res: any, next: any) => {
-    const isExempt = AUTH_EXEMPT.some(p => req.path.startsWith(p));
-    if (isExempt || _isAuthenticated(req)) return next();
-    if (req.path.startsWith("/api/")) return res.status(401).json({ error: "未授权，请先输入访问密码", requirePin: true });
+    const isExempt = AUTH_EXEMPT_PREFIX.some(p => req.path.startsWith(p)) || AUTH_EXEMPT_EXACT.includes(req.path);
+    const userId = resolveRequestUser(req);
+    if (isExempt && !userId) return next();
+    if (userId) {
+      userStates.touch(userId);
+      // 之后整条处理链（含 await 之后）都在该用户的上下文里
+      return runWithUser(userId, () => next());
+    }
+    if (req.path.startsWith("/api/")) return res.status(401).json({ error: MULTI_USER ? "未授权，请先登录" : "未授权，请先输入访问密码", requirePin: !MULTI_USER, requireLogin: MULTI_USER });
+    if (MULTI_USER) return res.status(401).send(renderAuthPage());
     // 非 API 请求返回简单登录页
     res.status(401).send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PawPals 访问验证</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fdf3e8;font-family:system-ui}form{background:#fff;padding:2rem;border-radius:1.5rem;box-shadow:0 4px 24px #f4956a22;text-align:center;width:320px}h2{margin:0 0 .5rem;color:#3d2b1f;font-size:1.3rem}p{color:#8c6b52;font-size:.85rem;margin:0 0 1.5rem}input{width:100%;padding:.75rem 1rem;border:2px solid #f4956a44;border-radius:.75rem;font-size:1.2rem;letter-spacing:.3em;text-align:center;outline:none;color:#3d2b1f}.err{color:#d4694a;font-size:.8rem;margin:.5rem 0 0}button{margin-top:1rem;width:100%;padding:.75rem;background:#f4956a;color:#fff;border:none;border-radius:.75rem;font-size:1rem;cursor:pointer;font-weight:600}</style></head><body><form id="f"><h2>🐾 PawPals</h2><p>请输入访问密码以继续</p><input id="pin" type="password" placeholder="••••••" autocomplete="current-password" autofocus><div class="err" id="err"></div><button type="submit">进入</button></form><script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:document.getElementById('pin').value})});const d=await r.json();if(d.ok)location.reload();else document.getElementById('err').textContent=d.error||'密码错误';});</script></body></html>`);
   });
 
   // ── Auth 路由 ──────────────────────────────────────────────────────
   app.get("/api/auth/status", (req: any, res: any) => {
+    if (MULTI_USER) {
+      const userId = resolveRequestUser(req);
+      const user = userId ? userStore!.findById(userId) : null;
+      return res.json({ mode: "multi", authenticated: !!userId, user: user ? { id: user.id, email: user.email } : null });
+    }
     const sec = _loadSecurity();
     const ip = _getClientIp(req);
     res.json({
+      mode: "single",
       pinEnabled: sec.enabled && !!sec.pinHash,
       isLocalhost: _isLocalhost(ip),
       authenticated: _isAuthenticated(req),
@@ -4703,6 +4786,20 @@ async function startServer() {
   });
 
   app.post("/api/auth/login", (req: any, res: any) => {
+    if (MULTI_USER) {
+      const { email, password } = req.body || {};
+      // 限流键从 IP 改为 IP + 邮箱：一个 IP 后面可能是一整个学校
+      const key = `${_getClientIp(req)}|${String(email || "").trim().toLowerCase()}`;
+      const { blocked, retryAfterSec } = _checkThrottle(key);
+      if (blocked) return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
+      const user = userStore!.authenticate(email, password);
+      if (!user) { _recordFailure(key); return res.status(401).json({ ok: false, error: "邮箱或密码不对" }); }
+      _recordSuccess(key);
+      const token = sessionStore!.issue(user.id);
+      res.setHeader("Set-Cookie", sessionCookie(token));
+      return res.json({ ok: true, token, user: { id: user.id, email: user.email } });
+    }
+    // ── 以下单人模式 PIN 逻辑原样 ──
     const ip = _getClientIp(req);
     const { blocked, retryAfterSec } = _checkThrottle(ip);
     if (blocked) return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
@@ -4722,15 +4819,35 @@ async function startServer() {
     return res.json({ ok: true, token });
   });
 
+  app.post("/api/auth/register", (req: any, res: any) => {
+    if (!MULTI_USER) return res.status(404).json({ ok: false, error: "单人模式没有注册" });
+    const { email, password } = req.body || {};
+    const r = userStore!.register(email, password);
+    if (r.ok === false) return res.status(400).json({ ok: false, error: r.error });
+    ensureDir(path.join(APP_DATA_DIR, "users", r.user.id, "career"));
+    const token = sessionStore!.issue(r.user.id);
+    res.setHeader("Set-Cookie", sessionCookie(token));
+    console.log(`[auth] 新用户注册 ${r.user.id}`);
+    return res.json({ ok: true, token, user: { id: r.user.id, email: r.user.email } });
+  });
+
+  app.get("/api/auth/me", (req: any, res: any) => {
+    const userId = resolveRequestUser(req);
+    if (!userId) return res.status(401).json({ ok: false });
+    const user = MULTI_USER ? userStore!.findById(userId) : null;
+    res.json({ ok: true, mode: MULTI_USER ? "multi" : "single", user: user ? { id: user.id, email: user.email } : { id: userId } });
+  });
+
   app.post("/api/auth/logout", (req: any, res: any) => {
     const token = _getSessionToken(req);
-    if (token) _sessions.delete(token);
+    if (token) { _sessions.delete(token); sessionStore?.revoke(token); }
     res.setHeader("Set-Cookie", "paw_session=; Path=/; HttpOnly; Max-Age=0");
     res.json({ ok: true });
   });
 
   // 设置 PIN（仅 localhost 可调用）
   app.post("/api/auth/pin/set", (req: any, res: any) => {
+    if (MULTI_USER) return res.status(404).json({ error: "多用户模式没有 PIN" });
     if (!_isLocalhost(_getClientIp(req))) return res.status(403).json({ error: "只能在本机设置密码" });
     const { pin, enabled } = req.body;
     if (enabled === false) {
@@ -4941,8 +5058,24 @@ async function startServer() {
     { name: "数学解题兔", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=MathRabbit", groupId: "grad", responses: ["咕！高数其实很有趣，只要掌握了公式。", "这道题的思路是先求导，再找极值。"] },
   ];
 
+  /**
+   * 定时器里没有用户上下文。
+   *
+   * 单人模式下这些定时器是从 startServer() 继承来的 local 上下文，照旧直接跑
+   * ——行为一个字不变。多用户模式没有「启动期的用户」，state() 会抛未捕获异常、
+   * emitTo() 会丢包，所以按当前连着的用户各跑一遍：每个人的广场刷出自己的那条。
+   */
+  const forEachActiveUser = (fn: () => void) => {
+    if (!MULTI_USER) return fn();
+    const seen = new Set<string>();
+    for (const s of io.sockets.sockets.values()) {
+      const uid = (s.data as any)?.userId;
+      if (typeof uid === "string" && !seen.has(uid)) { seen.add(uid); runWithUser(uid, fn); }
+    }
+  };
+
   // Periodic Bot Actions
-  setInterval(() => {
+  setInterval(() => forEachActiveUser(() => {
     const randomBot = bots[Math.floor(Math.random() * bots.length)];
     const botPost = {
       id: `bot-post-${Date.now()}`,
@@ -4956,25 +5089,46 @@ async function startServer() {
       isChiefBot: randomBot.isChief || false,
     };
     state().posts.unshift(botPost);
-    io.emit("new_post", botPost);
-  }, 60000); // Every minute
+    emitTo("new_post", botPost);
+  }), 60000); // Every minute
 
-  setInterval(() => {
+  setInterval(() => forEachActiveUser(() => {
     const otherChiefs = ["全能学霸喵", "考公专家兔", "面试战神汪"];
     const randomChief = otherChiefs[Math.floor(Math.random() * otherChiefs.length)];
-    io.emit("bot_friendship", {
+    emitTo("bot_friendship", {
       botName: "首席伴学汪",
       friendName: randomChief,
       message: `汪！我的首席官刚刚和邻居家的 ${randomChief} 成了好朋友，它们正在交流最新的学习秘籍呢！✨`
     });
-  }, 120000); // Every 2 minutes
+  }), 120000); // Every 2 minutes
 
-  io.on("connection", (socket) => runWithUser(LOCAL_USER_ID, () => {
+  /**
+   * 闲置状态卸载。
+   *
+   * 有 socket 连着的用户绝不能卸：下面 connection 闭包把 messages / posts 等
+   * 数组解构成了局部变量，活到断开为止。卸了再建，闭包持着旧数组、state() 返回
+   * 新数组，这个人的聊天记录就悄悄劈成了两份。
+   * officialTaskHub.size() 目前没有按用户的签名（Task 7 才有），先按「有任何扩展
+   * 连着就都不卸」处理——宁可多留，不能错卸。
+   */
+  setInterval(() => {
+    const active = new Set<string>();
+    for (const s of io.sockets.sockets.values()) {
+      const uid = (s.data as any)?.userId;
+      if (typeof uid === "string") active.add(uid);
+    }
+    const extensionsOnline = officialTaskHub.size() > 0;
+    const evicted = userStates.evictIdle((id) => active.has(id) || extensionsOnline);
+    if (evicted.length) console.log(`[state] 卸载闲置用户状态 ${evicted.join(",")}`);
+  }, 5 * 60 * 1000);
+
+  io.on("connection", (socket) => runWithUser((socket.data as any).userId as string, () => {
     // AsyncLocalStorage 传不进 socket.io 的 connection 回调（见上面 io.use 的注释），
-    // 这里必须自己开一个上下文，否则下一行的 state() 直接抛。
-    // Task 6 会把 LOCAL_USER_ID 换成握手认出来的那个用户。
+    // 这里必须自己开一个上下文，否则下一行的 state() 直接抛。userId 由 io.use 认出来
+    // 放在 socket.data 上，和 socket.use 里用的是同一个。
+    const userId: string = (socket.data as any).userId;
     const { messages, studyRoomUsers, treeHolePosts, posts } = state();
-    console.log("User connected:", socket.id);
+    console.log("User connected:", socket.id, "user:", userId);
 
     // Send initial data
     socket.emit("init_messages", messages);
@@ -4986,7 +5140,7 @@ async function startServer() {
     socket.on("clear_messages", () => {
       messages.splice(0, messages.length);
       saveMessages(messages);
-      io.emit("init_messages", messages);
+      emitTo("init_messages", messages);
       console.log("[PawPals] 聊天记录已清空");
     });
 
@@ -5004,27 +5158,27 @@ async function startServer() {
     socket.on("join_study_room", (user) => {
       const newUser = { ...user, socketId: socket.id, startTime: new Date().toISOString() };
       studyRoomUsers.push(newUser);
-      io.emit("update_study_room", studyRoomUsers);
+      emitTo("update_study_room", studyRoomUsers);
     });
 
     socket.on("leave_study_room", () => {
       const index = studyRoomUsers.findIndex(u => u.socketId === socket.id);
       if (index !== -1) {
         studyRoomUsers.splice(index, 1);
-        io.emit("update_study_room", studyRoomUsers);
+        emitTo("update_study_room", studyRoomUsers);
       }
     });
 
     socket.on("post_tree_hole", (content) => {
       const newPost = { id: Date.now().toString(), content, timestamp: new Date().toISOString(), replies: [] };
       treeHolePosts.unshift(newPost);
-      io.emit("new_tree_hole", newPost);
+      emitTo("new_tree_hole", newPost);
 
       // Bot Hug
       setTimeout(() => {
         const reply = { author: "抱抱助手汪", content: "汪！感受到你的情绪了，深呼吸，小狗永远支持你！🐾", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=HugDog" };
         newPost.replies.push(reply);
-        io.emit("update_tree_hole", treeHolePosts);
+        emitTo("update_tree_hole", treeHolePosts);
       }, 2000);
     });
 
@@ -5236,7 +5390,7 @@ async function startServer() {
           [{ role: "user", content: nextStepPrompt }],
           0, io, "job", messages, pn, pp
         );
-        io.emit("agent_done", { groupId: "job" });
+        emitTo("agent_done", { groupId: "job" });
       }, 500);
     });
 
@@ -5244,7 +5398,7 @@ async function startServer() {
       const newMessage = { ...msg, id: Date.now().toString(), timestamp: new Date().toISOString() };
       messages.push(newMessage);
       saveMessages(messages);
-      io.emit("receive_message", newMessage);
+      emitTo("receive_message", newMessage);
 
       const savedPet = loadPetRuntimeProfile();
       const pn = msg.petName || savedPet.name;
@@ -5255,7 +5409,7 @@ async function startServer() {
         const isWorkTopic = /搜.*(岗|工作|实习)|找工作|投递|简历|面试|岗位|offer|招聘|boss直聘/i.test(msg.content);
         if (isWorkTopic) {
           const redirectId = `redirect-${Date.now()}`;
-          io.emit("receive_message", {
+          emitTo("receive_message", {
             id: redirectId, sender: pn,
             avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
             content: `求职的事咱们去群里说吧～ 去「求职汪成长营」找我，专家团队都在那里等你 🐾`,
@@ -5289,27 +5443,27 @@ async function startServer() {
         const isAtAll = msg.content.includes("@all");
         setTimeout(async () => {
           if (await handleJobOnboarding(io, messages, msg.content, pn, pp, String(msg.attachmentText || ""), String(msg.attachmentName || ""))) {
-            io.emit("agent_done", { groupId: msg.groupId });
+            emitTo("agent_done", { groupId: msg.groupId });
             return;
           }
           if (await handleSelectedJobsWorkflow(io, messages, msg.content, pn, pp)) {
-            io.emit("agent_done", { groupId: msg.groupId });
+            emitTo("agent_done", { groupId: msg.groupId });
             return;
           }
           if (await handleApplyReadyWorkflow(io, messages, msg.content, pn, pp)) {
-            io.emit("agent_done", { groupId: msg.groupId });
+            emitTo("agent_done", { groupId: msg.groupId });
             return;
           }
           if (await handlePipelineSignalWorkflow(io, messages, msg.content, pn, pp)) {
-            io.emit("agent_done", { groupId: msg.groupId });
+            emitTo("agent_done", { groupId: msg.groupId });
             return;
           }
           if (isAtAll) {
             const thread = [{ role: "user", content: msg.content }];
             for (const agent of jobAgentsWithPetName) {
-              io.emit("agent_thinking", { agentName: agent.name, groupId: msg.groupId });
+              emitTo("agent_thinking", { agentName: agent.name, groupId: msg.groupId });
               await runAgentChain(agent, thread, MAX_CHAIN_DEPTH, io, msg.groupId, messages, pn, pp);
-              io.emit("agent_done", { agentName: agent.name, groupId: msg.groupId });
+              emitTo("agent_done", { agentName: agent.name, groupId: msg.groupId });
             }
           } else {
             // 新编排：出计划 → 分批执行 → 综合。detectTargetAgent 的显式 @ 判断
@@ -5334,7 +5488,7 @@ async function startServer() {
             };
             messages.push(botMsg);
             saveMessages(messages);
-            io.emit("receive_message", botMsg);
+            emitTo("receive_message", botMsg);
           }, 1500);
         }
       }
@@ -5343,7 +5497,7 @@ async function startServer() {
     socket.on("create_post", (post) => {
       const newPost = { ...post, id: Date.now().toString(), timestamp: new Date().toISOString(), likes: 0 };
       posts.unshift(newPost);
-      io.emit("new_post", newPost);
+      emitTo("new_post", newPost);
     });
 
     socket.on("disconnect", () => {
@@ -5696,7 +5850,7 @@ async function startServer() {
     res.json({ ok: true });
     state().bossLoginPending = true;
     state().bossLoginPlatform = "boss";
-    io.emit("receive_message", {
+    emitTo("receive_message", {
       id: `boss-remind-${Date.now()}`,
       sender: "岗位猎手",
       avatar: "/avatars/job-hunter.jpg",
@@ -5720,7 +5874,7 @@ async function startServer() {
   app.post("/api/internal/boss-login-done", (req: any, res: any) => {
     const { ok, error } = req.body || {};
     state().bossLoginPending = false;
-    io.emit("boss_login_result", { ok });
+    emitTo("boss_login_result", { ok });
     if (!ok) console.warn("[boss-login] failed:", error || "unknown error");
     if (ok) {
       const petData = (() => { try { return existsSync(petFile()) ? JSON.parse(readFileSync(petFile(), "utf8")) : {}; } catch { return {}; } })();
@@ -5733,7 +5887,7 @@ async function startServer() {
         // onboarding 流程中登录成功 → 重新触发 first_job_search（这次有 cookie 了）
         const chiefMsgId = `chief-retry-${Date.now()}`;
         const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");
-        io.emit("receive_message", {
+        emitTo("receive_message", {
           id: chiefMsgId,
           sender: jobHunter?.name || "岗位猎手",
           avatar: jobHunter?.avatar || "/avatars/job-hunter.jpg",
@@ -5751,13 +5905,13 @@ async function startServer() {
         setTimeout(async () => {
           const cp = JOB_AGENTS.find(a => a.id === "career-planner")!;
           await runAgentChain({ ...cp, name: pn }, [{ role: "user", content: "Boss直聘登录成功了，请继续帮用户搜索岗位。" }], 0, io, "job", state().messages, pn, pp);
-          io.emit("agent_done", { groupId: "job" });
+          emitTo("agent_done", { groupId: "job" });
         }, 500);
       } else {
         const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");
         if (jobHunter && state().pendingResumableSearchTask) {
           const chiefMsgId = `chief-retry-${Date.now()}`;
-          io.emit("receive_message", {
+          emitTo("receive_message", {
             id: chiefMsgId,
             sender: jobHunter.name,
             avatar: jobHunter.avatar,
@@ -5777,9 +5931,9 @@ async function startServer() {
           const resumeTask = state().pendingResumableSearchTask;
           state().pendingResumableSearchTask = null;
           setTimeout(async () => {
-            io.emit("agent_thinking", { agentName: jobHunter.name, groupId: "job" });
+            emitTo("agent_thinking", { agentName: jobHunter.name, groupId: "job" });
             const searchResultText = await executeTool("search_jobs", resumeTask);
-            io.emit("agent_done", { agentName: jobHunter.name, groupId: "job" });
+            emitTo("agent_done", { agentName: jobHunter.name, groupId: "job" });
             if (searchResultText.includes("NEED_LOGIN")) {
               state().bossLoginPending = true;
               state().bossLoginPlatform = "boss";
@@ -5804,7 +5958,7 @@ async function startServer() {
         }
       }
     } else {
-      io.emit("receive_message", {
+      emitTo("receive_message", {
         id: `boss-login-${Date.now()}`,
         sender: "岗位猎手",
         avatar: "/avatars/job-hunter.jpg",
@@ -5842,18 +5996,18 @@ async function startServer() {
   });
 
   // ── Manage Panel ──────────────────────────────────────────────────────────
-  const MANAGE_CONFIG_FILE = path.join(careerDir(), "manage_config.json");
-  const MANAGE_UPLOADS_DIR = path.join(careerDir(), "uploads");
-  ensureDir(MANAGE_UPLOADS_DIR);
+  // 路径取决于当前用户，启动期没有用户上下文（多用户模式），所以全部惰性求值
+  const manageConfigFile = () => path.join(careerDir(), "manage_config.json");
+  const manageUploadsDir = () => path.join(careerDir(), "uploads");
 
   function readManageConfig() {
     try {
-      if (existsSync(MANAGE_CONFIG_FILE)) return JSON.parse(readFileSync(MANAGE_CONFIG_FILE, "utf8"));
+      if (existsSync(manageConfigFile())) return JSON.parse(readFileSync(manageConfigFile(), "utf8"));
     } catch {}
     return { allowedPaths: [] };
   }
   function writeManageConfig(cfg: any) {
-    writeFileSync(MANAGE_CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    writeFileSync(manageConfigFile(), JSON.stringify(cfg, null, 2));
   }
 
   app.get("/api/manage/paths", (_req: any, res: any) => {
@@ -5883,8 +6037,9 @@ async function startServer() {
   // List uploaded files
   app.get("/api/manage/files", (_req: any, res: any) => {
     try {
-      const files = readdirSync(MANAGE_UPLOADS_DIR).map(name => {
-        const full = path.join(MANAGE_UPLOADS_DIR, name);
+      const dir = manageUploadsDir();
+      const files = readdirSync(dir).map(name => {
+        const full = path.join(dir, name);
         const s = statSync(full);
         return { name, path: full, size: s.size, mtime: s.mtime.toISOString() };
       });
@@ -5895,12 +6050,15 @@ async function startServer() {
   });
 
   // Upload file to workspace uploads dir
-  const upload = multer({ dest: MANAGE_UPLOADS_DIR });
+  // multer \u7684 dest \u5728\u542f\u52a8\u671f\u5c31\u8981\u5b9a\u4e0b\u6765\uff0c\u90a3\u65f6\u8fd8\u6ca1\u6709\u7528\u6237\u4e0a\u4e0b\u6587\uff1b\u5148\u843d\u8fdb\u7cfb\u7edf\u4e34\u65f6\u76ee\u5f55\uff0c
+  // \u5904\u7406\u51fd\u6570\u91cc\u518d\u6309\u5f53\u524d\u7528\u6237\u642c\u5230\u4ed6\u81ea\u5df1\u7684 uploads \u4e0b\u3002
+  const upload = multer({ dest: os.tmpdir() });
   app.post("/api/manage/upload", upload.single("file"), (req: any, res: any) => {
     if (!req.file) return res.status(400).json({ error: "no file" });
-    const ext = path.extname(req.file.originalname);
+    const dir = manageUploadsDir();
+    ensureDir(dir);
     const destName = req.file.originalname.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5]/g, "_");
-    const destPath = path.join(MANAGE_UPLOADS_DIR, destName);
+    const destPath = path.join(dir, destName);
     copyFileSync(req.file.path, destPath);
     // remove multer tmp file
     try { unlinkSync(req.file.path); } catch {}
@@ -5908,15 +6066,16 @@ async function startServer() {
   });
 
   // Resume / document upload — saves to inbound dir and parses text server-side
-  const INBOUND_DIR = path.join(careerDir(), "media", "inbound");
-  ensureDir(INBOUND_DIR);
+  const inboundDir = () => path.join(careerDir(), "media", "inbound");
   const resumeUpload = multer({ dest: os.tmpdir() });
   app.post("/api/upload/resume", resumeUpload.single("file"), async (req: any, res: any) => {
     if (!req.file) return res.status(400).json({ error: "no file" });
     const origName = req.file.originalname;
     const ext = path.extname(origName).toLowerCase();
     const safeName = origName.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5 ()]/g, "_");
-    const destPath = path.join(INBOUND_DIR, safeName);
+    const dir = inboundDir();
+    ensureDir(dir);
+    const destPath = path.join(dir, safeName);
     try {
       copyFileSync(req.file.path, destPath);
       console.log(`[upload] copied ${origName} → ${destPath} (${statSync(destPath).size} bytes)`);
@@ -6031,17 +6190,24 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   }
 
   // 先铺人设再监听：这件事跟端口能不能绑上无关，放进 listen 回调会被
-  // 「端口被占」这类失败连带跳过。
-  seedAgentSouls();
+  // 「端口被占」这类失败连带跳过。多用户模式没有「启动期的用户」，人设改为
+  // 每个用户的状态第一次创建时铺，见 userStates 的 _bootstrapped。
+  if (!MULTI_USER) seedAgentSouls();
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     // Watchdog removed — no gateway to monitor
-    startMailWatcher(io, state().messages);
+    // 收信监听要一个具体的人的 messages 数组；多用户模式下「谁的」还没定义，
+    // 硬跑会在 state() 处抛，把启动带下去。按用户开监听由后续任务处理。
+    if (!MULTI_USER) startMailWatcher(io, state().messages);
   });
 
   // ── 主动推送：推到 Web UI ────────────────────────────────
   async function proactivePost(agentId: string, task: string, label: string) {
+    // 定时推送要一个具体的人：读他的 profile.md、写进他的 messages。多用户模式下
+    // 「推给谁」还没定义，而定时器没有用户上下文，硬跑会在 state() 处抛出未捕获
+    // 异常把进程带下去。按用户排期由后续任务处理，这里先不推。
+    if (MULTI_USER) return;
     const agent = JOB_AGENTS.find(a => a.id === agentId)!;
     console.log(`[proactive] ${label} 开始`);
     await streamAgent(agent, [{ role: "user", content: task }], MAX_CHAIN_DEPTH, io, "job", state().messages);
