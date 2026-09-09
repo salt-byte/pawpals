@@ -31,6 +31,7 @@ import { buildFieldPrompt } from "./server/field-agent.ts";
 import { widgetsToProbe, mergeProbedOptions, retryTargets, fieldsForModel, manualFields, shouldRunAnotherRound, stillOpen, questionsForUser, unprobed } from "./server/apply-orchestrator.ts";
 import { parseSizeLimit, pickResumeTarget, checkUploadFits } from "./server/upload-plan.ts";
 import { pickResumeFile } from "./server/resume-file.ts";
+import { safeUploadPath } from "./server/upload-path.ts";
 import { runApplyFlow } from "./server/apply-flow.ts";
 import { extractApplyTarget } from "./server/apply-target.ts";
 import { upsertAnswers } from "./server/profile-answers.ts";
@@ -6223,12 +6224,15 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: "no file" });
     const dir = manageUploadsDir();
     ensureDir(dir);
-    const destName = req.file.originalname.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5]/g, "_");
-    const destPath = path.join(dir, destName);
+    const destPath = safeUploadPath(dir, req.file.originalname);
+    if (!destPath) {
+      try { unlinkSync(req.file.path); } catch {}
+      return res.status(400).json({ error: "\u6587\u4ef6\u540d\u4e0d\u5408\u6cd5" });
+    }
     copyFileSync(req.file.path, destPath);
     // remove multer tmp file
     try { unlinkSync(req.file.path); } catch {}
-    res.json({ ok: true, filename: destName, path: destPath });
+    res.json({ ok: true, filename: path.basename(destPath), path: destPath });
   });
 
   // Resume / document upload — saves to inbound dir and parses text server-side
@@ -6238,10 +6242,14 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: "no file" });
     const origName = req.file.originalname;
     const ext = path.extname(origName).toLowerCase();
-    const safeName = origName.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5 ()]/g, "_");
     const dir = inboundDir();
     ensureDir(dir);
-    const destPath = path.join(dir, safeName);
+    const destPath = safeUploadPath(dir, origName);
+    if (!destPath) {
+      try { unlinkSync(req.file.path); } catch {}
+      return res.status(400).json({ error: "\u6587\u4ef6\u540d\u4e0d\u5408\u6cd5" });
+    }
+    const safeName = path.basename(destPath);
     try {
       copyFileSync(req.file.path, destPath);
       console.log(`[upload] copied ${origName} → ${destPath} (${statSync(destPath).size} bytes)`);
