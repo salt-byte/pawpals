@@ -5238,7 +5238,23 @@ async function startServer() {
 
   // ── Step 8：Secrets 脱敏 ────────────────────────────────────────────
   // 扫描配置中的明文 API Key，写入 .env，配置替换为 ${VAR}
-  app.post("/api/secrets/sanitize", (_req: any, res: any) => {
+  /**
+   * ── 部署级管理动作在多用户部署里一律关闭（暂行措施）──
+   *
+   * 下面这几条改的都是**整个部署**的东西，而现在任何一个注册用户都能调：改服务商
+   * 和 API Key（/api/setup/model、/api/switch-model）、跑密钥脱敏、增删定时任务、
+   * 清空全局 token 计数。
+   *
+   * llm.ts::resolveModel 目前把 Gemini 的 baseUrl 写死了，所以今天塞一个恶意
+   * baseUrl 还劫持不到别人的流量——那是个意外，不是防线，下次有人把那行改活就没了。
+   *
+   * 这里只做闸门，**不建角色系统**：多租户部署里「运维」是谁、他从哪进来，是一个
+   * 产品决策，不该由这一轮顺手发明。所以这是明写的暂行措施，等那个决定落下来再替换。
+   * 单人模式不受影响——本地单人版的用户本来就是运维本人。
+   */
+  const kDeployAdminOff = "多用户部署未开放部署级管理操作（等待运维角色方案）";
+
+  routeUnlessMultiUser(app, "post", "/api/secrets/sanitize", kDeployAdminOff, (_req: any, res: any) => {
     try {
       const config = loadJsonFile<any>(CONFIG_FILE, {});
       const providers = config?.models?.providers || {};
@@ -5859,7 +5875,22 @@ async function startServer() {
     });
   });
 
-  app.post("/api/mail-watcher/run", async (_req: any, res: any) => {
+  /**
+   * ── 邮件监控在多用户部署里关闭 ──
+   *
+   * runMailboxWatcher 拿 loadProfileInfo().email 当 --account 传给宿主机上的 gog
+   * CLI。那个邮箱是用户自己在 profile.md 里写的、随时可改的一个字符串，于是任何
+   * 注册用户都能把这套部署的 Gmail 凭据对准运维授权过的**任意**地址，再把捞回来的
+   * 邮件内容送进自己的聊天里。
+   *
+   * 就算邮箱这一层拧紧了，mailWatcherBusy 和 MAIL_WATCH_STATE_FILE 也都是进程级的：
+   * 一个人在跑，别人就被 busy 挡住；已处理线程集合是全体租户共用一份。
+   *
+   * 和六个每日定时任务同一个道理——它要的是「宿主机的邮箱凭据代表谁」这层语义，
+   * 多租户下没有答案。/api/mail-watcher/status 保留：只读，profileEmail 读的是
+   * 请求者自己的 careerDir()。
+   */
+  routeUnlessMultiUser(app, "post", "/api/mail-watcher/run", "多用户部署未开放邮件监控", async (_req: any, res: any) => {
     const result = await runMailboxWatcher(io, state().messages);
     res.json(result);
   });
@@ -5899,7 +5930,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/setup/model", async (req, res) => {
+  routeUnlessMultiUser(app, "post", "/api/setup/model", kDeployAdminOff, async (req: any, res: any) => {
     try {
       const provider = String(req.body?.provider || "").trim();
       const model = String(req.body?.model || "").trim();
@@ -5922,7 +5953,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/switch-model", async (req, res) => {
+  routeUnlessMultiUser(app, "post", "/api/switch-model", kDeployAdminOff, async (req: any, res: any) => {
     try {
       const provider = String(req.body?.provider || "").trim();
       const model = String(req.body?.model || "").trim();
@@ -6034,14 +6065,37 @@ async function startServer() {
 
   // ── 自动投递队列 & 搜索队列（已提升到模块顶层，此处仅保留注释）──
 
-  app.get("/api/internal/browser-search-task", (_req: any, res: any) => {
+  /**
+   * ── /api/internal/browser-* 在多用户部署里一律关闭 ──
+   *
+   * 这一组是 Electron 桌面版专用的：主进程 main.mjs 轮询它们，用一个
+   * BrowserWindow 去搜岗、抓 JD、抓网页。桌面版按定义只有一个人用，所以它们背后
+   * 那五个队列（pendingSearchQueue / pendingJdFetchQueue / pendingApplyQueue /
+   * pendingBrowserFetchQueue / applyResultStore）到今天仍是**进程级**的——设计文档
+   * 那张要搬进 UserState 的状态表里没列到它们，每个任务只搬了自己 brief 点名的那几个，
+   * 于是没人越过那张表往下看一眼。
+   *
+   * 多用户下这组端点对每个注册用户都开着，后果分两级：
+   * - 读：用户 B 一个 GET 就能看到 A 待搜的关键词和目标城市，或者 A 正在看哪个岗位。
+   * - 写：B 拿着 A 的 task id POST 一段任意 markdown 到 browser-search-done，会
+   *   resolve 掉 A 正在 await 的那个 Promise，内容原样进 A 的 agent 上下文当
+   *   【搜索结果】——里面还带着「投递」链接，然后请 A 去投。这是一条打进别人会话的
+   *   提示注入通道。
+   *
+   * 选关闭而不是把五个队列搬进 UserState：搬也能做对，但多用户部署里根本没有
+   * Electron 主进程会来轮询这些端点——搬进去是给一个跑不到的代码路径做隔离。关掉是
+   * 更小也更有把握的改动，和六个每日定时任务同一个先例。桌面版单人模式一字不变。
+   */
+  const kBrowserOff = "多用户部署未开放桌面端内部接口";
+
+  routeUnlessMultiUser(app, "get", "/api/internal/browser-search-task", kBrowserOff, (_req: any, res: any) => {
     const entry = pendingSearchQueue.entries().next().value;
     if (!entry) return res.json({ task: null });
     const [id, { query, city, cookieFile }] = entry;
     res.json({ task: { id, query, city, careerDir: careerDir(), cookieFile } });
   });
 
-  app.post("/api/internal/browser-search-done", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/internal/browser-search-done", kBrowserOff, (req: any, res: any) => {
     const { id, result } = req.body || {};
     const pending = pendingSearchQueue.get(id);
     if (pending) {
@@ -6052,14 +6106,14 @@ async function startServer() {
   });
 
   // ── JD 内容抓取（Electron BrowserWindow 执行）──────────────────────────
-  app.get("/api/internal/browser-jd-task", (_req: any, res: any) => {
+  routeUnlessMultiUser(app, "get", "/api/internal/browser-jd-task", kBrowserOff, (_req: any, res: any) => {
     const entry = pendingJdFetchQueue.entries().next().value;
     if (!entry) return res.json({ task: null });
     const [id, { url }] = entry;
     res.json({ task: { id, url } });
   });
 
-  app.post("/api/internal/browser-jd-done", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/internal/browser-jd-done", kBrowserOff, (req: any, res: any) => {
     const { id, result } = req.body || {};
     const pending = pendingJdFetchQueue.get(id);
     if (pending) {
@@ -6070,14 +6124,14 @@ async function startServer() {
   });
 
   // ── 通用 browser-fetch（Electron BrowserWindow 代替 Gateway Chrome）─────
-  app.get("/api/internal/browser-fetch-task", (_req: any, res: any) => {
+  routeUnlessMultiUser(app, "get", "/api/internal/browser-fetch-task", kBrowserOff, (_req: any, res: any) => {
     const entry = pendingBrowserFetchQueue.entries().next().value;
     if (!entry) return res.json({ task: null });
     const [id, { url }] = entry;
     res.json({ task: { id, url } });
   });
 
-  app.post("/api/internal/browser-fetch-done", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/internal/browser-fetch-done", kBrowserOff, (req: any, res: any) => {
     const { id, result } = req.body || {};
     const pending = pendingBrowserFetchQueue.get(id);
     if (pending) {
@@ -6089,14 +6143,14 @@ async function startServer() {
 
   // ── Electron 主进程内部接口（main.mjs 轮询用）──────────────────────────
   // main.mjs 取下一个待执行任务（含 cookie 路径）
-  app.get("/api/internal/browser-task", (_req: any, res: any) => {
+  routeUnlessMultiUser(app, "get", "/api/internal/browser-task", kBrowserOff, (_req: any, res: any) => {
     const task = pendingApplyQueue.values().next().value;
     if (!task) return res.json({ task: null });
     res.json({ task: { ...task, cookieFile: COOKIE_FILE } });
   });
 
   // main.mjs 执行完毕回报结果
-  app.post("/api/internal/browser-task-done", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/internal/browser-task-done", kBrowserOff, (req: any, res: any) => {
     const { id, result } = req.body || {};
     if (!id) return res.status(400).json({ ok: false });
     pendingApplyQueue.delete(id);
@@ -6105,7 +6159,7 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  app.post("/api/internal/browser-fill-form", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/internal/browser-fill-form", kBrowserOff, (req: any, res: any) => {
     const { fields, title, company } = req.body || {};
     const profile = extractAutofillProfile();
     const values = (Array.isArray(fields) ? fields : [])
@@ -6271,10 +6325,12 @@ async function startServer() {
   });
 
   // Dashboard: cron jobs (stub — scheduled tasks are managed in-process via node-schedule)
+  // 列表这条不关：它恒定返回空数组，不泄露任何东西，而前端设置页拿不到它会报错。
+  // 三条写侧的按部署级管理动作关掉（虽然目前也都是空实现）。
   app.get("/api/gw/cron/jobs", (_req: any, res: any) => res.json([]));
-  app.post("/api/gw/cron/toggle", (_req: any, res: any) => res.json({ ok: true }));
-  app.delete("/api/gw/cron/jobs/:id", (_req: any, res: any) => res.json([]));
-  app.post("/api/gw/cron/jobs", (_req: any, res: any) => res.json([]));
+  routeUnlessMultiUser(app, "post", "/api/gw/cron/toggle", kDeployAdminOff, (_req: any, res: any) => res.json({ ok: true }));
+  routeUnlessMultiUser(app, "delete", "/api/gw/cron/jobs/:id", kDeployAdminOff, (_req: any, res: any) => res.json([]));
+  routeUnlessMultiUser(app, "post", "/api/gw/cron/jobs", kDeployAdminOff, (_req: any, res: any) => res.json([]));
 
   // Dashboard: usage history (from in-memory token stats)
   app.get("/api/gw/usage/recent-token-history", (_req: any, res: any) => {
@@ -6458,7 +6514,7 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   app.get("/api/token-stats", (_req: any, res: any) => {
     res.json({ ok: true, ...getTokenStats() });
   });
-  app.post("/api/token-stats/reset", (_req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/token-stats/reset", kDeployAdminOff, (_req: any, res: any) => {
     resetTokenStats();
     res.json({ ok: true });
   });
