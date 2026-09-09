@@ -289,9 +289,10 @@ const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
  * 每日 token 上限。未设 = 不限（单人版默认不限）。数字尚未定量——见设计稿
  * "已知风险"：开放注册前必须定下来。
  */
-const DAILY_TOKEN_LIMIT = process.env.PAWPALS_DAILY_TOKEN_LIMIT ? Number(process.env.PAWPALS_DAILY_TOKEN_LIMIT) : null;
-if (process.env.PAWPALS_DAILY_TOKEN_LIMIT && !Number.isFinite(DAILY_TOKEN_LIMIT as number)) {
-  console.warn("[quota] PAWPALS_DAILY_TOKEN_LIMIT 配置值无法识别：\"" + process.env.PAWPALS_DAILY_TOKEN_LIMIT + "\"——没有设置每用户日额度上限");
+let DAILY_TOKEN_LIMIT = process.env.PAWPALS_DAILY_TOKEN_LIMIT ? Number(process.env.PAWPALS_DAILY_TOKEN_LIMIT) : null;
+if (process.env.PAWPALS_DAILY_TOKEN_LIMIT && (!Number.isFinite(DAILY_TOKEN_LIMIT as number) || (DAILY_TOKEN_LIMIT as number) <= 0)) {
+  console.warn("[quota] PAWPALS_DAILY_TOKEN_LIMIT 配置值错误：\"" + process.env.PAWPALS_DAILY_TOKEN_LIMIT + "\"（非正数或非数字）——没有设置每用户日额度上限");
+  DAILY_TOKEN_LIMIT = null;
 }
 const quotaFile = () => path.join(userDataDir(), "quota.json");
 const quota = createQuota({

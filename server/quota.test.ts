@@ -60,4 +60,15 @@ describe("createQuota", () => {
     quota.record("u1", -5);
     expect(quota.used("u1")).toBe(0);
   });
+
+  it("上限设为 0 时每个用户都立刻超额", () => {
+    const { quota } = memQuota(0, { t: 0 });
+    expect(quota.exceeded("u1")).toBe(true);
+    expect(quota.exceeded("u2")).toBe(true);
+  });
+
+  it("上限设为负数时每个用户都立刻超额", () => {
+    const { quota } = memQuota(-100, { t: 0 });
+    expect(quota.exceeded("u1")).toBe(true);
+  });
 });
