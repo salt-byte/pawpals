@@ -36,15 +36,16 @@ function createFakeApp() {
   };
 }
 
-function makeDeps(app: ReturnType<typeof createFakeApp>, queue: OfficialRouteDeps["queue"]): OfficialRouteDeps {
+function makeDeps(app: ReturnType<typeof createFakeApp>, queue: OfficialRouteDeps["queue"], currentUserId: OfficialRouteDeps["currentUserId"] = () => "A"): OfficialRouteDeps {
   return {
     app,
     queue,
-    hub: { sendRaw: vi.fn(() => 0), broadcast: vi.fn(() => 1) },
+    hub: { sendRawToUser: vi.fn(() => 0), sendToUser: vi.fn(() => 1) },
     enqueueOfficialTask: vi.fn(),
     parseRequestedKind: vi.fn(),
     setActivePage: vi.fn(),
     log: vi.fn(),
+    currentUserId,
   };
 }
 
@@ -99,7 +100,7 @@ describe("registerOfficialRoutes - confirm 路由", () => {
     // 而不是别的实例——next() 能领到它就是证据。
     const dispatched = queueA.next();
     expect(dispatched?.id).toBe(body.task.id);
-    expect(deps.hub.broadcast).toHaveBeenCalledWith(body.task);
+    expect(deps.hub.sendToUser).toHaveBeenCalledWith("A", body.task);
   });
 
   it("未知的确认 id 返回 404，不创建任何任务", () => {
@@ -115,7 +116,7 @@ describe("registerOfficialRoutes - confirm 路由", () => {
     expect(res.statusCode).toBe(404);
     expect(res.body).toEqual({ ok: false, error: "确认已过期、被取消或不存在" });
     expect(queueA.next()).toBeNull();
-    expect(deps.hub.broadcast).not.toHaveBeenCalled();
+    expect(deps.hub.sendToUser).not.toHaveBeenCalled();
   });
 
   it("确认 id 用过一次之后不能重复使用", () => {
@@ -135,5 +136,62 @@ describe("registerOfficialRoutes - confirm 路由", () => {
     confirmHandler({ params: { confirmationId } }, res2);
     expect(res2.statusCode).toBe(404);
     expect((res2.body as any).ok).toBe(false);
+  });
+
+  /**
+   * confirm 造出的是 submit——投递流程里最硬的那道闸。这里证明它按
+   * currentUserId() 定向：只发给确认这次投递的用户，绝不发给别人。broadcast
+   * 版本会把 A 的 submit 任务连姓名电话简历一起写进 B 的浏览器、由 B 的登录态
+   * 提交，这个测试盯的就是这条回归。
+   */
+  it("confirm 只把 submit 任务发给发起确认的用户，不发给任何其他人", () => {
+    const queueA = new OfficialApplicationQueue();
+    const app = createFakeApp();
+    const sentTo: Record<string, unknown[]> = { A: [], B: [] };
+    const hub = {
+      sendRawToUser: vi.fn(() => 0),
+      sendToUser: vi.fn((userId: string, task: unknown) => {
+        (sentTo[userId] ??= []).push(task);
+        return 1;
+      }),
+    };
+    const deps: OfficialRouteDeps = {
+      app,
+      queue: () => queueA,
+      hub,
+      enqueueOfficialTask: vi.fn(),
+      parseRequestedKind: vi.fn(),
+      setActivePage: vi.fn(),
+      log: vi.fn(),
+      currentUserId: () => "A",
+    };
+    registerOfficialRoutes(deps);
+
+    const confirmationId = queueA.requestConfirmation({ url: "https://a.com/apply", company: "A公司", title: "投递" });
+    const confirmHandler = app.routes.get("POST /api/official-applications/:confirmationId/confirm")!;
+    const res = createRes();
+    confirmHandler({ params: { confirmationId } }, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(hub.sendToUser).toHaveBeenCalledTimes(1);
+    expect(hub.sendToUser).toHaveBeenCalledWith("A", expect.objectContaining({ kind: "submit" }));
+    expect(sentTo.A).toHaveLength(1);
+    expect(sentTo.B).toHaveLength(0);
+  });
+
+  it("认不出当前用户时 confirm 不下发任务——宁可不发，也不能广播给不知道是谁的连接", () => {
+    const queueA = new OfficialApplicationQueue();
+    const app = createFakeApp();
+    const deps = makeDeps(app, () => queueA, () => null);
+    registerOfficialRoutes(deps);
+
+    const confirmationId = queueA.requestConfirmation({ url: "https://a.com/apply", company: "A公司", title: "投递" });
+    const confirmHandler = app.routes.get("POST /api/official-applications/:confirmationId/confirm")!;
+    const res = createRes();
+    confirmHandler({ params: { confirmationId } }, res);
+
+    expect(res.statusCode).toBe(200);
+    expect((res.body as any).delivered).toBe(0);
+    expect(deps.hub.sendToUser).not.toHaveBeenCalled();
   });
 });

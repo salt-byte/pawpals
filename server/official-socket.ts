@@ -22,59 +22,56 @@ export type ClientMessage =
   | { type: "result"; id: string; result: any }
   | { type: "progress"; id: string; progress: Record<string, unknown> };
 
-export function createTaskBroadcaster() {
-  const clients = new Set<TaskClient>();
+type Entry = { userId: string; lastActiveAt: number };
+
+/**
+ * 按用户定向的推送通道。
+ *
+ * 改造前是一个 Set，enqueue 时 broadcast 给全体——多用户下 A 的填表任务（payload
+ * 里是 A 的姓名电话履历）会被 B 的浏览器执行，A 点确认后 submit 也可能由 B 的
+ * 浏览器、B 的登录态发出。所以这里按 userId 分桶。
+ *
+ * 同一用户多条连接时**只发最近活跃的一条**：两台电脑都装了插件，发给全部就是
+ * 两台同时执行同一次投递 = 重复提交。队列的租约机制配合：派给一条后租约期内不
+ * 再派；那条掉线（remove）则下一次派发落到另一条。
+ */
+export function createTaskBroadcaster(opts: { now?: () => number } = {}) {
+  const now = opts.now ?? (() => Date.now());
+  const clients = new Map<TaskClient, Entry>();
 
   const isOpen = (client: TaskClient) => (client.readyState ?? OPEN) === OPEN;
 
-  return {
-    add(client: TaskClient) { clients.add(client); },
-    remove(client: TaskClient) { clients.delete(client); },
-    size() { return clients.size; },
+  /** 该用户的连接，最近活跃的在前。 */
+  const ofUser = (userId: string) =>
+    [...clients.entries()].filter(([, e]) => e.userId === userId).sort((a, b) => b[1].lastActiveAt - a[1].lastActiveAt).map(([c]) => c);
 
-    /**
-     * 把任务推给所有在线扩展，返回实际送达数。
-     *
-     * 返回 0 表示没有扩展在线——调用方据此知道这个任务只能留在队列里，等扩展
-     * 连上来时再由 onConnect 补发。
-     *
-     * 送不出去的客户端顺手清掉：readyState 不是 OPEN，或者 send 抛错（连接刚
-     * 断但 close 事件还没到）。
-     */
-    /**
-     * 原样发一条消息给所有在线扩展，不套 task 外壳。
-     *
-     * broadcast 固定包成 {type:"task", task}，那是任务专用的形状；开发期的
-     * 「重载扩展」命令不是任务，包成任务会被扩展当成任务去派发。
-     */
-    sendRaw(message: unknown): number {
-      const payload = JSON.stringify(message);
-      let delivered = 0;
-      for (const client of [...clients]) {
-        if (!isOpen(client)) { clients.delete(client); continue; }
-        try {
-          client.send(payload);
-          delivered += 1;
-        } catch {
-          clients.delete(client);
-        }
+  const deliverOne = (userId: string, payload: string): number => {
+    for (const client of ofUser(userId)) {
+      if (!isOpen(client)) { clients.delete(client); continue; }
+      try {
+        client.send(payload);
+        return 1;
+      } catch {
+        clients.delete(client);
       }
-      return delivered;
+    }
+    return 0;
+  };
+
+  return {
+    add(userId: string, client: TaskClient) { clients.set(client, { userId, lastActiveAt: now() }); },
+    remove(client: TaskClient) { clients.delete(client); },
+    touch(client: TaskClient) { const e = clients.get(client); if (e) e.lastActiveAt = now(); },
+    size(userId?: string) { return userId === undefined ? clients.size : ofUser(userId).length; },
+
+    /** 返回 0 表示该用户没有插件在线——任务只能留在队列里，等重连时 onConnect 补发。 */
+    sendToUser(userId: string, task: unknown): number {
+      return deliverOne(userId, JSON.stringify({ type: "task", task }));
     },
 
-    broadcast(task: unknown): number {
-      const payload = JSON.stringify({ type: "task", task });
-      let delivered = 0;
-      for (const client of [...clients]) {
-        if (!isOpen(client)) { clients.delete(client); continue; }
-        try {
-          client.send(payload);
-          delivered += 1;
-        } catch {
-          clients.delete(client);
-        }
-      }
-      return delivered;
+    /** 原样发一条消息（开发期的 reload 命令），不套 task 外壳。 */
+    sendRawToUser(userId: string, message: unknown): number {
+      return deliverOne(userId, JSON.stringify(message));
     },
   };
 }

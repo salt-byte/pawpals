@@ -18,12 +18,14 @@ export type OfficialRouteDeps = {
   app: any;
   /** 队列按用户分了，deps 拿到的是取当前用户队列的函数，不能是启动期的那一个实例。 */
   queue: () => OfficialApplicationQueue;
-  hub: { sendRaw: (message: unknown) => number; broadcast: (task: unknown) => number };
+  hub: { sendToUser: (userId: string, task: unknown) => number; sendRawToUser: (userId: string, message: unknown) => number };
   enqueueOfficialTask: (input: any) => any;
   parseRequestedKind: (raw: unknown, fallback?: any) => any;
   /** 扩展上报「用户正开着哪个申请页」。投递时没别的线索就用它。 */
   setActivePage: (page: { url: string; title: string; provider: string; seenAt: number } | null) => void;
   log: (line: string) => void;
+  /** 当前请求所属用户。任务只能发给这个人的插件，不能发给别人——见 confirm 路由。 */
+  currentUserId: () => string | null;
 };
 
 export function registerOfficialRoutes(deps: OfficialRouteDeps) {
@@ -65,7 +67,8 @@ app.post("/api/internal/official-application-context", (req: any, res: any) => {
  * （队列里的任务由重连补发，不会丢）。
  */
 app.post("/api/dev/reload-extension", (_req: any, res: any) => {
-  const delivered = officialTaskHub.sendRaw({ type: "reload" });
+  const userId = deps.currentUserId();
+  const delivered = userId ? officialTaskHub.sendRawToUser(userId, { type: "reload" }) : 0;
   log(`[official] 下发重载命令，送达=${delivered}`);
   res.json({ ok: true, delivered });
 });
@@ -104,7 +107,12 @@ app.get("/api/official-applications/:taskId/status", (req: any, res: any) => {
 app.post("/api/official-applications/:confirmationId/confirm", (req: any, res: any) => {
   const task = deps.queue().confirm(req.params.confirmationId);
   if (!task) return res.status(404).json({ ok: false, error: "确认已过期、被取消或不存在" });
-  officialTaskHub.broadcast(task);
-  res.json({ ok: true, task });
+  // 这是投递流程里最硬的那道闸：submit 任务只能发给发起确认的这个用户的插件，
+  // 绝不能广播——广播意味着别人的浏览器、别人的登录态替这个人把申请交上去。
+  // 认不出用户就谁也不发，宁可任务留在队列里，也不能落到不知道是谁的连接上。
+  const userId = deps.currentUserId();
+  const delivered = userId ? officialTaskHub.sendToUser(userId, task) : 0;
+  if (!userId) log(`[official] confirm 缺少用户上下文，submit 任务 ${task.id} 未下发`);
+  res.json({ ok: true, task, delivered });
 });
 }

@@ -7,68 +7,90 @@ function fakeClient(readyState = OPEN) {
   return { readyState, send: vi.fn(), sent: [] as string[] };
 }
 
-describe("createTaskBroadcaster", () => {
-  it("把任务推给所有在线的扩展，返回送达数", () => {
+describe("createTaskBroadcaster（按用户定向）", () => {
+  it("发给 A 的任务不会到达 B——这是多用户下最硬的一条", () => {
     const hub = createTaskBroadcaster();
     const a = fakeClient();
     const b = fakeClient();
-    hub.add(a);
-    hub.add(b);
+    hub.add("A", a);
+    hub.add("B", b);
 
-    expect(hub.broadcast(task)).toBe(2);
+    expect(hub.sendToUser("A", task)).toBe(1);
     expect(JSON.parse(a.send.mock.calls[0][0])).toEqual({ type: "task", task });
-    expect(b.send).toHaveBeenCalledTimes(1);
+    expect(b.send).not.toHaveBeenCalled();
   });
 
-  it("没有扩展在线时返回 0——调用方据此知道任务只能等在队列里", () => {
+  it("该用户没有插件在线时返回 0——任务留在队列里等重连补发", () => {
     const hub = createTaskBroadcaster();
-    expect(hub.broadcast(task)).toBe(0);
-    expect(hub.size()).toBe(0);
+    hub.add("B", fakeClient());
+    expect(hub.sendToUser("A", task)).toBe(0);
+    expect(hub.size("A")).toBe(0);
+    expect(hub.size("B")).toBe(1);
   });
 
-  it("连接已经关闭的客户端跳过，并从集合里清掉", () => {
-    const hub = createTaskBroadcaster();
-    const dead = fakeClient(3); // CLOSED
+  it("同一用户两条连接只发最近活跃的一条——两台电脑同时执行等于重复提交", () => {
+    let t = 0;
+    const hub = createTaskBroadcaster({ now: () => t });
+    const older = fakeClient();
+    const newer = fakeClient();
+    t = 1; hub.add("A", older);
+    t = 2; hub.add("A", newer);
+
+    expect(hub.sendToUser("A", task)).toBe(1);
+    expect(newer.send).toHaveBeenCalledTimes(1);
+    expect(older.send).not.toHaveBeenCalled();
+
+    // older 上收到消息后它成了最近活跃的
+    t = 3; hub.touch(older);
+    expect(hub.sendToUser("A", task)).toBe(1);
+    expect(older.send).toHaveBeenCalledTimes(1);
+    expect(newer.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("最近活跃的那条已关闭时退到下一条，并把死连接清掉", () => {
+    let t = 0;
+    const hub = createTaskBroadcaster({ now: () => t });
     const live = fakeClient();
-    hub.add(dead);
-    hub.add(live);
+    const dead = fakeClient(3); // CLOSED
+    t = 1; hub.add("A", live);
+    t = 2; hub.add("A", dead);
 
-    expect(hub.broadcast(task)).toBe(1);
-    expect(dead.send).not.toHaveBeenCalled();
-    expect(hub.size()).toBe(1);
+    expect(hub.sendToUser("A", task)).toBe(1);
+    expect(live.send).toHaveBeenCalledTimes(1);
+    expect(hub.size("A")).toBe(1);
   });
 
-  it("某个客户端 send 抛错不影响其他客户端，并把它清掉", () => {
-    const hub = createTaskBroadcaster();
+  it("send 抛错的连接清掉并退到下一条", () => {
+    let t = 0;
+    const hub = createTaskBroadcaster({ now: () => t });
+    const live = fakeClient();
     const broken = fakeClient();
     broken.send.mockImplementation(() => { throw new Error("socket gone"); });
-    const live = fakeClient();
-    hub.add(broken);
-    hub.add(live);
+    t = 1; hub.add("A", live);
+    t = 2; hub.add("A", broken);
 
-    expect(hub.broadcast(task)).toBe(1);
+    expect(hub.sendToUser("A", task)).toBe(1);
     expect(live.send).toHaveBeenCalledTimes(1);
+    expect(hub.size("A")).toBe(1);
+  });
+
+  it("remove 之后不再收到推送；size() 不带参数时是全体在线数", () => {
+    const hub = createTaskBroadcaster();
+    const client = fakeClient();
+    hub.add("A", client);
+    hub.add("B", fakeClient());
+    expect(hub.size()).toBe(2);
+    hub.remove(client);
+    expect(hub.sendToUser("A", task)).toBe(0);
     expect(hub.size()).toBe(1);
   });
 
-  it("remove 之后不再收到推送", () => {
+  it("同一个客户端加两次只算一个", () => {
     const hub = createTaskBroadcaster();
     const client = fakeClient();
-    hub.add(client);
-    hub.remove(client);
-
-    expect(hub.broadcast(task)).toBe(0);
-    expect(client.send).not.toHaveBeenCalled();
-  });
-
-  it("同一个客户端加两次只算一个——重连时不会收到双份", () => {
-    const hub = createTaskBroadcaster();
-    const client = fakeClient();
-    hub.add(client);
-    hub.add(client);
-
-    expect(hub.broadcast(task)).toBe(1);
-    expect(client.send).toHaveBeenCalledTimes(1);
+    hub.add("A", client);
+    hub.add("A", client);
+    expect(hub.size("A")).toBe(1);
   });
 });
 
@@ -122,27 +144,15 @@ describe("parseClientMessage", () => {
  * broadcast 固定把内容包成 {type:"task", task}，那是任务专用的形状。开发期的
  * 「重载扩展」命令不是任务，包成任务会被扩展当成任务去派发。
  */
-describe("sendRaw", () => {
-  it("原样发出去，不套 task 外壳", () => {
+describe("sendRawToUser", () => {
+  it("原样发出去，不套 task 外壳，且只发给该用户", () => {
     const hub = createTaskBroadcaster();
-    const sent: string[] = [];
-    hub.add({ readyState: 1, send: (m: string) => sent.push(m) } as any);
-    hub.sendRaw({ type: "reload" });
-    expect(JSON.parse(sent[0])).toEqual({ type: "reload" });
-  });
-
-  it("返回送达数", () => {
-    const hub = createTaskBroadcaster();
-    hub.add({ readyState: 1, send: () => {} } as any);
-    hub.add({ readyState: 1, send: () => {} } as any);
-    expect(hub.sendRaw({ type: "reload" })).toBe(2);
-  });
-
-  it("发不出去的连接清掉，不影响其余", () => {
-    const hub = createTaskBroadcaster();
-    hub.add({ readyState: 1, send: () => { throw new Error("gone"); } } as any);
-    hub.add({ readyState: 1, send: () => {} } as any);
-    expect(hub.sendRaw({ type: "reload" })).toBe(1);
-    expect(hub.size()).toBe(1);
+    const sentA: string[] = [];
+    const sentB: string[] = [];
+    hub.add("A", { readyState: 1, send: (m: string) => sentA.push(m) } as any);
+    hub.add("B", { readyState: 1, send: (m: string) => sentB.push(m) } as any);
+    expect(hub.sendRawToUser("A", { type: "reload" })).toBe(1);
+    expect(JSON.parse(sentA[0])).toEqual({ type: "reload" });
+    expect(sentB).toEqual([]);
   });
 });

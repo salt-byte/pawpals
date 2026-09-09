@@ -314,11 +314,16 @@ function pruneExpiredPending() {
  * 补发。所有 enqueue 都要走这里，否则任务会静静躺在队列里没人知道。
  */
 function enqueueOfficialTask(input: Parameters<OfficialApplicationQueue["enqueue"]>[0]) {
+  // 没有用户上下文就没有安全的去处——多用户下 broadcast 等于把这个人的任务
+  // （填表任务里是姓名电话履历，submit 任务是一次真实投递）交给不知道是谁的
+  // 连接。宁可抛错，也不能回退到广播。
+  const userId = currentUserId();
+  if (!userId) throw new Error("enqueueOfficialTask() 在没有用户上下文时被调用");
   const task = state().officialQueue.enqueue(input);
   // 送达数必须记：这一步之前完全不可观测，任务卡住时分不清「没推出去」
   // 「推了没人收」还是「收了没执行」。0 是正常情况（扩展离线，靠重连补发）。
-  const delivered = officialTaskHub.broadcast(task);
-  console.log(`[official] 入队 ${task.id.slice(0, 24)} kind=${task.kind} 送达=${delivered}`);
+  const delivered = officialTaskHub.sendToUser(userId, task);
+  console.log(`[official] 入队 ${task.id.slice(0, 24)} kind=${task.kind} user=${userId} 送达=${delivered}`);
   return task;
 }
 async function waitForOfficialTask(taskId: string, timeoutMs = 45_000): Promise<any> {
@@ -4729,12 +4734,12 @@ async function startServer() {
   // 的注释——engine.io/ws 的连接生命周期都是独立的异步资源，链在那里断了）。
   // 这里目前是靠 httpServer 在 startServer() 的 runWithUser(LOCAL_USER_ID, ...)
   // 里 listen 隐式继承到上下文，才没有在 state() 处炸掉——代码里一个字都没说，
-  // 所以显式开一个，别再靠隐式继承活着。Task 6 会把 LOCAL_USER_ID 换成插件
+  // 所以显式开一个，别再靠隐式继承活着。Task 8 会把 LOCAL_USER_ID 换成插件
   // 握手认出来的那个用户。
   officialWss.on("connection", (ws) => runWithUser(LOCAL_USER_ID, () => {
     alive.add(ws);
-    ws.on("pong", () => alive.add(ws));
-    officialTaskHub.add(ws as any);
+    ws.on("pong", () => { alive.add(ws); officialTaskHub.touch(ws as any); });
+    officialTaskHub.add(LOCAL_USER_ID, ws as any);
     console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
     // 新连接意味着上一个 service worker 已经被回收，它内存里那些还没派出去的
     // 任务都没了。作废租约，让它们能立刻重新派发，而不是干等到租期结束。
@@ -4745,6 +4750,7 @@ async function startServer() {
       try { ws.send(JSON.stringify({ type: "task", task: backlog })); } catch { /* 刚连上就断了 */ }
     }
     ws.on("message", (raw) => {
+      officialTaskHub.touch(ws as any);
       const message = parseClientMessage(raw);
       if (!message) return;
       if (message.type === "progress") {
@@ -5155,8 +5161,8 @@ async function startServer() {
    * 有 socket 连着的用户绝不能卸：下面 connection 闭包把 messages / posts 等
    * 数组解构成了局部变量，活到断开为止。卸了再建，闭包持着旧数组、state() 返回
    * 新数组，这个人的聊天记录就悄悄劈成了两份。
-   * officialTaskHub.size() 目前没有按用户的签名（Task 7 才有），先按「有任何扩展
-   * 连着就都不卸」处理——宁可多留，不能错卸。
+   * officialTaskHub.size(userId) 现在是按用户的（Task 7），所以这里按用户单独
+   * 判断插件是否在线，不再是「有任何扩展连着就都不卸」那种一刀切。
    *
    * 单人模式没有别的用户可卸，local 之所以从没被卸掉纯粹是巧合——楼上那些
    * 60 秒/120 秒的定时器一直在调用 state()，把它捎带"续命"了。把这层巧合改成
@@ -5168,8 +5174,7 @@ async function startServer() {
       const uid = (s.data as any)?.userId;
       if (typeof uid === "string") active.add(uid);
     }
-    const extensionsOnline = officialTaskHub.size() > 0;
-    const evicted = userStates.evictIdle((id) => active.has(id) || extensionsOnline);
+    const evicted = userStates.evictIdle((id) => active.has(id) || officialTaskHub.size(id) > 0);
     if (evicted.length) console.log(`[state] 卸载闲置用户状态 ${evicted.join(",")}`);
   }, 5 * 60 * 1000);
 
@@ -5893,6 +5898,7 @@ async function startServer() {
     parseRequestedKind,
     setActivePage: (page) => { state().activeOfficialApplicationPage = page; },
     log: (line) => console.log(line),
+    currentUserId,
   });
 
 
