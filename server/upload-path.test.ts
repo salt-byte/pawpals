@@ -55,6 +55,13 @@ describe("safeUploadPath", () => {
     expect(dest).toBe(path.join(resolvedDir, "resume_rm -rf.pdf"));
   });
 
+  it("文件名里带空字节，被白名单当成非法字符换掉，落点仍在 dir 内", () => {
+    const dest = safeUploadPath(dir, "resume\0.pdf");
+    expect(dest).not.toBeNull();
+    expect(dest!.includes("\0")).toBe(false);
+    expect(dest!.startsWith(resolvedDir + path.sep)).toBe(true);
+  });
+
   it("穷举一批常见绕过手法：结果要么是 null，要么必须落在 dir 内——绝不允许跳出去", () => {
     const attempts = [
       "../../evil.txt", "../../../etc/passwd", "/etc/passwd", "", ".", "..",

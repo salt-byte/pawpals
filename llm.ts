@@ -57,13 +57,19 @@ export function setUsageHook(fn: ((usage: Usage) => void) | null) {
   usageHook = fn;
 }
 
-function trackUsage(usage?: Usage) {
-  if (!usage) return;
+/** 记账本身（累加 token、喂钩子），不动 calls——calls 由各调用点自己按「一次
+ * 请求算一次」的口径去加，免得流式那条路径因为额外调用这里而被重复计数。 */
+function recordUsage(usage: Usage) {
   tokenStats.prompt += usage.prompt_tokens || 0;
   tokenStats.completion += usage.completion_tokens || 0;
   tokenStats.total += usage.total_tokens || 0;
-  tokenStats.calls += 1;
   try { usageHook?.(usage); } catch (e: any) { console.warn("[llm] usage hook 抛错：", e?.message || e); }
+}
+
+function trackUsage(usage?: Usage) {
+  if (!usage) return;
+  recordUsage(usage);
+  tokenStats.calls += 1;
 }
 
 /**
@@ -237,6 +243,11 @@ export async function chatCompletionStream(options: ChatCompletionOptions): Prom
       model: modelId,
       messages: options.messages,
       stream: true,
+      // 让 provider 在流的最后追加一帧只带 usage、choices 为空的数据帧（OpenAI
+      // 兼容协议的 stream_options），否则流式调用的 token 消耗无从得知——
+      // trackUsage() 至今只在非流式路径里被调用，主 agent 的回复恰恰全走这里，
+      // 是耗量最大的一条路径，之前完全不计入每日额度。
+      stream_options: { include_usage: true },
       ...(options.max_tokens ? { max_tokens: options.max_tokens } : {}),
     }),
     ...(options.signal ? { signal: options.signal } : {}),
@@ -249,7 +260,64 @@ export async function chatCompletionStream(options: ChatCompletionOptions): Prom
 
   tokenStats.calls += 1; // 流式调用也记录次数
 
-  return res;
+  if (!res.body) {
+    return res;
+  }
+
+  // 原样透传每一个字节给调用方（server.ts 自己的 reader 循环丝毫不变），同时
+  // 旁路解码、攒行，找那一帧 usage。找到就记账；流结束了还没找到，就报警一次
+  // ——绝不用估算数字顶上，编出来的数字比一个看得见的缺口更糟。
+  const decoder = new TextDecoder();
+  let sideBuffer = "";
+  let usageSeen = false;
+  const usageTap = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      controller.enqueue(chunk); // 字节原样转发，不做任何改动
+      try {
+        sideBuffer += decoder.decode(chunk, { stream: true });
+        const lines = sideBuffer.split("\n");
+        sideBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data);
+            // 按 OpenAI 的约定，usage 应该出现在一帧单独的、choices 为空的收尾帧里；
+            // 实测 Gemini 的兼容端点并不这样做——它把 usage 直接挂在带
+            // finish_reason 的最后那个正常帧上，choices 并不为空。两种形状都收，
+            // 只认第一次出现的 usage 字段，不管 choices 长什么样，避免以后
+            // provider 换实现就白白漏记。
+            if (parsed?.usage && !usageSeen) {
+              // 不调用 trackUsage()：calls 已经由本函数上面那行加过一次了，
+              // trackUsage() 自己也会 +1，两个都留着就是同一次流式请求算两次调用。
+              recordUsage(parsed.usage);
+              usageSeen = true;
+            }
+          } catch {
+            // 不是合法 JSON 的帧，忽略——不影响透传
+          }
+        }
+      } catch {
+        // 旁路解码/记账出错绝不能打断透传给用户的正文
+      }
+    },
+    flush() {
+      if (!usageSeen) {
+        console.warn(
+          "[llm] 流式响应没有返回 usage 数据（provider 未按 stream_options.include_usage " +
+          "返回用量帧）——本次调用的 token 消耗无法计入每日额度，额度统计会被低估"
+        );
+      }
+    },
+  });
+
+  const wrappedBody = res.body.pipeThrough(usageTap);
+  return new Response(wrappedBody, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
 }
 
 /**
