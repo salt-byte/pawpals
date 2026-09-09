@@ -1,4 +1,5 @@
 import { formatElementRows, parseActionForm } from './panel-view.js';
+import { parsePairingForm, pair } from './pairing.js';
 
 const $ = (id) => document.getElementById(id);
 async function activeTabId() { return (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id; }
@@ -21,4 +22,33 @@ $('execute').addEventListener('click', async () => {
     const result = await chrome.tabs.sendMessage(await activeTabId(), { type: 'EXECUTE', action });
     show(result.ok, result.ok ? '执行成功' : `执行失败：${result.error}`);
   } catch (error) { show(false, `执行失败：${error.message}`); }
+});
+
+// ── 连接服务器 ────────────────────────────────────────────────────────
+async function refreshPairStatus() {
+  const { serverBase, extensionToken } = await chrome.storage.local.get(['serverBase', 'extensionToken']);
+  $('server-base').value = serverBase || '';
+  $('pair-status').textContent = extensionToken
+    ? `已绑定到 ${serverBase || 'http://localhost:3000'}`
+    : '（本地单人版不需要配对）';
+}
+void refreshPairStatus();
+
+$('pair').addEventListener('click', async () => {
+  const parsed = parsePairingForm({ serverBase: $('server-base').value || 'http://localhost:3000', code: $('pair-code').value });
+  if (!parsed.ok) return show(false, parsed.error);
+  const result = await pair({ base: parsed.base, code: parsed.code });
+  if (!result.ok) return show(false, result.error);
+  await chrome.storage.local.set({ serverBase: parsed.base, extensionToken: result.token });
+  await chrome.runtime.sendMessage({ type: 'RECONNECT_SERVER' });
+  $('pair-code').value = '';
+  await refreshPairStatus();
+  show(true, '配对成功，插件已重新连接');
+});
+
+$('unpair').addEventListener('click', async () => {
+  await chrome.storage.local.remove(['serverBase', 'extensionToken']);
+  await chrome.runtime.sendMessage({ type: 'RECONNECT_SERVER' });
+  await refreshPairStatus();
+  show(true, '已清除，回到本地服务器');
 });

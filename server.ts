@@ -38,6 +38,7 @@ import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
 import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo, isValidUserId } from "./server/tenancy.ts";
 import { createUserStore, createSessionStore } from "./server/auth.ts";
+import { createPairingStore } from "./server/pairing.ts";
 import { AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT, isAuthExempt, sessionCookie } from "./server/auth-policy.ts";
 import { renderAuthPage } from "./server/auth-page.ts";
 import * as nodeFs from "fs";
@@ -527,6 +528,11 @@ const USERS_FILE = path.join(APP_DATA_DIR, "users.json");
 const SESSIONS_FILE = path.join(APP_DATA_DIR, "sessions.json");
 const userStore = MULTI_USER ? createUserStore({ file: USERS_FILE, fs: nodeFs }) : null;
 const sessionStore = MULTI_USER ? createSessionStore({ file: SESSIONS_FILE, fs: nodeFs, ttlMs: kSessionTtlMs }) : null;
+
+// ── 插件配对 ──────────────────────────────────────────────────────────
+// 两种模式都创建：单人模式配对是可选的（不配对照旧连本地），多用户模式是必须的。
+const EXTENSION_TOKENS_FILE = path.join(APP_DATA_DIR, "extension-tokens.json");
+const pairingStore = createPairingStore({ file: EXTENSION_TOKENS_FILE, fs: nodeFs });
 
 /**
  * 请求属于谁。返回 null 表示未认证。
@@ -4708,6 +4714,21 @@ async function startServer() {
   const officialWss = new WebSocketServer({ noServer: true });
   httpServer.on("upgrade", (req, socket, head) => {
     if (!req.url?.startsWith("/ws/official")) return;
+    /**
+     * 握手验证。验证失败直接关连接，不进任何集合——这是安全边界第 5 条。
+     * 单人模式不带 token 也放行（行为与改造前一致），带了就按 token 认。
+     */
+    const token = new URL(req.url, "http://localhost").searchParams.get("token");
+    let userId: string | null = null;
+    if (token) userId = pairingStore.resolveToken(token);
+    else if (!MULTI_USER) userId = LOCAL_USER_ID;
+    if (!userId || !isValidUserId(userId)) {
+      console.log("[official] 握手验证失败，拒绝连接");
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    (req as any).pawUserId = userId;
     officialWss.handleUpgrade(req, socket as any, head, (ws) => officialWss.emit("connection", ws, req));
   });
 
@@ -4732,15 +4753,15 @@ async function startServer() {
 
   // AsyncLocalStorage 传不进这条 upgrade 链路的 connection 回调（同上面 io.use
   // 的注释——engine.io/ws 的连接生命周期都是独立的异步资源，链在那里断了）。
-  // 这里目前是靠 httpServer 在 startServer() 的 runWithUser(LOCAL_USER_ID, ...)
-  // 里 listen 隐式继承到上下文，才没有在 state() 处炸掉——代码里一个字都没说，
-  // 所以显式开一个，别再靠隐式继承活着。Task 8 会把 LOCAL_USER_ID 换成插件
-  // 握手认出来的那个用户。
-  officialWss.on("connection", (ws) => runWithUser(LOCAL_USER_ID, () => {
+  // 这里必须显式开一个上下文，不能靠 httpServer 在 startServer() 的
+  // runWithUser(LOCAL_USER_ID, ...) 里 listen 隐式继承。userId 由上面的 upgrade
+  // 握手认出来（token → 绑定的用户；单人模式无 token 则是 local）挂在 req 上。
+  officialWss.on("connection", (ws, req: any) => runWithUser(req.pawUserId as string, () => {
+    const userId: string = req.pawUserId;
     alive.add(ws);
     ws.on("pong", () => { alive.add(ws); officialTaskHub.touch(ws as any); });
-    officialTaskHub.add(LOCAL_USER_ID, ws as any);
-    console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
+    officialTaskHub.add(userId, ws as any);
+    console.log(`[official] 扩展已连接 user=${userId}，在线 ${officialTaskHub.size()}`);
     /**
      * 只有当这条是该用户唯一的连接时才作废租约并补发。
      *
@@ -4749,12 +4770,12 @@ async function startServer() {
      * 不成立：机器一正在执行一个 submit，机器二连上来就会把它的租约清掉、把同一个
      * 任务再派一次，于是两台浏览器从两个 IP、两个登录态投同一个岗位。
      */
-    if (officialTaskHub.size(LOCAL_USER_ID) === 1) {
+    if (officialTaskHub.size(userId) === 1) {
       state().officialQueue.releaseLeases();
       // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
       const backlog = state().officialQueue.next();
       // 走 hub 而不是直接 ws.send：单条投递的规则必须对补发同样成立
-      if (backlog) officialTaskHub.sendToUser(LOCAL_USER_ID, backlog);
+      if (backlog) officialTaskHub.sendToUser(userId, backlog);
     }
     ws.on("message", (raw) => {
       officialTaskHub.touch(ws as any);
@@ -4779,7 +4800,24 @@ async function startServer() {
       console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} ready=${r.formReady ?? "-"} ${detail}`);
       state().officialQueue.complete(message.id, message.result);
     });
-    ws.on("close", () => { officialTaskHub.remove(ws as any); console.log(`[official] 扩展断开，在线 ${officialTaskHub.size()}`); });
+    /**
+     * 断开时回收租约。
+     *
+     * 只在连接时回收是不够的：上一版把「作废租约 + 补发积压」收紧成「这条是该
+     * 用户唯一连接时才做」，堵住了两台机器重复提交的洞，但也让回收只发生在
+     * 「独自重连」这一种情况上——A 执行到一半掉线、B 还挂着时，A 手上那个任务的
+     * 租约会一直挂到 B 也断开并重连为止，中间谁都领不走。
+     *
+     * 队列的租约是按任务记的、没有「哪条连接领走的」这层信息（releaseLeases()
+     * 是全清），所以这里取能安全做到的最强回收：这条断开之后该用户已经没有任何
+     * 插件在线，就说明没有人正在执行他的任务，全部租约作废，下一条连上来的立刻
+     * 能领。还有别的连接在时不动——那条可能正干着活，清了就是重复投递。
+     */
+    ws.on("close", () => {
+      officialTaskHub.remove(ws as any);
+      if (officialTaskHub.size(userId) === 0) runWithUser(userId, () => state().officialQueue.releaseLeases());
+      console.log(`[official] 扩展断开 user=${userId}，在线 ${officialTaskHub.size()}`);
+    });
     ws.on("error", () => officialTaskHub.remove(ws as any));
   }));
 
@@ -4917,6 +4955,26 @@ async function startServer() {
     if (!pin || String(pin).length < 4) return res.status(400).json({ error: "密码至少4位" });
     _saveSecurity({ pinHash: _hashPin(String(pin)), enabled: true });
     return res.json({ ok: true, message: "密码已设置，外部访问需要验证" });
+  });
+
+  // ── 插件配对 ──────────────────────────────────────────────────────────
+  app.post("/api/extension/pair-code", (_req: any, res: any) => {
+    const { code, expiresAt } = pairingStore.issueCode(currentUserId()!);
+    res.json({ ok: true, code, expiresAt });
+  });
+  // 免认证：插件此时还没有身份，它手里只有配对码
+  app.post("/api/extension/pair", (req: any, res: any) => {
+    const r = pairingStore.redeem(req.body?.code);
+    if (!r) return res.status(400).json({ ok: false, error: "配对码不对或已过期，请回网页重新生成" });
+    console.log(`[pairing] 插件已绑定 user=${r.userId}`);
+    res.json({ ok: true, token: r.token });
+  });
+  app.get("/api/extension/bindings", (_req: any, res: any) => {
+    res.json({ ok: true, count: pairingStore.count(currentUserId()!) });
+  });
+  app.post("/api/extension/unpair", (_req: any, res: any) => {
+    const revoked = pairingStore.revokeAll(currentUserId()!);
+    res.json({ ok: true, revoked });
   });
 
   // ── 宠物档案持久化 ──────────────────────────────────────────────────
@@ -5169,16 +5227,12 @@ async function startServer() {
    * 数组解构成了局部变量，活到断开为止。卸了再建，闭包持着旧数组、state() 返回
    * 新数组，这个人的聊天记录就悄悄劈成了两份。
    *
-   * officialTaskHub.size(id) > 0 这个按用户判断眼下在多用户模式下是死代码：
-   * 扩展连接一律注册在 LOCAL_USER_ID 桶下（见上面 officialWss.on("connection")
-   * 里的 officialTaskHub.add(LOCAL_USER_ID, ...)——握手还没认证真实用户，Task 8
-   * 才会换成握手认出来的 userId），而这里传进来的 id 来自已认证的 socket.io
-   * 连接，永远不会是 "local"。也就是说这条判断眼下豁免不了任何人，跟改造前
-   * 「有任何扩展连着就都不卸」比，保护范围从「所有人」变成了「没有人」：一个
-   * 唯一连接就是扩展的用户，插件在线也救不了他，状态照样可能被卸载，连带把
-   * 他的 officialQueue（未确认的任务、还没写回的执行结果）一起卸掉。判断式
-   * 本身是对的、等 Task 8 接上握手认证就会生效，这里只是如实说明它现在还不
-   * 生效，不要看着这行代码就以为保护已经在起作用。
+   * officialTaskHub.size(id) > 0 这条豁免现在是实打实生效的：扩展的 upgrade
+   * 握手会用配对 token 认出真实用户，连接注册在那个用户的桶下（见上面
+   * officialWss.on("connection") 里的 officialTaskHub.add(userId, ...)），跟这里
+   * 传进来的、来自已认证 socket.io 连接的 id 是同一套 id。所以一个网页已经关掉、
+   * 唯一还连着的是插件的用户不会被卸载——他的 officialQueue 里可能正躺着待确认
+   * 的任务和还没写回的执行结果，卸了就全丢了。
    *
    * 单人模式没有别的用户可卸，local 之所以从没被卸掉纯粹是巧合——楼上那些
    * 60 秒/120 秒的定时器一直在调用 state()，把它捎带"续命"了。把这层巧合改成

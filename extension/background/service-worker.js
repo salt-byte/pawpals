@@ -1,17 +1,17 @@
-import { createSessionClient, SERVER_BASE } from './session-client.js';
+import { createSessionClient, loadServerConfig } from './session-client.js';
 import { createOfficialTaskClient } from './official-task-client.js';
 import { createOfficialDispatcher } from './official-task-router.js';
 import { createTabGrouper } from './tab-group.js';
 import { createCdpInput } from './cdp-input.js';
 
-const client = createSessionClient();
+const client = createSessionClient({ base: async () => (await loadServerConfig()).base });
 
 /**
  * CDP 输入。合成事件失效时的兜底——chrome.debugger 会让 Chrome 挂一条「已开始
  * 调试此浏览器」的横幅，所以只在 content script 明确请求时才用，用完即摘。
  */
 const cdpInput = createCdpInput({ debuggerApi: chrome.debugger });
-const officialClient = createOfficialTaskClient();
+const officialClient = createOfficialTaskClient({ base: async () => (await loadServerConfig()).base });
 
 /**
  * 官网申请任务改走 WebSocket 推送。
@@ -35,8 +35,6 @@ const officialClient = createOfficialTaskClient();
  * 网络仍然只能在这里做——content script 的跨域 fetch 受页面 origin 的 CORS 管，
  * 直连 localhost 会稳定失败（详见 official-task-router.js 顶部注释）。
  */
-const SOCKET_URL = `${SERVER_BASE.replace(/^http/, 'ws')}/ws/official`;
-
 let socket = null;
 
 function sendToServer(message) {
@@ -111,10 +109,33 @@ const dispatcher = createOfficialDispatcher({
   reloadTab: (tabId) => chrome.tabs.reload(tabId),
 });
 
-function connectOfficialSocket() {
+/**
+ * 连接期间的互斥锁。
+ *
+ * 这个函数从同步变成了 async（要先 await 读 storage 里的地址和 token），顶上那句
+ * 「已经连着就返回」的判断因此不再是原子的：看门狗 alarm 和侧边栏的重连请求撞在
+ * 一起时，两边都能在 await 之前通过判断，最后开出两条连接。服务端按用户分桶，
+ * 同一个人两条连接会让「唯一连接才补发积压」的判断永远不成立，任务卡住。
+ */
+let connecting = false;
+
+async function connectOfficialSocket() {
+  if (connecting) return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+  connecting = true;
   try {
-    socket = new WebSocket(SOCKET_URL);
+    await openOfficialSocket();
+  } finally {
+    connecting = false;
+  }
+}
+
+async function openOfficialSocket() {
+  const { base, token } = await loadServerConfig();
+  // http → ws、https → wss，云端无需额外处理
+  const url = `${base.replace(/^http/, 'ws')}/ws/official${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  try {
+    socket = new WebSocket(url);
   } catch {
     socket = null;
     return;
@@ -158,12 +179,12 @@ function connectOfficialSocket() {
  */
 chrome.alarms.create('pawpals-official-socket', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'pawpals-official-socket') connectOfficialSocket();
+  if (alarm.name === 'pawpals-official-socket') void connectOfficialSocket();
 });
 
-chrome.runtime.onStartup.addListener(connectOfficialSocket);
-chrome.runtime.onInstalled.addListener(connectOfficialSocket);
-connectOfficialSocket();
+chrome.runtime.onStartup.addListener(() => void connectOfficialSocket());
+chrome.runtime.onInstalled.addListener(() => void connectOfficialSocket());
+void connectOfficialSocket();
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) return;
@@ -177,6 +198,14 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // 侧边栏配对成功后要求用新配置重连
+  if (message?.type === 'RECONNECT_SERVER') {
+    try { socket?.close(); } catch { /* 已经断了 */ }
+    socket = null;
+    void connectOfficialSocket();
+    sendResponse({ ok: true });
+    return true;
+  }
   if (message?.type === 'PING_SERVER') {
     client.ping().then((alive) => sendResponse({ alive }));
     return true;

@@ -16,6 +16,13 @@
   <body>
     <h1>PawPals — 官网申请助手</h1>
     <p style="font-size:12px;margin-top:0">在公司官网申请页点击扩展图标后，告诉 PawPals “帮我投递这个岗位”。AI 会先填写，最终提交仍需你确认。</p>
+    <fieldset style="border:1px solid #eaddd0;border-radius:6px;padding:8px 10px;margin:0 0 12px">
+      <legend style="font-size:12px;opacity:.78">连接服务器</legend>
+      <label>服务器地址<input id="server-base" placeholder="http://localhost:3000"></label>
+      <label>配对码（网页 → 个人设置 → 连接插件）<input id="pair-code" placeholder="ABCD2345" maxlength="9"></label>
+      <p style="margin:8px 0 0"><button id="pair">配对</button> <button id="unpair" class="ghost">清除配置</button></p>
+      <div id="pair-status" style="margin-top:6px;font-size:12px;opacity:.78">（本地单人版不需要配对）</div>
+    </fieldset>
     <button id="perceive">感知当前页面</button>
     <div id="elements">（尚未感知）</div>
     <hr>
