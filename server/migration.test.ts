@@ -50,4 +50,60 @@ describe("migrateLegacyWorkspace", () => {
     const r = migrateLegacyWorkspace({ legacyDir: legacy, targetDir: target, fs, extraFiles: [{ from: path.join(root, "missing.json"), to: path.join(root, "users", "local", "missing.json") }] });
     expect(r).toBe("migrated");
   });
+
+  it("上次崩溃留下的暂存目录被丢弃，而不是合并进新拷贝", () => {
+    const { legacy, target } = scratch();
+    const staging = target + ".partial";
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(path.join(staging, "leftover-from-crash.txt"), "垃圾");
+
+    const r = migrateLegacyWorkspace({ legacyDir: legacy, targetDir: target, fs });
+
+    expect(r).toBe("migrated");
+    expect(existsSync(path.join(target, "leftover-from-crash.txt"))).toBe(false);
+    expect(readFileSync(path.join(target, "profile.md"), "utf-8")).toBe("# 我");
+    expect(readFileSync(path.join(target, "workspaces", "career-planner", "SOUL.md"), "utf-8")).toBe("soul");
+  });
+
+  it("迁移成功后暂存目录不会留下来", () => {
+    const { legacy, target } = scratch();
+    migrateLegacyWorkspace({ legacyDir: legacy, targetDir: target, fs });
+    expect(existsSync(target + ".partial")).toBe(false);
+  });
+
+  it("extraFiles 提前拷贝也照样落地，缺失的仍然只是跳过而不报错", () => {
+    const { root, legacy, target } = scratch();
+    const petDest = path.join(root, "users", "local", "pet.json");
+    const r = migrateLegacyWorkspace({
+      legacyDir: legacy,
+      targetDir: target,
+      fs,
+      extraFiles: [
+        { from: path.join(root, "pet.json"), to: petDest },
+        { from: path.join(root, "missing.json"), to: path.join(root, "users", "local", "missing.json") },
+      ],
+    });
+    expect(r).toBe("migrated");
+    expect(readFileSync(petDest, "utf-8")).toContain("团团");
+    expect(existsSync(path.join(root, "users", "local", "missing.json"))).toBe(false);
+  });
+
+  it("旧目录改名失败不会中止迁移——数据已经安全落地在 targetDir", () => {
+    const { legacy, target } = scratch();
+    const flakyFs: typeof fs = {
+      ...fs,
+      renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+        if (from === legacy) throw new Error("模拟旧目录改名失败");
+        return fs.renameSync(from, to);
+      },
+    };
+
+    const r = migrateLegacyWorkspace({ legacyDir: legacy, targetDir: target, fs: flakyFs });
+
+    expect(r).toBe("migrated");
+    expect(readFileSync(path.join(target, "profile.md"), "utf-8")).toBe("# 我");
+    expect(readFileSync(path.join(target, "workspaces", "career-planner", "SOUL.md"), "utf-8")).toBe("soul");
+    // 旧目录还在原地（改名失败），既没被删除也没被覆盖。
+    expect(existsSync(legacy)).toBe(true);
+  });
 });
