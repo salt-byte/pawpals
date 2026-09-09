@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createPairingStore } from "./pairing.ts";
+import { createPairingStore, resolveHandshakeUserId } from "./pairing.ts";
 import type { JsonFs } from "./auth.ts";
 
 function memFs(): JsonFs {
@@ -70,5 +70,67 @@ describe("createPairingStore", () => {
     expect(store.resolveToken("ext_nope")).toBeNull();
     expect(store.resolveToken("")).toBeNull();
     expect(store.redeem("")).toBeNull();
+  });
+
+  it("配对码撞车时重新投，不覆盖已发出、还没兑换的那个", () => {
+    const scripted = ["AAAAAAAA", "AAAAAAAA", "BBBBBBBB"]; // 第二次故意撞车，逼它重投
+    let i = 0;
+    const store = createPairingStore({ file: "/d/ext.json", fs: memFs(), randomCode: () => scripted[i++] });
+    const first = store.issueCode("u1");
+    const second = store.issueCode("u2");
+    expect(first.code).toBe("AAAAAAAA");
+    expect(second.code).toBe("BBBBBBBB"); // 没有被覆盖成 AAAAAAAA
+    expect(store.redeem("AAAAAAAA")?.userId).toBe("u1"); // u1 的码没被 u2 顶掉
+    expect(store.redeem("BBBBBBBB")?.userId).toBe("u2");
+  });
+
+  it("token 文件是 null 或数组时当作空表，resolveToken 不抛 TypeError", () => {
+    const fsNull = memFs();
+    fsNull.writeFileSync("/d/ext.json", "null");
+    const storeNull = createPairingStore({ file: "/d/ext.json", fs: fsNull });
+    expect(() => storeNull.resolveToken("ext_x")).not.toThrow();
+    expect(storeNull.resolveToken("ext_x")).toBeNull();
+
+    const fsArr = memFs();
+    fsArr.writeFileSync("/d/ext.json", "[]");
+    const storeArr = createPairingStore({ file: "/d/ext.json", fs: fsArr });
+    expect(() => storeArr.resolveToken("ext_x")).not.toThrow();
+    expect(storeArr.resolveToken("ext_x")).toBeNull();
+  });
+
+  it("redeem 落盘失败时回滚内存态、返回 null；码依旧算消费掉了（不能重放）", () => {
+    const fs = memFs();
+    const failingFs: JsonFs = { ...fs, writeFileSync: () => { throw new Error("disk full"); } };
+    const store = createPairingStore({ file: "/d/ext.json", fs: failingFs });
+    const { code } = store.issueCode("u1");
+    expect(store.redeem(code)).toBeNull();
+    expect(store.redeem(code)).toBeNull(); // 码已经被吞掉，第二次不是「失败后重试成功」
+  });
+});
+
+describe("resolveHandshakeUserId", () => {
+  const resolveToken = (token: string) => (token === "good" ? "u1" : null);
+
+  it("合法 token 在两种模式下都能认出真实用户", () => {
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=good", multiUser: false, resolveToken })).toBe("u1");
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=good", multiUser: true, resolveToken })).toBe("u1");
+  });
+
+  it("不认识的 token 在两种模式下都是 null——绝不回退 local", () => {
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=bad", multiUser: false, resolveToken })).toBeNull();
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=bad", multiUser: true, resolveToken })).toBeNull();
+  });
+
+  it("没带 token：单人模式给 local", () => {
+    expect(resolveHandshakeUserId({ url: "/ws/official", multiUser: false, resolveToken })).toBe("local");
+  });
+
+  it("没带 token：多用户模式给 null", () => {
+    expect(resolveHandshakeUserId({ url: "/ws/official", multiUser: true, resolveToken })).toBeNull();
+  });
+
+  it("`?token=` 空值等同于没带 token", () => {
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=", multiUser: false, resolveToken })).toBe("local");
+    expect(resolveHandshakeUserId({ url: "/ws/official?token=", multiUser: true, resolveToken })).toBeNull();
   });
 });

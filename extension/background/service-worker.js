@@ -119,6 +119,24 @@ const dispatcher = createOfficialDispatcher({
  */
 let connecting = false;
 
+/**
+ * 配置代数。RECONNECT_SERVER（配对成功、清除配置都会发它）每次自增。
+ *
+ * 只有互斥锁挡不住这一种撞法：一次 connect 已经在飞行中（正 await 读旧配置或
+ * 等 WebSocket 握手），这时 RECONNECT_SERVER 到达——它把 socket 置 null 又立刻
+ * 发起新的 connectOfficialSocket()，但互斥锁在飞的那次还没释放，新调用在
+ * `if (connecting) return;` 直接被弹回去。飞行中的那次读的是**旧**的 base/token，
+ * 它完事后才把 socket 赋值，用户却已经被面板告知「配对成功」——扩展其实还挂在
+ * 旧身份上。多用户模式下坏 token 会在下个 30 秒 alarm 里被服务端拒绝而自愈，
+ * 但解绑时旧连接对服务端仍然合法、会一直 OPEN 着，alarm 的
+ * `readyState === OPEN` 守卫从此再也不会重拨。
+ *
+ * 用一个代数记录“最新一次配置变更”：飞行中的连接完事后如果发现代数已经变了，
+ * 说明它手里的配置是旧的，关掉刚开出来的连接，直接（仍在同一把互斥锁下）用
+ * 当前配置重新走一遍，而不是把过时的连接赋给 `socket`。
+ */
+let generation = 0;
+
 async function connectOfficialSocket() {
   if (connecting) return;
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
@@ -131,15 +149,26 @@ async function connectOfficialSocket() {
 }
 
 async function openOfficialSocket() {
+  const myGeneration = generation;
   const { base, token } = await loadServerConfig();
   // http → ws、https → wss，云端无需额外处理
   const url = `${base.replace(/^http/, 'ws')}/ws/official${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  let opened;
   try {
-    socket = new WebSocket(url);
+    opened = new WebSocket(url);
   } catch {
     socket = null;
     return;
   }
+  if (generation !== myGeneration) {
+    // 拨号期间又来了一次 RECONNECT_SERVER：这条连接读的是旧配置，不能让它冒充
+    // 新连接——关掉它，直接用现在的配置重新拨一次（仍在同一把互斥锁下，不会
+    // 和别的调用打架）。
+    try { opened.close(); } catch { /* 忽略 */ }
+    await openOfficialSocket();
+    return;
+  }
+  socket = opened;
   socket.addEventListener('message', (event) => {
     let payload;
     try {
@@ -200,6 +229,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // 侧边栏配对成功后要求用新配置重连
   if (message?.type === 'RECONNECT_SERVER') {
+    generation += 1; // 让飞行中的旧连接尝试认出配置已经变了，见 generation 声明处的注释
     try { socket?.close(); } catch { /* 已经断了 */ }
     socket = null;
     void connectOfficialSocket();

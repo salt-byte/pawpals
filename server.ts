@@ -38,7 +38,7 @@ import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
 import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo, isValidUserId } from "./server/tenancy.ts";
 import { createUserStore, createSessionStore } from "./server/auth.ts";
-import { createPairingStore } from "./server/pairing.ts";
+import { createPairingStore, resolveHandshakeUserId } from "./server/pairing.ts";
 import { AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT, isAuthExempt, sessionCookie } from "./server/auth-policy.ts";
 import { renderAuthPage } from "./server/auth-page.ts";
 import * as nodeFs from "fs";
@@ -4716,14 +4716,16 @@ async function startServer() {
     if (!req.url?.startsWith("/ws/official")) return;
     /**
      * 握手验证。验证失败直接关连接，不进任何集合——这是安全边界第 5 条。
-     * 单人模式不带 token 也放行（行为与改造前一致），带了就按 token 认。
+     * 判定逻辑在 server/pairing.ts::resolveHandshakeUserId 里——纯函数、可测；
+     * 这里只做“认不出就 401”的收尾，别再把判断内联回这个有副作用的处理器。
      */
-    const token = new URL(req.url, "http://localhost").searchParams.get("token");
-    let userId: string | null = null;
-    if (token) userId = pairingStore.resolveToken(token);
-    else if (!MULTI_USER) userId = LOCAL_USER_ID;
+    const userId = resolveHandshakeUserId({
+      url: req.url,
+      multiUser: MULTI_USER,
+      resolveToken: (token) => pairingStore.resolveToken(token),
+    });
     if (!userId || !isValidUserId(userId)) {
-      console.log("[official] 握手验证失败，拒绝连接");
+      console.log(`[official] 握手验证失败，拒绝连接 ip=${_getClientIp(req)}`);
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
