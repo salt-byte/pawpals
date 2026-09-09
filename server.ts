@@ -4806,7 +4806,23 @@ async function startServer() {
       // 走 hub 而不是直接 ws.send：单条投递的规则必须对补发同样成立
       if (backlog) officialTaskHub.sendToUser(userId, backlog);
     }
-    ws.on("message", (raw) => {
+    /**
+     * 每个 message 都必须自己开上下文，不能靠 connection 回调那层 runWithUser。
+     *
+     * 直觉上 connection 回调的 runWithUser 应该罩住它里面注册的所有 ws 监听器，
+     * 实际不罩：ws 的每条帧是一个独立的异步资源，AsyncLocalStorage 的链在
+     * connection 回调返回时就断了（同上面 io.use 和 upgrade 的注释）。实测过：
+     * connection 回调里 getStore() 有值，message 回调里是 undefined，加不加
+     * --async-context-frame 都一样。下面 close 那层显式 runWithUser 就是同一个
+     * 原因，只是当时只补了 close。
+     *
+     * 不补的后果不是「多用户下串号」，是**两种模式都会死**：state() 拿不到用户
+     * 直接抛，抛在 ws 的监听器里没人接，进程整个退出——一个用户的插件回报一次
+     * 结果，所有人的会话跟着没。而在它退出之前 complete() 没跑，等结果的那边只
+     * 会等到「等待浏览器扩展超时」，可那次申请其实**已经真的提交出去了**；任务
+     * 还留着租约，重连后可能被再派一次 = 同一个岗位重复投递。
+     */
+    ws.on("message", (raw) => runWithUser(userId, () => {
       officialTaskHub.touch(ws as any);
       const message = parseClientMessage(raw);
       if (!message) return;
@@ -4828,7 +4844,7 @@ async function startServer() {
         : `fields=${Array.isArray(r.fields) ? r.fields.length : "-"}`;
       console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} ready=${r.formReady ?? "-"} ${detail}`);
       state().officialQueue.complete(message.id, message.result);
-    });
+    }));
     /**
      * 断开时回收租约。
      *
@@ -4847,7 +4863,9 @@ async function startServer() {
       if (officialTaskHub.size(userId) === 0) runWithUser(userId, () => state().officialQueue.releaseLeases());
       console.log(`[official] 扩展断开 user=${userId}，在线 ${officialTaskHub.size()}`);
     });
-    ws.on("error", () => officialTaskHub.remove(ws as any));
+    // 同样显式开上下文。remove() 今天并不读上下文，但这三个监听器的上下文规则
+    // 必须一致——留一个不包的，下次往里面加一行读 state() 的代码就又是同一个坑。
+    ws.on("error", () => runWithUser(userId, () => officialTaskHub.remove(ws as any)));
   }));
 
   const PORT = Number(process.env.PAWPALS_PORT || process.env.PORT || 3000);
