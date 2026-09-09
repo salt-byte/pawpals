@@ -6378,59 +6378,73 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
     await streamAgent(agent, [{ role: "user", content: task }], MAX_CHAIN_DEPTH, io, "job", state().messages);
   }
 
-  // 每天 9:00 AM（洛杉矶时间）— 岗位猎手搜岗 + 投递管家 follow-up
-  schedule.scheduleJob({ hour: 9, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("job-hunter",
-      "执行每日搜岗任务：根据 profile.md 搜索新岗位，去重后推送给用户，让用户选择感兴趣的岗位。",
-      "每日早报"
-    );
-    proactivePost("app-tracker",
-      "执行每日 follow-up 检查：读取 applications.json，找出超过 7 天未回复的投递，提醒用户是否要跟进。",
-      "每日早报"
-    );
-  });
+  if (MULTI_USER) {
+    /**
+     * 多用户模式下 6 个每日主动任务默认关闭，连注册都不做。
+     *
+     * proactivePost 已经在函数体首行 `if (MULTI_USER) return` 了，注册这 6 个
+     * scheduleJob 只会换来每天 6 次白跑的空调用——既浪费，也会让读代码的人以为
+     * 这功能在多用户下是活的。真正的原因是成本：这些任务没有用户上下文，就算给
+     * 每个注册用户各跑一遍，6 × 200 个用户 = 每天 1200 次无人请求的 agent 运行，
+     * 全花在项目方自己的 API key 上。这是有意的取舍——放弃了「宠物主动找你」这个
+     * 钩子——按用户开关的可选项留给后续任务。
+     */
+    console.log("⏰ 多用户模式：每日主动任务已关闭（备份仍每小时一次）");
+  } else {
+    // 每天 9:00 AM（洛杉矶时间）— 岗位猎手搜岗 + 投递管家 follow-up
+    schedule.scheduleJob({ hour: 9, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("job-hunter",
+        "执行每日搜岗任务：根据 profile.md 搜索新岗位，去重后推送给用户，让用户选择感兴趣的岗位。",
+        "每日早报"
+      );
+      proactivePost("app-tracker",
+        "执行每日 follow-up 检查：读取 applications.json，找出超过 7 天未回复的投递，提醒用户是否要跟进。",
+        "每日早报"
+      );
+    });
 
-  // 每天 10:00 AM（洛杉矶时间）— 专业老师每日学习
-  schedule.scheduleJob({ hour: 10, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("professional-teacher",
-      "执行每日行业学习：搜索用户求职方向的最新行业动态（新技术、招聘趋势、目标公司动态），在群里分享 1-2 条有价值的信息。",
-      "每日行业简报"
-    );
-  });
+    // 每天 10:00 AM（洛杉矶时间）— 专业老师每日学习
+    schedule.scheduleJob({ hour: 10, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("professional-teacher",
+        "执行每日行业学习：搜索用户求职方向的最新行业动态（新技术、招聘趋势、目标公司动态），在群里分享 1-2 条有价值的信息。",
+        "每日行业简报"
+      );
+    });
 
-  // 每天 14:00 PM — 专业老师：午间行业速递
-  schedule.scheduleJob({ hour: 14, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("professional-teacher",
-      "执行午间行业速递：搜索用户求职方向最新动态，如果发现和用户正在投递的岗位相关的信息（公司新闻、行业变化、面试趋势），主动分享到群里。格式：📰 行业速递｜[标题]：[和用户的关联]",
-      "午间行业速递"
-    );
-  });
+    // 每天 14:00 PM — 专业老师：午间行业速递
+    schedule.scheduleJob({ hour: 14, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("professional-teacher",
+        "执行午间行业速递：搜索用户求职方向最新动态，如果发现和用户正在投递的岗位相关的信息（公司新闻、行业变化、面试趋势），主动分享到群里。格式：📰 行业速递｜[标题]：[和用户的关联]",
+        "午间行业速递"
+      );
+    });
 
-  // 每天 15:00 PM — 首席伴学官：主动跟进
-  schedule.scheduleJob({ hour: 15, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("career-planner",
-      "主动跟进：检查用户今天有没有新进展，如果超过几个小时没说话，温暖地问一句进展如何。如果有待推进的事项（比如有岗位还没选、有简历还没确认），主动提醒。控制在2-3句。",
-      "主动跟进"
-    );
-  });
+    // 每天 15:00 PM — 首席伴学官：主动跟进
+    schedule.scheduleJob({ hour: 15, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("career-planner",
+        "主动跟进：检查用户今天有没有新进展，如果超过几个小时没说话，温暖地问一句进展如何。如果有待推进的事项（比如有岗位还没选、有简历还没确认），主动提醒。控制在2-3句。",
+        "主动跟进"
+      );
+    });
 
-  // 每天 18:00 PM — 首席伴学官：每日求职进度简报
-  schedule.scheduleJob({ hour: 18, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("career-planner",
-      "生成今日求职进度简报：读取 applications.json 统计投递数/回复率，读取 jobs.json 看今天新增了多少岗位，给出今明两天的行动建议。控制在5行以内。",
-      "每日进度简报"
-    );
-  });
+    // 每天 18:00 PM — 首席伴学官：每日求职进度简报
+    schedule.scheduleJob({ hour: 18, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("career-planner",
+        "生成今日求职进度简报：读取 applications.json 统计投递数/回复率，读取 jobs.json 看今天新增了多少岗位，给出今明两天的行动建议。控制在5行以内。",
+        "每日进度简报"
+      );
+    });
 
-  // 每天 21:00 PM — 专业老师：晚间学习分享
-  schedule.scheduleJob({ hour: 21, minute: 0, tz: "America/Los_Angeles" }, () => {
-    proactivePost("professional-teacher",
-      "执行晚间学习分享：搜索用户求职方向的深度内容（技术博客、面经、行业分析），挑一条最有价值的分享到群里，帮用户积累行业认知。",
-      "晚间学习分享"
-    );
-  });
+    // 每天 21:00 PM — 专业老师：晚间学习分享
+    schedule.scheduleJob({ hour: 21, minute: 0, tz: "America/Los_Angeles" }, () => {
+      proactivePost("professional-teacher",
+        "执行晚间学习分享：搜索用户求职方向的深度内容（技术博客、面经、行业分析），挑一条最有价值的分享到群里，帮用户积累行业认知。",
+        "晚间学习分享"
+      );
+    });
 
-  console.log("⏰ 定时任务已注册：9AM 搜岗+follow-up | 10AM 行业学习 | 14PM 午间速递 | 15PM 主动跟进 | 18PM 进度简报 | 21PM 晚间分享（洛杉矶时间）");
+    console.log("⏰ 定时任务已注册：9AM 搜岗+follow-up | 10AM 行业学习 | 14PM 午间速递 | 15PM 主动跟进 | 18PM 进度简报 | 21PM 晚间分享（洛杉矶时间）");
+  }
 }
 
 /**
