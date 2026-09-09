@@ -339,6 +339,36 @@ setUsageHook((usage) => {
   if (userId) quota.record(userId, usage.total_tokens || 0);
 });
 
+/**
+ * 这一轮该不该被额度拦住。
+ *
+ * 语义按 quota.ts 的注释：**只在一轮开始时查一次，已经开跑的一轮允许跑完**——
+ * 一轮编排是 3 次模型调用，在第 2 次掐断，用户看到的是「专业老师说完了，简历专家
+ * 说了一半，团团没了」。超一点余量比半截对话好。
+ *
+ * 抠成函数是因为原先这个判断只长在 socket.on("send_message") 一个入口上，而
+ * wake_job_session、profile_confirm、/api/mail-watcher/run 每一个都会拉起一整条
+ * agent 链——超额的用户刷新一下页面就又白拿一轮。凡是会起链的入口都要调它。
+ *
+ * 没有配 PAWPALS_DAILY_TOKEN_LIMIT 时 exceeded() 恒为 false，所以这几处对默认的
+ * 本地单人版是空操作，行为不变。
+ */
+function quotaBlocked(): boolean {
+  const userId = currentUserId();
+  return !!userId && quota.exceeded(userId);
+}
+
+/** 超额就往群里发一条说明并返回 true（调用方直接 return）；没超额返回 false。 */
+function rejectIfQuotaExceeded(groupId: string): boolean {
+  if (!quotaBlocked()) return false;
+  emitTo("receive_message", {
+    id: `quota-${Date.now()}`, sender: "系统", avatar: "/avatars/system.png",
+    content: `今天的 AI 用量已经用完（${quota.limit()} tokens/天），明天再来吧 🐾`,
+    groupId, timestamp: new Date().toISOString(), isBot: true,
+  });
+  return true;
+}
+
 /** 取当前用户的进程内状态。没有用户上下文一律抛错，绝不回退到某个"默认用户"。 */
 function state(): UserState {
   const userId = currentUserId();
@@ -579,9 +609,54 @@ function _saveSecurity(data: { pinHash: string | null; enabled: boolean }) {
 function _isLocalhost(ip: string): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
+/**
+ * 信任几层前置代理的 X-Forwarded-For。**默认 0 = 一层都不信。**
+ *
+ * 改造前这个函数无条件先读 X-Forwarded-For，谁都能自己带一个。于是登录限流的两个
+ * 桶（IP|邮箱 和 纯 IP）都是一个请求头就能绕开的——每次请求换一个假 IP 就是全新的
+ * 桶，指数退避形同虚设，真实的 scrypt 密码就那么裸着被爆破。
+ *
+ * 默认不信是唯一安全的默认值：不知道自己前面有没有代理时，宁可把所有人都算成同一个
+ * remoteAddress（限流偏严，最坏是同一出口 IP 的人互相拖累），也不能让任何人随便自称
+ * 是别人。部署在 Railway / nginx 之类后面时显式设 PAWPALS_TRUST_PROXY=1。
+ *
+ * 语义抄的是 Express 的 `trust proxy = n`：把 [remoteAddress, ...XFF 反向] 排成一列，
+ * 取第 n 个——n 层受信代理意味着倒数第 n 个才是它们看到的对端。不引入 proxy-addr 依赖。
+ */
+const TRUSTED_PROXY_HOPS: number = (() => {
+  const raw = String(process.env.PAWPALS_TRUST_PROXY || "").trim();
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    console.warn(`[auth] PAWPALS_TRUST_PROXY 配置值错误："${raw}"（要一个非负整数）——按 0 处理，不信任 X-Forwarded-For`);
+    return 0;
+  }
+  return n;
+})();
+
 function _getClientIp(req: any): string {
-  return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
-    || req.socket?.remoteAddress || "unknown";
+  const direct = req.socket?.remoteAddress || "unknown";
+  if (TRUSTED_PROXY_HOPS <= 0) return direct;
+  const chain = String(req.headers?.["x-forwarded-for"] || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (chain.length === 0) return direct;
+  const addrs = [direct, ...chain.slice().reverse()];
+  return addrs[Math.min(TRUSTED_PROXY_HOPS, addrs.length - 1)];
+}
+
+/**
+ * 这个请求算不算「来自本机」。单人版的 PIN 放行和 /api/setup/pin 都靠它。
+ *
+ * 不能直接拿 _getClientIp 去判：那个函数默认不信 X-Forwarded-For，而「不信」用在
+ * 这里方向正好反了——本机前面挂了反向代理时 remoteAddress 全是 127.0.0.1，会把
+ * 每一个外网访客都当成本机、直接跳过 PIN。
+ *
+ * 所以这里保持改造前的保守判定：**只要带了 X-Forwarded-For 就一律不算本机**。
+ * 真正的本机浏览器不会带这个头，单人版的日常路径一字不变；带了头的一律多要一次密码。
+ * （改造前伪造 X-Forwarded-For: 127.0.0.1 是能骗过去的，现在骗不过——严格了，没放松。）
+ */
+function _isLocalhostRequest(req: any): boolean {
+  if (req.headers?.["x-forwarded-for"]) return false;
+  return _isLocalhost(req.socket?.remoteAddress || "");
 }
 function _getSessionToken(req: any): string | null {
   const cookie = req.headers.cookie || "";
@@ -592,8 +667,7 @@ function _getSessionToken(req: any): string | null {
   return null;
 }
 function _isAuthenticated(req: any): boolean {
-  const ip = _getClientIp(req);
-  if (_isLocalhost(ip)) return true;
+  if (_isLocalhostRequest(req)) return true;
   const sec = _loadSecurity();
   if (!sec.enabled || !sec.pinHash) return true; // PIN 未启用时放行
   const token = _getSessionToken(req);
@@ -2867,7 +2941,15 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           readProfile: () => profileText,
           findResume: () => pickResumeFile({
             envPath: process.env.PAWPALS_RESUME_FILE,
-            dirs: [careerDir(), path.join(process.env.HOME || "", "Downloads")],
+            /**
+             * 宿主机的 ~/Downloads 只在单人模式里找。
+             *
+             * 单人版里这是个顺手的便利：用户刚下载的简历放那儿，不用再传一遍。
+             * 多用户下它变成一条越界的路——某个用户自己的 careerDir() 里没有像
+             * 简历的文件时，会退到宿主机的下载目录，把一个**跟他毫无关系的人**的
+             * 文件挂进一次以他名义发出的、不可撤销的真实申请。
+             */
+            dirs: MULTI_USER ? [careerDir()] : [careerDir(), path.join(process.env.HOME || "", "Downloads")],
             exists: (p: string) => existsSync(p),
             list: (dir: string) => readdirSync(dir),
           }),
@@ -4991,11 +5073,10 @@ async function startServer() {
       return res.json({ mode: "multi", authenticated: !!userId, user: user ? { id: user.id, email: user.email } : null });
     }
     const sec = _loadSecurity();
-    const ip = _getClientIp(req);
     res.json({
       mode: "single",
       pinEnabled: sec.enabled && !!sec.pinHash,
-      isLocalhost: _isLocalhost(ip),
+      isLocalhost: _isLocalhostRequest(req),
       authenticated: _isAuthenticated(req),
     });
   });
@@ -5077,7 +5158,7 @@ async function startServer() {
   // 设置 PIN（仅 localhost 可调用）
   app.post("/api/auth/pin/set", (req: any, res: any) => {
     if (MULTI_USER) return res.status(404).json({ error: "多用户模式没有 PIN" });
-    if (!_isLocalhost(_getClientIp(req))) return res.status(403).json({ error: "只能在本机设置密码" });
+    if (!_isLocalhostRequest(req)) return res.status(403).json({ error: "只能在本机设置密码" });
     const { pin, enabled } = req.body;
     if (enabled === false) {
       _saveSecurity({ pinHash: null, enabled: false });
@@ -5482,6 +5563,9 @@ async function startServer() {
     let jobSessionGreeted = false; // 每次 socket 连接最多在求职群打一次招呼
     socket.on("wake_job_session", async ({ petName, petPersonality, userNickname }: { petName?: string; petPersonality?: string; userNickname?: string }) => {
       if (jobSessionGreeted) return;
+      // 这个入口一样会拉起一整条 agent 链。此前只有 send_message 查额度，于是
+      // 超额的用户刷新一下页面就又白拿一轮。
+      if (rejectIfQuotaExceeded("job")) return;
       jobSessionGreeted = true;
       const savedPet = loadPetRuntimeProfile();
       const chiefName = petName || savedPet.name;
@@ -5660,6 +5744,9 @@ async function startServer() {
     socket.on("profile_confirm", (profileData: any) => {
       const state = loadOnboardingState();
       if (state.phase !== "profile_collection") return;
+      // 同上：确认档案之后会直接 runAgentChain 推进下一步，也是一轮的开始。
+      // 放在改 state 之前——超额时这次点击整个不生效，phase 不动，明天点还能再来。
+      if (rejectIfQuotaExceeded("job")) return;
 
       const skipDiagnosis = !!profileData?.skipResumeDiagnosis;
       delete profileData?.skipResumeDiagnosis;
@@ -5693,15 +5780,7 @@ async function startServer() {
 
     socket.on("send_message", (msg) => {
       // 超额判定只在一轮开始时做：一轮 3 次调用，中途掐断用户看到的是半截对话
-      const userId = currentUserId();
-      if (userId && quota.exceeded(userId)) {
-        emitTo("receive_message", {
-          id: `quota-${Date.now()}`, sender: "系统", avatar: "/avatars/system.png",
-          content: `今天的 AI 用量已经用完（${quota.limit()} tokens/天），明天再来吧 🐾`,
-          groupId: msg?.groupId || "job", timestamp: new Date().toISOString(), isBot: true,
-        });
-        return;
-      }
+      if (rejectIfQuotaExceeded(msg?.groupId || "job")) return;
 
       const newMessage = { ...msg, id: Date.now().toString(), timestamp: new Date().toISOString() };
       messages.push(newMessage);
@@ -5891,6 +5970,11 @@ async function startServer() {
    * 请求者自己的 careerDir()。
    */
   routeUnlessMultiUser(app, "post", "/api/mail-watcher/run", "多用户部署未开放邮件监控", async (_req: any, res: any) => {
+    // 这条路由在多用户下已经关了（见上面的注释），所以 Finding 9 里点名的三个
+    // 入口这一个基本上是自动消解的。仍然查一次：单人版也可以配
+    // PAWPALS_DAILY_TOKEN_LIMIT，而它命中信号时会走 handlePipelineSignalWorkflow，
+    // 一样是一整条链的开始。没配上限时 quotaBlocked() 恒为 false，行为不变。
+    if (quotaBlocked()) return res.status(429).json({ ok: false, error: `今天的 AI 用量已经用完（${quota.limit()} tokens/天），明天再来吧 🐾` });
     const result = await runMailboxWatcher(io, state().messages);
     res.json(result);
   });
