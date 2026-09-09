@@ -16,7 +16,8 @@ import type { OfficialApplicationQueue } from "./official-application-queue.ts";
 
 export type OfficialRouteDeps = {
   app: any;
-  queue: OfficialApplicationQueue;
+  /** 队列按用户分了，deps 拿到的是取当前用户队列的函数，不能是启动期的那一个实例。 */
+  queue: () => OfficialApplicationQueue;
   hub: { sendRaw: (message: unknown) => number; broadcast: (task: unknown) => number };
   enqueueOfficialTask: (input: any) => any;
   parseRequestedKind: (raw: unknown, fallback?: any) => any;
@@ -26,10 +27,10 @@ export type OfficialRouteDeps = {
 };
 
 export function registerOfficialRoutes(deps: OfficialRouteDeps) {
-  const { app, queue: officialApplicationQueue, hub: officialTaskHub, enqueueOfficialTask, parseRequestedKind, setActivePage, log } = deps;
+  const { app, hub: officialTaskHub, enqueueOfficialTask, parseRequestedKind, setActivePage, log } = deps;
 
 app.get("/api/internal/official-application-task", (_req: any, res: any) => {
-  res.json({ task: officialApplicationQueue.next() });
+  res.json({ task: deps.queue().next() });
 });
 
 app.post("/api/internal/official-application-task-done", (req: any, res: any) => {
@@ -37,7 +38,7 @@ app.post("/api/internal/official-application-task-done", (req: any, res: any) =>
   // 谁在用这条 HTTP 通路？扩展本该走 WebSocket 回报。真机上出现过「任务完成了
   // 但 WebSocket 的 complete 从没被调用」，说明有别的东西在走这里。
   console.log(`[official/http] 有客户端经 HTTP 回报结果 id=${String(id).slice(0, 24)} ua=${String(req.headers["user-agent"] || "-").slice(0, 60)}`);
-  if (!id || !officialApplicationQueue.complete(String(id), result || { ok: false, error: "扩展未返回结果" })) {
+  if (!id || !deps.queue().complete(String(id), result || { ok: false, error: "扩展未返回结果" })) {
     return res.status(404).json({ ok: false, error: "任务不存在或已完成" });
   }
   res.json({ ok: true });
@@ -84,7 +85,7 @@ app.post("/api/official-applications/prepare", (req: any, res: any) => {
 // 的 waitForOfficialTask 拿得到，于是外部无法编排「inspect 拿字段 → probe 拿
 // 选项 → 取值 → fill」这条链路。
 app.get("/api/official-applications/:taskId/result", (req: any, res: any) => {
-  const result = officialApplicationQueue.result(String(req.params.taskId));
+  const result = deps.queue().result(String(req.params.taskId));
   if (!result) return res.status(404).json({ ok: false, error: "结果还没产生或任务不存在" });
   res.json({ ok: true, result });
 });
@@ -94,14 +95,14 @@ app.get("/api/official-applications/:taskId/result", (req: any, res: any) => {
  * 「扩展还在探第几个控件」与「扩展掉线、正在等重连」，不再只能干等超时。
  */
 app.get("/api/official-applications/:taskId/status", (req: any, res: any) => {
-  const status = officialApplicationQueue.status(String(req.params.taskId));
+  const status = deps.queue().status(String(req.params.taskId));
   if (!status) return res.status(404).json({ ok: false, error: "任务不存在" });
   res.json({ ok: true, status });
 });
 
 // 只有用户在对话确认后才能调用；确认令牌单次使用，生成真正的 submit 任务。
 app.post("/api/official-applications/:confirmationId/confirm", (req: any, res: any) => {
-  const task = officialApplicationQueue.confirm(req.params.confirmationId);
+  const task = deps.queue().confirm(req.params.confirmationId);
   if (!task) return res.status(404).json({ ok: false, error: "确认已过期、被取消或不存在" });
   officialTaskHub.broadcast(task);
   res.json({ ok: true, task });

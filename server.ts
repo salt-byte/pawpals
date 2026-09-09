@@ -37,6 +37,7 @@ import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
 import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo } from "./server/tenancy.ts";
+import { createUserStateStore, type UserStateStore } from "./server/user-state.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
@@ -129,8 +130,151 @@ const applyResultStore = new Map<string, any>();
 // 通用 browser-fetch 队列：AI 需要浏览网页时通过 Electron BrowserWindow 执行
 const pendingBrowserFetchQueue = new Map<string, { url: string; resolve: (r: string) => void }>();
 // 官网申请由浏览器扩展消费；提交任务只能由明确确认令牌创建。
-const officialApplicationQueue = new OfficialApplicationQueue();
 const officialTaskHub = createTaskBroadcaster();
+
+/**
+ * 群聊的默认欢迎消息（求职群不预置消息，由 wake_job_session 动态触发）。
+ *
+ * 必须是函数不能是常量：里面有 new Date().toISOString()，每个用户第一次进来时
+ * 要拿到自己的那一刻，而不是进程启动的那一刻。
+ */
+function defaultMessagesFor(): any[] {
+  return [
+    {
+      id: "b2",
+      sender: "行测题库喵",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=LogicCat",
+      content: "喵呜~ 今天的行测打卡准备好了吗？快来挑战吧！🐈",
+      groupId: "civil",
+      timestamp: new Date().toISOString(),
+      isBot: true,
+    },
+    {
+      id: "b3",
+      sender: "单词背诵兔",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=VocabRabbit",
+      content: "咕咕！考研英语单词时间到！今天我们要背 50 个新单词哦！🐰",
+      groupId: "grad",
+      timestamp: new Date().toISOString(),
+      isBot: true,
+    },
+  ];
+}
+
+/** 广场的默认帖子。同样必须是函数：含 new Date().toISOString()。 */
+function defaultPostsFor(): any[] {
+  return [
+    {
+      id: "b-p1",
+      author: "首席伴学汪",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=ChiefDog",
+      content: "汪！今天巡视了大家的自习室，发现大家都好努力！我也要给我的主人加个油！🐾",
+      tag: "生活",
+      timestamp: new Date().toISOString(),
+      likes: 99,
+      isBot: true,
+      isChiefBot: true,
+    },
+    {
+      id: "1",
+      author: "橘猫学长",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=Felix",
+      content: "坐标图书馆，求一个考研数学搭子，每天互相监督打卡！",
+      tag: "考研",
+      timestamp: new Date().toISOString(),
+      likes: 5,
+    },
+    {
+      id: "2",
+      author: "萨摩耶汪",
+      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=Buddy",
+      content: "求职路漫漫，有没有一起改简历、面经分享的小伙伴？",
+      tag: "求职",
+      timestamp: new Date().toISOString(),
+      likes: 12,
+    }
+  ];
+}
+
+/**
+ * 每个用户自己的一份进程内状态。
+ *
+ * 改造前这些全是模块级单份变量，两个用户之间会直接串（A 的投递任务被 B 领走）。
+ * 现在按用户懒加载；messages 等闭包变量也从 startServer() 里搬到这。
+ */
+type UserState = {
+  messages: any[];
+  studyRoomUsers: any[];
+  treeHolePosts: any[];
+  posts: any[];
+  officialQueue: OfficialApplicationQueue;
+  activeOfficialApplicationPage: { url: string; title: string; provider: string; seenAt: number } | null;
+  pendingResumableSearchTask: null | { query: string; location: string; cityText: string; channels: string[] };
+  bossLoginPending: boolean;
+  bossLoginPlatform: string;
+  /**
+   * 上一次投递问了用户哪些字段。
+   *
+   * 用户回答后存进 profile.md，下一张表就不用再问——「求职信息需要反复填写」正是
+   * 这个产品要解决的痛点，而在这之前每投一次都要重问一遍民族、学号、出差意向。
+   */
+  lastAskedProfileLabels: string[];
+  /** Step 3：AI 结构化投递指令暂存（app-tracker 回复里嵌入，用户确认后执行）。key = 会话 groupId。 */
+  pendingApplyCommands: Map<string, {
+    url: string; company: string; title: string; timestamp: number;
+    officialConfirmationId?: string;
+  }>;
+  pendingWorkflowSelections: Map<string, { rowIds: string[]; timestamp: number }>;
+};
+
+/** 30 分钟无活动即卸载；有 socket 或插件连接的用户不卸。 */
+const USER_STATE_IDLE_MS = 30 * 60 * 1000;
+
+const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
+  idleMs: USER_STATE_IDLE_MS,
+  // create 在 get(userId) 时被调用，而 get 只在用户上下文里调用，所以这里的
+  // loadMessages() 读的是该用户自己的文件。
+  create: (userId) => runWithUser(userId, () => ({
+    messages: (() => { const saved = loadMessages(); return saved.length > 0 ? saved : defaultMessagesFor(); })(),
+    studyRoomUsers: [],
+    treeHolePosts: [
+      { id: "t1", content: "今天面试又挂了，感觉好挫败... 呜呜", timestamp: new Date().toISOString(), replies: [{ author: "抱抱助手汪", content: "汪呜！不哭不哭，失败是成功的麻麻，抱抱你！给你一张虚拟抱抱券 🎟️", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=HugDog" }] }
+    ],
+    posts: defaultPostsFor(),
+    officialQueue: new OfficialApplicationQueue(),
+    activeOfficialApplicationPage: null,
+    pendingResumableSearchTask: null,
+    bossLoginPending: false,
+    bossLoginPlatform: "boss",
+    lastAskedProfileLabels: [],
+    pendingApplyCommands: new Map(),
+    pendingWorkflowSelections: new Map(),
+  })),
+});
+
+/** 取当前用户的进程内状态。没有用户上下文一律抛错，绝不回退到某个"默认用户"。 */
+function state(): UserState {
+  const userId = currentUserId();
+  if (!userId) throw new Error("state() 在没有用户上下文时被调用");
+  return userStates.get(userId);
+}
+
+/**
+ * 清掉超过 10 分钟没确认的暂存指令。
+ *
+ * 改造前是一个模块级 setInterval 扫全局 Map；现在 Map 按用户分，定时器没有用户
+ * 上下文遍历不了，改成读之前顺手清一遍——过期判据不变，效果一样。
+ */
+function pruneExpiredPending() {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  const s = state();
+  for (const [k, v] of s.pendingApplyCommands) {
+    if (v.timestamp < cutoff) s.pendingApplyCommands.delete(k);
+  }
+  for (const [k, v] of s.pendingWorkflowSelections) {
+    if (v.timestamp < cutoff) s.pendingWorkflowSelections.delete(k);
+  }
+}
 
 /**
  * 入队并立刻推给已连接的扩展。
@@ -139,64 +283,22 @@ const officialTaskHub = createTaskBroadcaster();
  * 补发。所有 enqueue 都要走这里，否则任务会静静躺在队列里没人知道。
  */
 function enqueueOfficialTask(input: Parameters<OfficialApplicationQueue["enqueue"]>[0]) {
-  const task = officialApplicationQueue.enqueue(input);
+  const task = state().officialQueue.enqueue(input);
   // 送达数必须记：这一步之前完全不可观测，任务卡住时分不清「没推出去」
   // 「推了没人收」还是「收了没执行」。0 是正常情况（扩展离线，靠重连补发）。
   const delivered = officialTaskHub.broadcast(task);
   console.log(`[official] 入队 ${task.id.slice(0, 24)} kind=${task.kind} 送达=${delivered}`);
   return task;
 }
-let activeOfficialApplicationPage: { url: string; title: string; provider: string; seenAt: number } | null = null;
-
 async function waitForOfficialTask(taskId: string, timeoutMs = 45_000): Promise<any> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const result = officialApplicationQueue.result(taskId);
+    const result = state().officialQueue.result(taskId);
     if (result) return result;
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
   return { ok: false, error: "等待浏览器扩展超时。请在官网申请页点击 PawPals 图标并保持页面打开。" };
 }
-let pendingResumableSearchTask: null | {
-  query: string;
-  location: string;
-  cityText: string;
-  channels: string[];
-} = null;
-let bossLoginPending = false;
-let bossLoginPlatform = "boss";
-
-// Step 3：AI 结构化投递指令暂存（app-tracker 回复里嵌入，用户确认后执行）
-// key = 会话 groupId，value = 最近一条待确认的投递指令
-/**
- * 上一次投递问了用户哪些字段。
- *
- * 用户回答后存进 profile.md，下一张表就不用再问——「求职信息需要反复填写」正是
- * 这个产品要解决的痛点，而在这之前每投一次都要重问一遍民族、学号、出差意向。
- *
- * 单用户产品，一个变量够了；多用户时这里要按用户分。
- */
-let lastAskedProfileLabels: string[] = [];
-
-const pendingApplyCommands = new Map<string, {
-  url: string; company: string; title: string; timestamp: number;
-  officialConfirmationId?: string;
-}>();
-const pendingWorkflowSelections = new Map<string, {
-  rowIds: string[];
-  timestamp: number;
-}>();
-// 清理超过 10 分钟未确认的暂存指令
-setInterval(() => {
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [k, v] of pendingApplyCommands) {
-    if (v.timestamp < cutoff) pendingApplyCommands.delete(k);
-  }
-  for (const [k, v] of pendingWorkflowSelections) {
-    if (v.timestamp < cutoff) pendingWorkflowSelections.delete(k);
-  }
-}, 60_000);
-
 // ── 本地备份系统 ────────────────────────────────────────────────────
 // 元数据：记录最近几次备份信息
 interface BackupMeta { lastBackupAt: number; backupCount: number; lastBackupPath: string }
@@ -2404,9 +2506,9 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
       }
 
       if (bossNeedsLogin) {
-        bossLoginPending = true;
-        bossLoginPlatform = "boss";
-        pendingResumableSearchTask = {
+        state().bossLoginPending = true;
+        state().bossLoginPlatform = "boss";
+        state().pendingResumableSearchTask = {
           query,
           location: city,
           cityText,
@@ -2601,7 +2703,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         }
       );
 
-      const confirmationId = officialApplicationQueue.requestConfirmation({
+      const confirmationId = state().officialQueue.requestConfirmation({
         url: job_url, company: String(company || ""), title: String(title || ""), payload: {},
       });
 
@@ -2627,7 +2729,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         `  · ${q.label}${q.required ? "（必填）" : ""}${q.options?.length ? `：${q.options.slice(0, 6).join(" / ")}` : ""}`;
       // 记下问了什么：用户下一句回答里认出这些字段，就能存进档案，下次不再问
       if (outcome.questions.length) {
-        lastAskedProfileLabels = outcome.questions.map((q: any) => q.label);
+        state().lastAskedProfileLabels = outcome.questions.map((q: any) => q.label);
       }
       const askBlock = outcome.questions.length
         ? `\n\n还差这些，我档案里没有——你告诉我，我接着填（答过一次以后就记住了，不会再问）：\n${outcome.questions.map(askLine).join("\n")}`
@@ -2928,13 +3030,13 @@ async function streamAgent(
      * 只认我们**问过的**字段名，不做开放式抽取：存错了比不存更糟，那会变成一条
      * 假信息跟着他一路投出去（见 answer-reply.ts）。
      */
-    if (lastAskedProfileLabels.length) {
-      const answers = parseUserAnswers(lastUserMsg, lastAskedProfileLabels);
+    if (state().lastAskedProfileLabels.length) {
+      const answers = parseUserAnswers(lastUserMsg, state().lastAskedProfileLabels);
       if (Object.keys(answers).length) {
         try {
           const current = existsSync(profileFile()) ? readFileSync(profileFile(), "utf8") : "";
           writeFileSync(profileFile(), upsertAnswers(current, answers), "utf-8");
-          lastAskedProfileLabels = lastAskedProfileLabels.filter((label) => !(label in answers));
+          state().lastAskedProfileLabels = state().lastAskedProfileLabels.filter((label) => !(label in answers));
           toolInjections.push(`【已记住】${Object.entries(answers).map(([k, v]) => `${k}: ${v}`).join("；")}——以后投递不会再问这几项。`);
           console.log(`[profile] 记住 ${Object.keys(answers).join("、")}`);
         } catch (error) {
@@ -2988,7 +3090,7 @@ async function streamAgent(
             // apply_job 会带回一次性确认令牌，记下来，用户回「确认投递」时才用得上
             const confirm = result.match(/\[OFFICIAL_CONFIRM:([^\]]+)\]/);
             if (confirm) {
-              pendingApplyCommands.set(agent.id, {
+              state().pendingApplyCommands.set(agent.id, {
                 url: String((args as any)?.job_url || ""),
                 company: String((args as any)?.company || ""),
                 title: String((args as any)?.title || ""),
@@ -3024,13 +3126,14 @@ async function streamAgent(
       if (/投递|投这|帮.*投|请.*投|apply/i.test(lastUserMsg)) console.log(`[tool-loop] ${agent.id} 走规则兜底触发 apply_job`);
       // 方式 1: AI 回复中的 APPLY_JOB:: 指令 + 用户确认
       const sessionKey = agent.id;
-      const pending = pendingApplyCommands.get(sessionKey);
+      pruneExpiredPending();
+      const pending = state().pendingApplyCommands.get(sessionKey);
       const userConfirmedApply = /^(确认|投递|投|好的|是的|ok|yes|apply)$/i.test(lastUserMsg.trim());
       if (pending && userConfirmedApply) {
         let result: string;
         if (pending.officialConfirmationId) {
           emitToolActivity("apply_job", "确认提交官网申请", "official-site", pending.url);
-          const task = officialApplicationQueue.confirm(pending.officialConfirmationId);
+          const task = state().officialQueue.confirm(pending.officialConfirmationId);
           if (!task) {
             result = "[ERR] 这次官网申请确认已过期，请重新发起投递。";
           } else {
@@ -3050,7 +3153,7 @@ async function streamAgent(
           if (match) pending.officialConfirmationId = match[1];
         }
         toolInjections.push(`【投递结果】\n${result}`);
-        if (!pending.officialConfirmationId || result.startsWith("[OK]") || result.startsWith("[ERR]")) pendingApplyCommands.delete(sessionKey);
+        if (!pending.officialConfirmationId || result.startsWith("[OK]") || result.startsWith("[ERR]")) state().pendingApplyCommands.delete(sessionKey);
         calledApply = true;
       }
 
@@ -3059,12 +3162,13 @@ async function streamAgent(
         // 优先用消息里贴的链接——那是意图最明确的一种，而它此前从来没被用过：
         // 用户发「帮我投递这个官网申请：https://…」，关键词匹配上了但目标查不到，
         // 于是什么都没发生。整条端到端链路就断在这一步（见 apply-target.ts）。
+        const activePage = state().activeOfficialApplicationPage;
         const targetRow = extractApplyTarget({
           message: lastUserMsg,
           board: loadCollaborationBoard(),
           searchResults: loadLastSearchResults(),
-          activePage: activeOfficialApplicationPage && Date.now() - activeOfficialApplicationPage.seenAt < 15 * 60_000
-            ? { url: activeOfficialApplicationPage.url, title: activeOfficialApplicationPage.title }
+          activePage: activePage && Date.now() - activePage.seenAt < 15 * 60_000
+            ? { url: activePage.url, title: activePage.title }
             : null,
         });
 
@@ -3077,7 +3181,7 @@ async function streamAgent(
           });
           const match = result.match(/\[OFFICIAL_CONFIRM:([^\]]+)\]/);
           if (match) {
-            pendingApplyCommands.set(sessionKey, {
+            state().pendingApplyCommands.set(sessionKey, {
               url: targetRow.jdUrl,
               company: targetRow.company || "",
               title: targetRow.role || "",
@@ -3144,7 +3248,7 @@ async function streamAgent(
 
         // NEED_LOGIN：直接发登录引导消息，不走 LLM（同时 Electron 登录窗口已自动弹出）
         if (rawResult.includes("NEED_LOGIN")) {
-          bossLoginPending = true; // 确保触发 Electron 登录窗口
+          state().bossLoginPending = true; // 确保触发 Electron 登录窗口
           const loginMsg = "搜 Boss直聘 前需要先登录一下～ 我已经在桌面端帮你弹出 Boss直聘 登录窗口了，你直接扫码或输入账号密码就行。登录成功后窗口会自动关闭，我这边也会自动继续搜索，不用再手动回我。";
           const idx = allMessages.findIndex(m => m.id === msgId);
           if (idx !== -1) {
@@ -3255,7 +3359,7 @@ async function streamAgent(
       try {
         const cmd = JSON.parse(applyCommandMatch[1]) as { url: string; company: string; title: string };
         if (cmd.url) {
-          pendingApplyCommands.set(agent.id, {
+          state().pendingApplyCommands.set(agent.id, {
             url:       cmd.url,
             company:   cmd.company || "",
             title:     cmd.title   || "",
@@ -4136,7 +4240,7 @@ async function handleSelectedJobsWorkflow(
   const tailoredRows = loadCollaborationBoard().filter((row) =>
     selectedRows.some((selected) => buildBoardRowId(selected) === row.id)
   );
-  pendingWorkflowSelections.set("job", {
+  state().pendingWorkflowSelections.set("job", {
     rowIds: tailoredRows.map((row) => row.id),
     timestamp: Date.now(),
   });
@@ -4170,14 +4274,15 @@ async function handleApplyReadyWorkflow(
   petPersonality: string
 ) {
   if (!/^(确认投递|投吧|投递吧|可以投|开始投|好，投|好 投|投)$/i.test(userMsg.trim())) return false;
-  const pending = pendingWorkflowSelections.get("job");
+  pruneExpiredPending();
+  const pending = state().pendingWorkflowSelections.get("job");
   if (!pending?.rowIds?.length) return false;
 
   const board = loadCollaborationBoard();
   const targetRows = board.filter((row) => pending.rowIds.includes(row.id));
   if (!targetRows.length) return false;
 
-  pendingWorkflowSelections.delete("job");
+  state().pendingWorkflowSelections.delete("job");
   const chiefAvatar = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(petName)}`;
   emitBotMessage(io, allMessages, {
     sender: petName,
@@ -4529,9 +4634,9 @@ async function startServer() {
     console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
     // 新连接意味着上一个 service worker 已经被回收，它内存里那些还没派出去的
     // 任务都没了。作废租约，让它们能立刻重新派发，而不是干等到租期结束。
-    officialApplicationQueue.releaseLeases();
+    state().officialQueue.releaseLeases();
     // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
-    const backlog = officialApplicationQueue.next();
+    const backlog = state().officialQueue.next();
     if (backlog) {
       try { ws.send(JSON.stringify({ type: "task", task: backlog })); } catch { /* 刚连上就断了 */ }
     }
@@ -4539,7 +4644,7 @@ async function startServer() {
       const message = parseClientMessage(raw);
       if (!message) return;
       if (message.type === "progress") {
-        officialApplicationQueue.progress(message.id, message.progress);
+        state().officialQueue.progress(message.id, message.progress);
         const { stage = "working", completed, total, label } = message.progress;
         console.log(`[official] ${message.id.slice(0, 24)} progress=${String(stage)}${completed !== undefined ? ` ${completed}/${total ?? "?"}` : ""}${label ? ` ${String(label)}` : ""}`);
         return;
@@ -4555,7 +4660,7 @@ async function startServer() {
           (n(r.skipped) ? ` | 跳过: ${(r.skipped as any[]).map((x) => `${String(x.signature).split("label=")[1] ?? "?"}(${x.reason})`).join(" ")}` : "")
         : `fields=${Array.isArray(r.fields) ? r.fields.length : "-"}`;
       console.log(`[official] ${message.id.slice(0, 24)} ok=${r.ok} ready=${r.formReady ?? "-"} ${detail}`);
-      officialApplicationQueue.complete(message.id, message.result);
+      state().officialQueue.complete(message.id, message.result);
     });
     ws.on("close", () => { officialTaskHub.remove(ws as any); console.log(`[official] 扩展断开，在线 ${officialTaskHub.size()}`); });
     ws.on("error", () => officialTaskHub.remove(ws as any));
@@ -4819,35 +4924,7 @@ async function startServer() {
   // 启动定时自动备份
   startAutoBackup(APP_DATA_DIR, io);
 
-  // 从文件加载历史消息，没有则用默认欢迎消息（求职群不预置消息，由 wake_job_session 动态触发）
-  const defaultMessages = [
-    {
-      id: "b2",
-      sender: "行测题库喵",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=LogicCat",
-      content: "喵呜~ 今天的行测打卡准备好了吗？快来挑战吧！🐈",
-      groupId: "civil",
-      timestamp: new Date().toISOString(),
-      isBot: true,
-    },
-    {
-      id: "b3",
-      sender: "单词背诵兔",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=VocabRabbit",
-      content: "咕咕！考研英语单词时间到！今天我们要背 50 个新单词哦！🐰",
-      groupId: "grad",
-      timestamp: new Date().toISOString(),
-      isBot: true,
-    },
-  ];
-  const savedMessages = loadMessages();
-  const messages: any[] = savedMessages.length > 0 ? savedMessages : defaultMessages;
-
-  const studyRoomUsers: any[] = [];
-  const treeHolePosts: any[] = [
-    { id: "t1", content: "今天面试又挂了，感觉好挫败... 呜呜", timestamp: new Date().toISOString(), replies: [{ author: "抱抱助手汪", content: "汪呜！不哭不哭，失败是成功的麻麻，抱抱你！给你一张虚拟抱抱券 🎟️", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=HugDog" }] }
-  ];
-
+  // 历史消息、广场帖子等已按用户收进 UserState（见 defaultMessagesFor / defaultPostsFor）
   const bots = [
     { name: "首席伴学汪", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=ChiefDog", groupId: "all", isChief: true, responses: ["汪！作为你的首席伴学官，我会监督所有小动物帮你进步的！", "今天也要元气满满哦！"] },
     { name: "简历助手汪", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=ResumeDog", groupId: "job", responses: ["汪！简历一定要突出项目亮点哦！", "需要我帮你看看自我评价怎么写吗？"] },
@@ -4856,38 +4933,6 @@ async function startServer() {
     { name: "行测题库喵", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=LogicCat", groupId: "civil", responses: ["喵呜，这道逻辑题其实有简便解法。", "每天坚持刷题，速度会提升的！"] },
     { name: "单词背诵兔", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=VocabRabbit", groupId: "grad", responses: ["咕咕，Abandon 是第一个单词，但不是最后一个！", "坚持就是胜利，兔子也会跑赢比赛的！"] },
     { name: "数学解题兔", avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=MathRabbit", groupId: "grad", responses: ["咕！高数其实很有趣，只要掌握了公式。", "这道题的思路是先求导，再找极值。"] },
-  ];
-
-  const posts: any[] = [
-    {
-      id: "b-p1",
-      author: "首席伴学汪",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=ChiefDog",
-      content: "汪！今天巡视了大家的自习室，发现大家都好努力！我也要给我的主人加个油！🐾",
-      tag: "生活",
-      timestamp: new Date().toISOString(),
-      likes: 99,
-      isBot: true,
-      isChiefBot: true,
-    },
-    {
-      id: "1",
-      author: "橘猫学长",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=Felix",
-      content: "坐标图书馆，求一个考研数学搭子，每天互相监督打卡！",
-      tag: "考研",
-      timestamp: new Date().toISOString(),
-      likes: 5,
-    },
-    {
-      id: "2",
-      author: "萨摩耶汪",
-      avatar: "https://api.dicebear.com/7.x/adventurer/svg?seed=Buddy",
-      content: "求职路漫漫，有没有一起改简历、面经分享的小伙伴？",
-      tag: "求职",
-      timestamp: new Date().toISOString(),
-      likes: 12,
-    }
   ];
 
   // Periodic Bot Actions
@@ -4904,7 +4949,7 @@ async function startServer() {
       isBot: true,
       isChiefBot: randomBot.isChief || false,
     };
-    posts.unshift(botPost);
+    state().posts.unshift(botPost);
     io.emit("new_post", botPost);
   }, 60000); // Every minute
 
@@ -4918,7 +4963,11 @@ async function startServer() {
     });
   }, 120000); // Every 2 minutes
 
-  io.on("connection", (socket) => {
+  io.on("connection", (socket) => runWithUser(LOCAL_USER_ID, () => {
+    // AsyncLocalStorage 传不进 socket.io 的 connection 回调（见上面 io.use 的注释），
+    // 这里必须自己开一个上下文，否则下一行的 state() 直接抛。
+    // Task 6 会把 LOCAL_USER_ID 换成握手认出来的那个用户。
+    const { messages, studyRoomUsers, treeHolePosts, posts } = state();
     console.log("User connected:", socket.id);
 
     // Send initial data
@@ -5294,7 +5343,7 @@ async function startServer() {
     socket.on("disconnect", () => {
       console.log("User disconnected");
     });
-  });
+  }));
 
   // API Routes
   app.get("/api/health", (req, res) => {
@@ -5359,7 +5408,7 @@ async function startServer() {
   });
 
   app.post("/api/mail-watcher/run", async (_req: any, res: any) => {
-    const result = await runMailboxWatcher(io, messages);
+    const result = await runMailboxWatcher(io, state().messages);
     res.json(result);
   });
 
@@ -5627,20 +5676,20 @@ async function startServer() {
    */
   registerOfficialRoutes({
     app,
-    queue: officialApplicationQueue,
+    queue: () => state().officialQueue,
     hub: officialTaskHub,
     enqueueOfficialTask,
     parseRequestedKind,
-    setActivePage: (page) => { activeOfficialApplicationPage = page; },
+    setActivePage: (page) => { state().activeOfficialApplicationPage = page; },
     log: (line) => console.log(line),
   });
 
 
-  // Boss直聘登录：bossLoginPending 已提升到模块顶层
+  // Boss直聘登录：登录状态在 UserState 里（state().bossLoginPending）
   app.post("/api/boss-login", async (req, res) => {
     res.json({ ok: true });
-    bossLoginPending = true;
-    bossLoginPlatform = "boss";
+    state().bossLoginPending = true;
+    state().bossLoginPlatform = "boss";
     io.emit("receive_message", {
       id: `boss-remind-${Date.now()}`,
       sender: "岗位猎手",
@@ -5654,8 +5703,8 @@ async function startServer() {
 
   // Electron main.mjs 轮询：是否有登录任务
   app.get("/api/internal/boss-login-task", (_req: any, res: any) => {
-    if (bossLoginPending) {
-      res.json({ pending: true, cookieFile: COOKIE_FILE, platform: bossLoginPlatform });
+    if (state().bossLoginPending) {
+      res.json({ pending: true, cookieFile: COOKIE_FILE, platform: state().bossLoginPlatform });
     } else {
       res.json({ pending: false });
     }
@@ -5664,7 +5713,7 @@ async function startServer() {
   // Electron main.mjs 完成登录后回报
   app.post("/api/internal/boss-login-done", (req: any, res: any) => {
     const { ok, error } = req.body || {};
-    bossLoginPending = false;
+    state().bossLoginPending = false;
     io.emit("boss_login_result", { ok });
     if (!ok) console.warn("[boss-login] failed:", error || "unknown error");
     if (ok) {
@@ -5685,7 +5734,7 @@ async function startServer() {
           content: "登录成功啦，我已经接着在桌面端帮你搜索匹配岗位了。",
           groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
         });
-        messages.push({
+        state().messages.push({
           id: chiefMsgId,
           sender: jobHunter?.name || "岗位猎手",
           avatar: jobHunter?.avatar || "/avatars/job-hunter.jpg",
@@ -5695,12 +5744,12 @@ async function startServer() {
         // 登录成功后让首席继续推进
         setTimeout(async () => {
           const cp = JOB_AGENTS.find(a => a.id === "career-planner")!;
-          await runAgentChain({ ...cp, name: pn }, [{ role: "user", content: "Boss直聘登录成功了，请继续帮用户搜索岗位。" }], 0, io, "job", messages, pn, pp);
+          await runAgentChain({ ...cp, name: pn }, [{ role: "user", content: "Boss直聘登录成功了，请继续帮用户搜索岗位。" }], 0, io, "job", state().messages, pn, pp);
           io.emit("agent_done", { groupId: "job" });
         }, 500);
       } else {
         const jobHunter = JOB_AGENTS.find(a => a.id === "job-hunter");
-        if (jobHunter && pendingResumableSearchTask) {
+        if (jobHunter && state().pendingResumableSearchTask) {
           const chiefMsgId = `chief-retry-${Date.now()}`;
           io.emit("receive_message", {
             id: chiefMsgId,
@@ -5709,7 +5758,7 @@ async function startServer() {
             content: "登录成功啦，我继续按刚才确认好的条件帮你搜岗位。",
             groupId: "job", timestamp: new Date().toISOString(), isBot: true, isChiefBot: false,
           });
-          messages.push({
+          state().messages.push({
             id: chiefMsgId,
             sender: jobHunter.name,
             avatar: jobHunter.avatar,
@@ -5719,26 +5768,26 @@ async function startServer() {
             isBot: true,
             isChiefBot: false,
           });
-          const resumeTask = pendingResumableSearchTask;
-          pendingResumableSearchTask = null;
+          const resumeTask = state().pendingResumableSearchTask;
+          state().pendingResumableSearchTask = null;
           setTimeout(async () => {
             io.emit("agent_thinking", { agentName: jobHunter.name, groupId: "job" });
             const searchResultText = await executeTool("search_jobs", resumeTask);
             io.emit("agent_done", { agentName: jobHunter.name, groupId: "job" });
             if (searchResultText.includes("NEED_LOGIN")) {
-              bossLoginPending = true;
-              bossLoginPlatform = "boss";
-              pendingResumableSearchTask = resumeTask;
+              state().bossLoginPending = true;
+              state().bossLoginPlatform = "boss";
+              state().pendingResumableSearchTask = resumeTask;
               return;
             }
-            emitBotMessage(io, messages, {
+            emitBotMessage(io, state().messages, {
               sender: jobHunter.name,
               avatar: jobHunter.avatar,
               content: searchResultText,
               groupId: "job",
               isChiefBot: false,
             });
-            emitBotMessage(io, messages, {
+            emitBotMessage(io, state().messages, {
               sender: pn,
               avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(pn)}`,
               content: `${pn}：你可以直接回我想推进的编号，比如「投 1、3、5」或「先看 2、4」。如果这一批不够对口，也可以直接说你想调整城市、方向、公司类型，或者改成 Boss / 全网 / 混合搜。`,
@@ -5982,14 +6031,14 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     // Watchdog removed — no gateway to monitor
-    startMailWatcher(io, messages);
+    startMailWatcher(io, state().messages);
   });
 
   // ── 主动推送：推到 Web UI ────────────────────────────────
   async function proactivePost(agentId: string, task: string, label: string) {
     const agent = JOB_AGENTS.find(a => a.id === agentId)!;
     console.log(`[proactive] ${label} 开始`);
-    await streamAgent(agent, [{ role: "user", content: task }], MAX_CHAIN_DEPTH, io, "job", messages);
+    await streamAgent(agent, [{ role: "user", content: task }], MAX_CHAIN_DEPTH, io, "job", state().messages);
   }
 
   // 每天 9:00 AM（洛杉矶时间）— 岗位猎手搜岗 + 投递管家 follow-up
