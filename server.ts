@@ -38,6 +38,7 @@ import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
 import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo, isValidUserId } from "./server/tenancy.ts";
+import { migrateLegacyWorkspace } from "./server/migration.ts";
 import { createUserStore, createSessionStore } from "./server/auth.ts";
 import { createPairingStore, resolveHandshakeUserId } from "./server/pairing.ts";
 import { AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT, isAuthExempt, sessionCookie } from "./server/auth-policy.ts";
@@ -6452,5 +6453,15 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
  * setInterval、scheduleJob、闭包都会继承它，所以启动期读写 careerDir() 的代码
  * 不用改。多用户模式没有"启动期的用户"——所有访问都必须来自请求，见后续任务。
  */
-if (MULTI_USER) startServer();
-else runWithUser(LOCAL_USER_ID, () => startServer());
+if (MULTI_USER) {
+  const r = migrateLegacyWorkspace({
+    legacyDir: LEGACY_CAREER_DIR,
+    targetDir: path.join(APP_DATA_DIR, "users", LOCAL_USER_ID, "career"),
+    extraFiles: [{ from: path.join(APP_DATA_DIR, "pet.json"), to: path.join(APP_DATA_DIR, "users", LOCAL_USER_ID, "pet.json") }],
+    fs: nodeFs,
+  });
+  if (r === "migrated") console.log(`[migrate] 单人版数据已搬到 users/${LOCAL_USER_ID}/career，原目录改名为 career.migrated`);
+  startServer();
+} else {
+  runWithUser(LOCAL_USER_ID, () => startServer());
+}
