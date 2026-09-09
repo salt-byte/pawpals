@@ -48,6 +48,7 @@ async function bootServer(): Promise<Booted> {
     env: {
       ...process.env,
       PAWPALS_HOME: home,
+      PAWPALS_BACKUP_DIR: path.join(home, "backup"),
       PAWPALS_PORT: String(port),
       // 这两个会去敲外部世界（gog CLI、~/Documents），测试里一律关掉
       PAWPALS_MAIL_WATCHER_DISABLED: "true",

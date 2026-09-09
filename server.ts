@@ -4954,7 +4954,7 @@ async function startServer() {
   officialWss.on("connection", (ws, req: any) => runWithUser(req.pawUserId as string, () => {
     const userId: string = req.pawUserId;
     alive.add(ws);
-    ws.on("pong", () => { alive.add(ws); officialTaskHub.touch(ws as any); });
+    ws.on("pong", () => runWithUser(userId, () => { alive.add(ws); officialTaskHub.touch(ws as any); }));
     officialTaskHub.add(userId, ws as any);
     console.log(`[official] 扩展已连接 user=${userId}，在线 ${officialTaskHub.size()}`);
     /**
