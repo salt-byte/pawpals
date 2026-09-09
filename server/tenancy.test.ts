@@ -80,8 +80,12 @@ describe("emitTo", () => {
   it("没有上下文时不发任何东西——宁可丢也不能广播给所有人", () => {
     const emit = vi.fn();
     setEmitter({ to: () => ({ emit }) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(emitTo("receive_message", {})).toBe(false);
     expect(emit).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("receive_message"));
+    warn.mockRestore();
   });
 
   it("emitter 没装上时返回 false 不抛错", () => {
