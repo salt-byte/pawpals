@@ -4627,7 +4627,13 @@ async function startServer() {
     }
   }, 15000);
 
-  officialWss.on("connection", (ws) => {
+  // AsyncLocalStorage 传不进这条 upgrade 链路的 connection 回调（同上面 io.use
+  // 的注释——engine.io/ws 的连接生命周期都是独立的异步资源，链在那里断了）。
+  // 这里目前是靠 httpServer 在 startServer() 的 runWithUser(LOCAL_USER_ID, ...)
+  // 里 listen 隐式继承到上下文，才没有在 state() 处炸掉——代码里一个字都没说，
+  // 所以显式开一个，别再靠隐式继承活着。Task 6 会把 LOCAL_USER_ID 换成插件
+  // 握手认出来的那个用户。
+  officialWss.on("connection", (ws) => runWithUser(LOCAL_USER_ID, () => {
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
     officialTaskHub.add(ws as any);
@@ -4664,7 +4670,7 @@ async function startServer() {
     });
     ws.on("close", () => { officialTaskHub.remove(ws as any); console.log(`[official] 扩展断开，在线 ${officialTaskHub.size()}`); });
     ws.on("error", () => officialTaskHub.remove(ws as any));
-  });
+  }));
 
   const PORT = Number(process.env.PAWPALS_PORT || process.env.PORT || 3000);
   app.use(express.json());
