@@ -6634,6 +6634,21 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   // 每个用户的状态第一次创建时铺，见 userStates 的 _bootstrapped。
   if (!MULTI_USER) seedAgentSouls();
 
+  /**
+   * 端口绑不上就退出，别活着。
+   *
+   * 这条是上面那个 uncaughtException 兜底的必要配套：加了兜底之后，
+   * EADDRINUSE 不再把进程带走，于是服务会挂在那儿——端口没绑上、一个请求都收不到，
+   * 日志里却只有一段被兜底捞起来的栈，看着像还在跑。启动期绑不上端口是毫无歧义的
+   * 致命错误，也没有别的用户会被牵连（这时还没有任何人连进来），照改造前那样退出。
+   */
+  httpServer.on("error", (err: any) => {
+    // 已经在服务了就只记一笔——那种情况下退出就是拿所有人的会话去换一条日志。
+    if (httpServer.listening) { console.error("[http] 服务器出错（继续运行）：", err?.stack || err); return; }
+    console.error(`[启动失败] 端口 ${PORT} 绑定失败：${err?.code || ""} ${err?.message || err}`);
+    process.exit(1);
+  });
+
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     // Watchdog removed — no gateway to monitor
