@@ -38,6 +38,7 @@ import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
 import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo, isValidUserId } from "./server/tenancy.ts";
 import { createUserStore, createSessionStore } from "./server/auth.ts";
+import { AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT, isAuthExempt, sessionCookie } from "./server/auth-policy.ts";
 import { renderAuthPage } from "./server/auth-page.ts";
 import * as nodeFs from "fs";
 import { createUserStateStore, type UserStateStore } from "./server/user-state.ts";
@@ -539,22 +540,6 @@ function resolveRequestUser(req: any): string | null {
   if (!token) return null;
   const userId = sessionStore!.resolve(token);
   return userId && isValidUserId(userId) ? userId : null;
-}
-
-/**
- * 该路径是否豁免登录。纯函数，不读取任何进程状态，方便单测覆盖。
- *
- * 前缀表只用于「这一类路径下的所有子路径」（如 /api/auth/login、/api/auth/register）；
- * 需要豁免但又不能被前缀误伤兄弟路径的（/api/health 之于 /api/health-anything，
- * /api/extension/pair 之于需要登录的 /api/extension/pair-code）一律放精确匹配表。
- */
-export function isAuthExempt(path: string, exemptPrefixes: string[], exemptExact: string[]): boolean {
-  return exemptPrefixes.some((p) => path.startsWith(p)) || exemptExact.includes(path);
-}
-
-export function sessionCookie(token: string, env: NodeJS.ProcessEnv = process.env): string {
-  const secure = env.NODE_ENV === "production" ? "; Secure" : "";
-  return `paw_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${kSessionTtlMs / 1000}${secure}`;
 }
 
 const MODEL_PRESETS = [
@@ -4799,10 +4784,6 @@ async function startServer() {
   }
 
   // ── Auth 中间件：单人模式非 localhost 访问需要 PIN；多用户模式需要会话 ──
-  const AUTH_EXEMPT_PREFIX = ["/api/auth/"];
-  // 精确匹配，不能放进前缀表：前缀匹配会把 /api/health-anything 也一起放过去，
-  // 需要登录的 /api/extension/pair-code 同理会被 /api/extension/pair 的前缀捎带免认证。
-  const AUTH_EXEMPT_EXACT = ["/api/extension/pair", "/api/health"];
   app.use((req: any, res: any, next: any) => {
     const isExempt = isAuthExempt(req.path, AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT);
     const userId = resolveRequestUser(req);
@@ -4855,7 +4836,7 @@ async function startServer() {
       if (!user) { _recordFailure(key); _recordIpFailure(ip); return res.status(401).json({ ok: false, error: "邮箱或密码不对" }); }
       _recordSuccess(key); _recordIpSuccess(ip);
       const token = sessionStore!.issue(user.id);
-      res.setHeader("Set-Cookie", sessionCookie(token));
+      res.setHeader("Set-Cookie", sessionCookie(token, kSessionTtlMs));
       return res.json({ ok: true, token, user: { id: user.id, email: user.email } });
     }
     // ── 以下单人模式 PIN 逻辑原样 ──
@@ -4892,7 +4873,7 @@ async function startServer() {
     if (r.ok === false) return res.status(400).json({ ok: false, error: r.error });
     runWithUser(r.user.id, () => ensureDir(careerDir()));
     const token = sessionStore!.issue(r.user.id);
-    res.setHeader("Set-Cookie", sessionCookie(token));
+    res.setHeader("Set-Cookie", sessionCookie(token, kSessionTtlMs));
     console.log(`[auth] 新用户注册 ${r.user.id}`);
     return res.json({ ok: true, token, user: { id: r.user.id, email: r.user.email } });
   });
@@ -6342,13 +6323,6 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
  * 单人模式：整个服务跑在 local 用户的上下文里。startServer() 里创建的
  * setInterval、scheduleJob、闭包都会继承它，所以启动期读写 careerDir() 的代码
  * 不用改。多用户模式没有"启动期的用户"——所有访问都必须来自请求，见后续任务。
- *
- * Vitest 跑测试时会 import 这个文件（为了单测 isAuthExempt / sessionCookie 这两个
- * 纯函数），import 会执行到文件底部——不加这层守卫，每次 `npm test` 都会真的监听
- * 端口、跑定时任务、读写这台机器上真实的 APP_DATA_DIR。Vitest 自己会设
- * process.env.VITEST，用它来判断是不是被当作脚本直接跑。
  */
-if (!process.env.VITEST) {
-  if (MULTI_USER) startServer();
-  else runWithUser(LOCAL_USER_ID, () => startServer());
-}
+if (MULTI_USER) startServer();
+else runWithUser(LOCAL_USER_ID, () => startServer());
