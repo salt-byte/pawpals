@@ -1,4 +1,5 @@
 import { traced } from "./tracing.ts";
+import { parseProfile, lookupField } from "./profile-store.ts";
 /**
  * 投递主流程：从一个申请链接，走到「填好了、剩下这些要你处理」。
  *
@@ -99,6 +100,11 @@ async function runApplyFlowInner(job: JobRef, deps: ApplyDeps): Promise<ApplyOut
   const { runTask, askModel, decideField, validateValue, readProfile, findResume, readFile, fileSize, log } = deps;
   const task = (kind: string, payload?: any) => ({ kind, url: job.url, company: job.company, title: job.title, payload });
   const profileText = readProfile();
+  /**
+   * 结构化档案。查得到的字段直接填、不经过模型——真机上「学位」被猜成过工学、
+   * 管理学、文学三种，而档案里本该有确定答案（见 profile-store.ts）。
+   */
+  const facts = parseProfile(profileText);
 
   const uploadNotes: string[] = [];
   const failures = new Map<string, string>();
@@ -144,7 +150,17 @@ async function runApplyFlowInner(job: JobRef, deps: ApplyDeps): Promise<ApplyOut
     // options（几千个选项只能搜不能枚举），若校验仍用原始字段，模型答对的值会被
     // 截断后的选项列表判成 option_not_allowed 丢掉。真机上本科学校就是这么丢的。
     const textAsk = fieldsForModel(texts);
-    const textValues = await askModel(textAsk, textAsk);
+    // 档案里查得到的先摘出来，不进模型；剩下的才问
+    const fromProfile: Array<{ signature: string; value: string }> = [];
+    const needModel: any[] = [];
+    for (const field of textAsk) {
+      const known = lookupField(facts, String((field as any).context || field.label || ""));
+      if (known) fromProfile.push({ signature: field.signature as string, value: known.value });
+      else needModel.push(field);
+    }
+    // 没有要问的就别调——空列表也调一次模型是纯浪费
+    const asked = needModel.length ? await askModel(needModel, needModel) : [];
+    const textValues = [...fromProfile, ...asked];
     if (textValues.length) {
       for (const v of textValues) intended.set(v.signature, v.value);
       recordFailures(await runFill(textValues, { task, runTask }, fields), failures);
@@ -214,6 +230,29 @@ async function runApplyFlowInner(job: JobRef, deps: ApplyDeps): Promise<ApplyOut
          * 闸门没有松：值仍要过 validateAutofillPlan，而且挡在写入之前（见
          * field-agent.ts 的 validate）。
          */
+        /**
+         * 先查档案。查得到就直接填，连模型都不问——省一次调用，也消灭一整类
+         * 「看起来合理但是假的」错误：真机上「学位」被猜成过工学、管理学、文学，
+         * 而候选人读的是传播/数据科学，三个都不对。这类错误闸门拦不住（值在选项
+         * 里、来源在档案里，两道校验都过），只有「本来就知道答案」能挡住。
+         *
+         * 查不到才走模型：查表是捷径，不是替代。
+         */
+        const known = lookupField(facts, String(current.context || current.label || ""));
+        if (known && (!current.options?.length || current.options.includes(known.value))) {
+          intended.set(target.signature, known.value);
+          recordFailures(await runFill([{ signature: target.signature, value: known.value }], { task, runTask }, fields), failures);
+          const seenAfter = await runTask(task("inspect"));
+          if (seenAfter?.ok) fields = toFields(seenAfter.snapshot);
+          const now = fields.find((f: any) => f.signature === target.signature);
+          if (String(now?.value ?? "").includes(known.value)) {
+            log(`[field] ${String(current.context).slice(0, 12)} 直接取自档案 → ${known.value}`);
+            widgetFilled += 1;
+            filledThisSweep += 1;
+            continue;
+          }
+        }
+
         // 给模型看的那一份：可搜索控件在这里已经去掉了被截断的选项。校验必须用
         // 同一份，否则模型按页面提示答出的「其他」「北京电影学院」会被那 60 个
         // 截断选项判成越界——真机 trace 里这个字段连挂三次就是这么来的。

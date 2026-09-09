@@ -671,3 +671,51 @@ describe("识别不出标签的字段要单独报出来", () => {
     expect(out.unlabeled).toEqual([]);
   });
 });
+
+/**
+ * 档案里查得到的字段，不该经过模型。
+ *
+ * 真机上「学位」在不同轮次被填成过工学、管理学、文学——而候选人读的是传播/数据
+ * 科学，三个都不对。原因是 resume_master.md 里根本没有「学位」二字（实测出现次数
+ * 为 0），模型只能猜。这类错误闸门拦不住：值在选项列表里、来源在档案里，两道校验
+ * 都过。
+ *
+ * 知识库补上之后，这类字段应该**直接查表填**，连猜的机会都不给：省一次模型调用，
+ * 也消灭一整类「看起来合理但是假的」错误。
+ */
+describe("已知字段直接查档案，不问模型", () => {
+  it("档案里有的值直接填，模型一次都没被问到", async () => {
+    const page = new Map<string, string>();
+    let modelAsked = 0;
+    const deps = {
+      runTask: async (task: any) => {
+        if (task.kind === "inspect") {
+          return { ok: true, formReady: true, warnings: [], snapshot: [
+            { handle: "h-degree", type: "widget", context: "学位", options: ["工学", "文学", "管理学"], value: page.get("h-degree") ?? "" },
+          ] };
+        }
+        if (task.kind === "probe") return { ok: true, probed: [{ signature: "h-degree", options: ["工学", "文学", "管理学"] }] };
+        if (task.kind === "fill") {
+          for (const v of task.payload?.values ?? []) page.set(v.signature, v.value);
+          return { ok: true, filled: (task.payload?.values ?? []).map((v: any) => v.signature), skipped: [] };
+        }
+        return { ok: true };
+      },
+      askModel: async () => { modelAsked += 1; return []; },
+      decideField: async () => { modelAsked += 1; return { action: "give_up", reason: "不该走到这" }; },
+      validateValue: () => ({ ok: true }),
+      readProfile: () => "# 用户档案\n\n## 教育背景\n### 硕士 · 清华大学\n- 学位: 文学\n",
+      findResume: () => null, readFile: () => Buffer.from(""), fileSize: () => 0, log: () => {},
+    };
+    await runApplyFlow(JOB, deps as any);
+    expect(page.get("h-degree")).toBe("文学");
+    expect(modelAsked).toBe(0);
+  });
+
+  it("档案里没有的仍然走模型——查表是捷径，不是替代", async () => {
+    let modelAsked = 0;
+    const h = harness({ deps: { decideField: async () => { modelAsked += 1; return { action: "give_up", reason: "x" }; } } });
+    await runApplyFlow(JOB, h.deps as any);
+    expect(modelAsked).toBeGreaterThan(0);
+  });
+});
