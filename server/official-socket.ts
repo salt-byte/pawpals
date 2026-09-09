@@ -41,7 +41,14 @@ export function createTaskBroadcaster(opts: { now?: () => number } = {}) {
 
   const isOpen = (client: TaskClient) => (client.readyState ?? OPEN) === OPEN;
 
-  /** 该用户的连接，最近活跃的在前。 */
+  /**
+   * 该用户的连接，最近活跃的在前。
+   *
+   * 15 秒一次的心跳 pong 也会调用 touch（见 server.ts 的 ws.on("pong", ...)），
+   * 所以两台都挂着、都没有真实任务往来的机器，"最近活跃" 基本就是「谁的 pong
+   * 后回来」，每个心跳周期都可能互换顺序。单条投递不受影响——sendToUser 永远
+   * 只送一份——受影响的是送给哪一台：可能在用户没在看的那台电脑上开页面、填表。
+   */
   const ofUser = (userId: string) =>
     [...clients.entries()].filter(([, e]) => e.userId === userId).sort((a, b) => b[1].lastActiveAt - a[1].lastActiveAt).map(([c]) => c);
 

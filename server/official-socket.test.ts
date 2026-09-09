@@ -92,6 +92,13 @@ describe("createTaskBroadcaster（按用户定向）", () => {
     hub.add("A", client);
     expect(hub.size("A")).toBe(1);
   });
+
+  it("同一用户开两条连接时 size(userId) 如实返回 2——server.ts 连接处理的补发闸门就靠这个数判断是不是唯一连接", () => {
+    const hub = createTaskBroadcaster();
+    hub.add("A", fakeClient());
+    hub.add("A", fakeClient());
+    expect(hub.size("A")).toBe(2);
+  });
 });
 
 describe("parseClientMessage", () => {

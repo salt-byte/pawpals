@@ -4741,13 +4741,20 @@ async function startServer() {
     ws.on("pong", () => { alive.add(ws); officialTaskHub.touch(ws as any); });
     officialTaskHub.add(LOCAL_USER_ID, ws as any);
     console.log(`[official] 扩展已连接，在线 ${officialTaskHub.size()}`);
-    // 新连接意味着上一个 service worker 已经被回收，它内存里那些还没派出去的
-    // 任务都没了。作废租约，让它们能立刻重新派发，而不是干等到租期结束。
-    state().officialQueue.releaseLeases();
-    // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
-    const backlog = state().officialQueue.next();
-    if (backlog) {
-      try { ws.send(JSON.stringify({ type: "task", task: backlog })); } catch { /* 刚连上就断了 */ }
+    /**
+     * 只有当这条是该用户唯一的连接时才作废租约并补发。
+     *
+     * releaseLeases() 的前提写在队列的注释里——「租约的前提是领走的人还活着」，
+     * 而它隐含假设了一个用户只有一条连接。用户在两台电脑上都装了插件时这个前提
+     * 不成立：机器一正在执行一个 submit，机器二连上来就会把它的租约清掉、把同一个
+     * 任务再派一次，于是两台浏览器从两个 IP、两个登录态投同一个岗位。
+     */
+    if (officialTaskHub.size(LOCAL_USER_ID) === 1) {
+      state().officialQueue.releaseLeases();
+      // 连上来先补发一个积压任务：扩展离线期间入队的任务没人收到过。
+      const backlog = state().officialQueue.next();
+      // 走 hub 而不是直接 ws.send：单条投递的规则必须对补发同样成立
+      if (backlog) officialTaskHub.sendToUser(LOCAL_USER_ID, backlog);
     }
     ws.on("message", (raw) => {
       officialTaskHub.touch(ws as any);
@@ -5161,8 +5168,17 @@ async function startServer() {
    * 有 socket 连着的用户绝不能卸：下面 connection 闭包把 messages / posts 等
    * 数组解构成了局部变量，活到断开为止。卸了再建，闭包持着旧数组、state() 返回
    * 新数组，这个人的聊天记录就悄悄劈成了两份。
-   * officialTaskHub.size(userId) 现在是按用户的（Task 7），所以这里按用户单独
-   * 判断插件是否在线，不再是「有任何扩展连着就都不卸」那种一刀切。
+   *
+   * officialTaskHub.size(id) > 0 这个按用户判断眼下在多用户模式下是死代码：
+   * 扩展连接一律注册在 LOCAL_USER_ID 桶下（见上面 officialWss.on("connection")
+   * 里的 officialTaskHub.add(LOCAL_USER_ID, ...)——握手还没认证真实用户，Task 8
+   * 才会换成握手认出来的 userId），而这里传进来的 id 来自已认证的 socket.io
+   * 连接，永远不会是 "local"。也就是说这条判断眼下豁免不了任何人，跟改造前
+   * 「有任何扩展连着就都不卸」比，保护范围从「所有人」变成了「没有人」：一个
+   * 唯一连接就是扩展的用户，插件在线也救不了他，状态照样可能被卸载，连带把
+   * 他的 officialQueue（未确认的任务、还没写回的执行结果）一起卸掉。判断式
+   * 本身是对的、等 Task 8 接上握手认证就会生效，这里只是如实说明它现在还不
+   * 生效，不要看着这行代码就以为保护已经在起作用。
    *
    * 单人模式没有别的用户可卸，local 之所以从没被卸掉纯粹是巧合——楼上那些
    * 60 秒/120 秒的定时器一直在调用 state()，把它捎带"续命"了。把这层巧合改成
