@@ -690,6 +690,16 @@ export default function App() {
   const [onboardingCompleted, setOnboardingCompleted] = useState(false);
   const [showPetSettings, setShowPetSettings] = useState(false);
   const [showUserSettings, setShowUserSettings] = useState(false);
+  const [deployMode, setDeployMode] = useState<'single' | 'multi'>('single');
+  const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [extBindings, setExtBindings] = useState<number>(0);
+
+  // 打开个人设置时拉一次：是哪种部署、绑了几个插件（authMode 已被登录/注册切换占用，这里用 deployMode）
+  useEffect(() => {
+    if (!showUserSettings) return;
+    fetch('/api/auth/status').then(r => r.json()).then(d => setDeployMode(d.mode === 'multi' ? 'multi' : 'single')).catch(() => {});
+    fetch('/api/extension/bindings').then(r => r.json()).then(d => setExtBindings(d.count || 0)).catch(() => {});
+  }, [showUserSettings]);
   const [showModelSwitch, setShowModelSwitch] = useState(false);
   const [switchProvider, setSwitchProvider] = useState('');
   const [switchModel, setSwitchModel] = useState('');
@@ -4586,6 +4596,57 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                  <div className="rounded-3xl bg-pet-cream/70 p-4 space-y-3">
+                    <div className="text-xs font-bold text-pet-brown/40 uppercase tracking-widest">浏览器插件</div>
+                    <p className="text-sm leading-6 text-pet-brown/60">
+                      {extBindings > 0 ? `已绑定 ${extBindings} 个插件。` : '还没有绑定插件。'}
+                      生成配对码后，在插件侧边栏填入服务器地址和这串码。5 分钟内有效，只能用一次。
+                    </p>
+                    {pairCode && (
+                      <div className="rounded-2xl bg-white p-4 text-center">
+                        <div className="text-2xl font-mono font-bold tracking-[0.3em] text-pet-brown">{pairCode.code}</div>
+                        <div className="mt-1 text-xs text-pet-brown/40">服务器地址：{window.location.origin}</div>
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const r = await fetch('/api/extension/pair-code', { method: 'POST' }).then(x => x.json()).catch(() => null);
+                          if (r?.ok) setPairCode({ code: r.code, expiresAt: r.expiresAt });
+                        }}
+                        className="flex-1 rounded-2xl bg-white px-4 py-3 text-xs font-bold text-pet-orange pet-shadow hover:scale-[1.02] transition-transform"
+                      >
+                        生成配对码
+                      </button>
+                      {extBindings > 0 && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!confirm('解除后所有已绑定的插件都要重新配对，确定吗？')) return;
+                            await fetch('/api/extension/unpair', { method: 'POST' }).catch(() => {});
+                            setExtBindings(0);
+                            setPairCode(null);
+                          }}
+                          className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-bold text-red-400 hover:bg-red-100 transition-colors"
+                        >
+                          解除绑定
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {deployMode === 'multi' && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+                        window.location.reload();
+                      }}
+                      className="w-full rounded-2xl border border-pet-brown/10 bg-white px-5 py-3 text-sm font-bold text-pet-brown/60 hover:bg-pet-cream transition-colors"
+                    >
+                      退出登录
+                    </button>
+                  )}
                   <div className="pt-4">
                     <button 
                       onClick={() => setShowUserSettings(false)}
