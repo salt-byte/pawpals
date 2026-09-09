@@ -148,7 +148,9 @@ ensureDir(APP_DATA_DIR);
 ensureDir(COOKIE_DIR);
 
 const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
-const BACKUP_DIR = path.join(os.homedir(), "Documents", "PawPals备份");
+// 默认值与改造前一字不差；加环境变量只是为了让备份内容可以在一次性目录里被验证，
+// 不设时行为完全不变。
+const BACKUP_DIR = process.env.PAWPALS_BACKUP_DIR || path.join(os.homedir(), "Documents", "PawPals备份");
 const BACKUP_META_FILE = path.join(APP_DATA_DIR, "backup-meta.json");
 
 // ── 全局队列（search_jobs / apply_job 工具 + Electron BrowserWindow 共享）──
@@ -432,6 +434,27 @@ function doLocalBackup(appDataDir: string): string {
   // 备份 workspace（聊天记录、简历草稿等）
   if (existsSync(WORKSPACE_DIR)) _copyDir(WORKSPACE_DIR, path.join(dest, "workspace"));
 
+  /**
+   * 多用户模式下真正的用户数据全在 users/<id>/ 底下，上面那份名单一个都没覆盖到。
+   *
+   * 改造之后 WORKSPACE_DIR 里只剩迁移时改名留下的 career.migrated（原来那个单人的
+   * 老数据），每个真实用户住在 APP_DATA_DIR/users/<id>/career。也就是说这个每小时
+   * 一次的任务在多用户下备份的是**零份用户数据**，然后照样打印「本地备份完成」并
+   * 广播 backup_done——计划特地把它留着跑并在启动横幅里说了，那就是一句它守不住的
+   * 承诺。这里把用户目录补进去。
+   *
+   * users.json / extension-tokens.json 也要：没有账号表，users/<id>/ 里的数据谁都
+   * 登不进去，恢复出来等于一堆没有主人的目录。
+   */
+  if (MULTI_USER) {
+    const usersDir = path.join(appDataDir, "users");
+    if (existsSync(usersDir)) _copyDir(usersDir, path.join(dest, "users"));
+    for (const name of ["users.json", "extension-tokens.json"]) {
+      const f = path.join(appDataDir, name);
+      if (existsSync(f)) copyFileSync(f, path.join(dest, name));
+    }
+  }
+
   // 保留最近10份快照，删除旧的
   const snapshots = readdirSync(BACKUP_DIR)
     .filter(d => /^\d{4}-\d{2}/.test(d))
@@ -457,6 +480,17 @@ function startAutoBackup(appDataDir: string, notifyIO?: any) {
   schedule.scheduleJob("0 * * * *", () => {
     try {
       const dest = doLocalBackup(appDataDir);
+      /**
+       * 这里是全进程仅存的一处未定向广播（本轮把 62 处 io.emit 换成了 emitTo），
+       * **是故意留的**，不是漏网的。
+       *
+       * 备份是整机一件事，这条通知里没有任何用户数据——只有一个时间戳和主机上的
+       * 落盘路径。而定时器天生没有用户上下文，emitTo() 在这里只会丢包：没有哪个
+       * 用户比别人更该收到「这台机器刚备份完」。
+       *
+       * 唯一的残留是那个 path 会把宿主机的目录暴露给所有在线用户；真要收紧就该
+       * 去掉 path 而不是改成定向。留到「多租户下运维是谁」这个产品问题定下来一起处理。
+       */
       notifyIO?.emit("backup_done", { ok: true, path: dest, at: Date.now() });
     } catch (e: any) {
       console.error("[backup] 定时备份失败:", e.message);
@@ -4706,6 +4740,30 @@ async function handlePipelineSignalWorkflow(
   return false;
 }
 
+/**
+ * 多用户部署里没有正确行为的路由，统一在这里挡掉。
+ *
+ * 沿用六个每日定时任务立下的先例：一件事离开「当前是谁」这层就没有正确做法，而
+ * 给它编一个多租户语义是产品决策、不是这一轮该发明的东西——那就在闸门处挡住，把
+ * 原因写清楚，别硬凑一个半对的行为。
+ *
+ * 与定时任务唯一的差别是不能「压根不注册」：没注册的 GET 会被下面 SPA 的
+ * app.get("*") 兜住，回一个 200 的 index.html，前端 JSON.parse 之后只会得到一个
+ * 看不懂的错误。所以这里显式注册一个 404 + 中文原因。
+ *
+ * 单人模式一个字都不变：MULTI_USER 未设时直接注册原来的 handler。
+ */
+function routeUnlessMultiUser(
+  app: any,
+  method: "get" | "post" | "delete",
+  routePath: string,
+  reason: string,
+  handler: any,
+): void {
+  if (!MULTI_USER) { app[method](routePath, handler); return; }
+  app[method](routePath, (_req: any, res: any) => res.status(404).json({ ok: false, error: reason }));
+}
+
 async function startServer() {
   // 多用户模式下这个开发期后门会把所有请求都认成 local，认证名存实亡——
   // 真部署上手滑设了这个变量就是所有账号共享一份数据。留着（开发要用），
@@ -5094,8 +5152,32 @@ async function startServer() {
     });
   });
 
+  /**
+   * ── 备份三件套在多用户部署里一律关闭 ──
+   *
+   * 它们操作的全是**整机**的东西，没有一个有按用户的正确语义：
+   *
+   * - export：无条件打包 WORKSPACE_DIR。迁移之后那底下只剩改名留下的
+   *   career.migrated，也就是最初那个单人用户的 profile.md / resume_master.md /
+   *   chat_log.md / applications.json；真实用户住在 users/<id>/career，这条路由
+   *   一个都不碰。结果是「导出全部数据」按钮给用户 B 下发了**别人**的简历，而且
+   *   一份 B 自己的数据都没有。附带还打包了 setup-state.json（部署级配置）。
+   * - restore：写侧的孪生兄弟——任何一个注册用户都能整机覆盖 WORKSPACE_DIR 和
+   *   security.json。
+   * - now：整机备份，是运维动作不是用户动作。
+   *
+   * 为什么是关闭而不是「按用户重建归档」：export 一侧确实可以改成打包
+   * careerDir() + userDataDir() 并排除 career.migrated，但 restore 一侧**没有**
+   * 正确的多租户版本——它按定义就是覆盖整机状态，谁有资格这么做是「多租户下运维
+   * 是谁」那个未决的产品问题。只修 export 会留下一个能写不能读的半套，两边一起
+   * 关是这一轮能有把握做对的最小改动。数据导出本来也写在设计文档的「不在本轮范围」里。
+   *
+   * /api/backup/status 保留：只读、不含任何用户数据，且前端设置页依赖它。
+   */
+  const kBackupOff = "多用户部署未开放备份与数据导出";
+
   // 立即备份一次
-  app.post("/api/backup/now", (_req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/backup/now", kBackupOff, (_req: any, res: any) => {
     try {
       ensureDir(BACKUP_DIR);
       const dest = doLocalBackup(APP_DATA_DIR);
@@ -5106,7 +5188,7 @@ async function startServer() {
   });
 
   // 导出全部数据为 ZIP（用户下载）
-  app.get("/api/backup/export", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "get", "/api/backup/export", kBackupOff, (req: any, res: any) => {
     const filename = `PawPals备份_${new Date().toISOString().slice(0, 10)}.zip`;
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -5132,7 +5214,7 @@ async function startServer() {
   });
 
   // 从快照恢复
-  app.post("/api/backup/restore/:snapshot", (req: any, res: any) => {
+  routeUnlessMultiUser(app, "post", "/api/backup/restore/:snapshot", kBackupOff, (req: any, res: any) => {
     const { snapshot } = req.params;
     if (!/^\d{4}-\d{2}/.test(snapshot)) return res.status(400).json({ error: "无效快照名" });
     const snapshotPath = path.join(BACKUP_DIR, snapshot);
