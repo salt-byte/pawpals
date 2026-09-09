@@ -50,12 +50,21 @@ export function validatePassword(raw: unknown): string | null {
   return null;
 }
 
-function readJson<T>(fs: JsonFs, file: string, fallback: T): T {
+function readJson<T>(fs: JsonFs, file: string, fallback: T, strict: boolean = false): T {
+  if (!fs.existsSync(file)) return fallback;
+
   try {
-    if (!fs.existsSync(file)) return fallback;
     return JSON.parse(fs.readFileSync(file, "utf-8")) as T;
-  } catch {
-    // 文件损坏当空表：登录页打不开比丢一份可重建的会话表更糟
+  } catch (e) {
+    if (strict) {
+      // 用户表损坏时必须拒绝启动。如果当成空表，现有邮箱可能被重新注册，
+      // 导致身份接管（新 id 抢走 alice@x.com）和数据孤儿（原账号数据以旧 id 命名，找不到了）。
+      throw new Error(
+        `用户数据文件 ${file} 损坏无法读取。请检查文件完整性或与管理员联系。` +
+        `不能以空表启动，因为那样会让现有邮箱被重新注册，导致身份接管和数据孤儿。`
+      );
+    }
+    // 会话表损坏当空表是安全的：最坏是强制重新登录一次，本来每到 TTL 就会发生。
     return fallback;
   }
 }
@@ -79,7 +88,8 @@ export function createUserStore(opts: {
   const { file, fs } = opts;
   const randomId = opts.randomId ?? (() => randomBytes(12).toString("hex"));
   const now = opts.now ?? (() => Date.now());
-  const users: UserRecord[] = readJson<{ users: UserRecord[] }>(fs, file, { users: [] }).users ?? [];
+  // 用户表必须严格解析：文件损坏时拒绝启动，避免身份接管和数据孤儿
+  const users: UserRecord[] = readJson<{ users: UserRecord[] }>(fs, file, { users: [] }, true).users ?? [];
   const save = () => writeJson(fs, file, { users });
 
   return {
@@ -124,7 +134,9 @@ export function createSessionStore(opts: {
   const now = opts.now ?? (() => Date.now());
   // 前缀沿用改造前的 paw_，_getSessionToken 里的 Bearer 解析不用改
   const randomToken = opts.randomToken ?? (() => "paw_" + randomBytes(32).toString("hex"));
-  const sessions = new Map<string, SessionRow>(Object.entries(readJson<Record<string, SessionRow>>(fs, file, {})));
+  // 会话表损坏当空表，不在严格模式：最坏是全员重新登录，本来每到 TTL 就会发生。
+  // 用户表不同：损坏后启动会导致身份接管，所以必须拒绝启动。
+  const sessions = new Map<string, SessionRow>(Object.entries(readJson<Record<string, SessionRow>>(fs, file, {}, false)));
   const save = () => writeJson(fs, file, Object.fromEntries(sessions));
 
   const expired = (row: SessionRow) => now() - row.createdAt > ttlMs;

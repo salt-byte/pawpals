@@ -74,10 +74,17 @@ describe("createUserStore", () => {
     expect(again.authenticate("a@x.com", "password1")).not.toBeNull();
   });
 
-  it("文件损坏时当空表处理，不抛错", () => {
+  it("文件不存在时当空表处理，不抛错", () => {
+    const fs = memFs();
+    expect(createUserStore({ file: "/d/users.json", fs }).count()).toBe(0);
+  });
+
+  it("文件损坏时必须拒绝启动——会导致身份接管和数据孤儿", () => {
     const fs = memFs();
     fs.files.set("/d/users.json", "{not json");
-    expect(createUserStore({ file: "/d/users.json", fs }).count()).toBe(0);
+    expect(() => createUserStore({ file: "/d/users.json", fs })).toThrow();
+    // 错误消息应该说明文件名和为什么拒绝启动
+    expect(() => createUserStore({ file: "/d/users.json", fs })).toThrow(/users\.json/);
   });
 });
 
@@ -104,5 +111,17 @@ describe("createSessionStore", () => {
     const fs = memFs();
     const token = createSessionStore({ file: "/d/s.json", fs, ttlMs: 1000 }).issue("u1");
     expect(createSessionStore({ file: "/d/s.json", fs, ttlMs: 1000 }).resolve(token)).toBe("u1");
+  });
+
+  it("文件不存在时当空表处理，不抛错", () => {
+    const fs = memFs();
+    expect(createSessionStore({ file: "/d/sessions.json", fs, ttlMs: 1000 }).sweep()).toBe(0);
+  });
+
+  it("文件损坏时当空表处理，不抛错", () => {
+    const fs = memFs();
+    fs.files.set("/d/sessions.json", "{not json");
+    const store = createSessionStore({ file: "/d/sessions.json", fs, ttlMs: 1000 });
+    expect(store.sweep()).toBe(0);
   });
 });
