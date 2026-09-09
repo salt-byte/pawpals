@@ -71,6 +71,32 @@ import {
 
 dotenv.config();
 
+/**
+ * 兜住任何漏网的未捕获异常，**不退出进程**。
+ *
+ * 这是一个明知故犯的取舍。教科书上的做法是记完日志立刻退出：未捕获异常之后进程
+ * 处于未知状态，带着一份可能已经损坏的内存继续跑，是在拿正确性赌运气。这里仍然
+ * 选择不退，因为多租户下另一边更糟——一个用户的一次没有上下文的抛错，会把**所有
+ * 其他人**正在进行的会话、正在等结果的投递一起带走。
+ *
+ * 这不是理论风险：整套设计建立在隐式的 AsyncLocalStorage 上下文之上，而
+ * ws.on("message") 已经实证过上下文在某些边界上是会断的（见那里的注释）。没有这
+ * 个兜底，等于赌「所有这类边界都已经被找齐了」。
+ *
+ * 兜底不是免罪符：日志必须刺眼到不可能被忽略，否则它会变成一层把 bug 盖住的
+ * 地毯。每一条都当成必须修的线索处理，不要当成正常噪音。
+ */
+function _logFatal(kind: string, err: any) {
+  const bang = "!".repeat(78);
+  console.error(bang);
+  console.error(`!! ${kind}：有异常没人接。进程**不退出**，但状态可能已经不对，请立刻排查 !!`);
+  console.error(bang);
+  console.error(err?.stack || err);
+  console.error(bang);
+}
+process.on("uncaughtException", (err) => _logFatal("未捕获异常 uncaughtException", err));
+process.on("unhandledRejection", (reason) => _logFatal("未处理的 Promise 拒绝 unhandledRejection", reason));
+
 /** 多用户模式。未设时是本地单人版：唯一用户 local，行为与改造前一致。 */
 const MULTI_USER = process.env.PAWPALS_MULTI_USER === "1";
 
