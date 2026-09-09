@@ -36,6 +36,7 @@ import { upsertAnswers } from "./server/profile-answers.ts";
 import { parseUserAnswers } from "./server/answer-reply.ts";
 import { registerOfficialRoutes } from "./server/official-routes.ts";
 import { runToolLoop } from "./server/tool-loop.ts";
+import { LOCAL_USER_ID, initTenancy, runWithUser, currentUserId, careerDir, userDataDir, setEmitter, emitTo } from "./server/tenancy.ts";
 import { buildVisionPrompt, parseVisionClick } from "./server/vision-click.ts";
 import { WebSocketServer } from "ws";
 import { createTaskBroadcaster, parseClientMessage } from "./server/official-socket.ts";
@@ -61,6 +62,9 @@ import {
 
 dotenv.config();
 
+/** 多用户模式。未设时是本地单人版：唯一用户 local，行为与改造前一致。 */
+const MULTI_USER = process.env.PAWPALS_MULTI_USER === "1";
+
 function resolveAppDataDir() {
   if (process.env.PAWPALS_HOME) return process.env.PAWPALS_HOME;
 
@@ -80,16 +84,22 @@ function ensureDir(dir: string) {
 
 const APP_DATA_DIR = resolveAppDataDir();
 const WORKSPACE_DIR = path.join(APP_DATA_DIR, "workspace");
-const CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(WORKSPACE_DIR, "career");
+/** 改造前的 careerDir()。单人模式下 local 用户仍用它；多用户模式下迁移到 users/local/career。 */
+const LEGACY_CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(WORKSPACE_DIR, "career");
+initTenancy({ dataRoot: APP_DATA_DIR, localCareerDir: MULTI_USER ? undefined : LEGACY_CAREER_DIR });
 const COOKIE_DIR = process.env.PAWPALS_COOKIE_DIR || path.join(APP_DATA_DIR, "jobclaw", "cookies");
 const COOKIE_FILE = path.join(COOKIE_DIR, "boss.json");
-const APPLICATIONS_FILE = path.join(CAREER_DIR, "applications.json");
-const JOBS_FILE = path.join(CAREER_DIR, "jobs.json");
-const CONTACTS_FILE = path.join(CAREER_DIR, "contacts.json");
-const PET_FILE = path.join(APP_DATA_DIR, "pet.json");
-const ONBOARDING_STATE_FILE = path.join(CAREER_DIR, "onboarding_state.json");
-const COLLAB_BOARD_FILE = path.join(CAREER_DIR, "collaboration_board.json");
-const LAST_SEARCH_RESULTS_FILE = path.join(CAREER_DIR, "last_search_results.json");
+/**
+ * 数据文件路径全部改成函数：路径取决于当前用户，import 阶段没有用户。
+ * 改成函数后旧写法全部编译报错——编译通过即为改全。
+ */
+const applicationsFile = () => path.join(careerDir(), "applications.json");
+const jobsFile = () => path.join(careerDir(), "jobs.json");
+const contactsFile = () => path.join(careerDir(), "contacts.json");
+const petFile = () => path.join(userDataDir(), "pet.json");
+const onboardingStateFile = () => path.join(careerDir(), "onboarding_state.json");
+const collabBoardFile = () => path.join(careerDir(), "collaboration_board.json");
+const lastSearchResultsFile = () => path.join(careerDir(), "last_search_results.json");
 const MAIL_WATCH_STATE_FILE = path.join(APP_DATA_DIR, "mail-watcher-state.json");
 const CONFIG_FILE = path.join(APP_DATA_DIR, "pawpals-config.json");
 const SETUP_STATE_FILE = path.join(APP_DATA_DIR, "setup-state.json");
@@ -100,7 +110,6 @@ const PYTHON_BIN = process.env.PAWPALS_PYTHON || process.env.PYTHON ||
    existsSync("/usr/local/bin/python3")    ? "/usr/local/bin/python3" : "python3");
 
 ensureDir(APP_DATA_DIR);
-ensureDir(CAREER_DIR);
 ensureDir(COOKIE_DIR);
 
 const SECURITY_FILE = path.join(APP_DATA_DIR, "security.json");
@@ -678,18 +687,18 @@ function saveProviderApiKey(provider: string, apiKey: string, options?: { baseUr
 
 const BRAVE_KEY     = process.env.BRAVE_SEARCH_API_KEY || "";
 const MAX_CHAIN_DEPTH = 2;
-const CHAT_LOG      = path.join(CAREER_DIR, "chat_log.md");
-const MESSAGES_FILE = path.join(CAREER_DIR, "pawpals_messages.json");
-const RESUME_MASTER_FILE = path.join(CAREER_DIR, "resume_master.md");
-const MEMORY_FILE   = path.join(CAREER_DIR, "memory.json");
+const chatLogFile = () => path.join(careerDir(), "chat_log.md");
+const messagesFile = () => path.join(careerDir(), "pawpals_messages.json");
+const resumeMasterFile = () => path.join(careerDir(), "resume_master.md");
+const memoryFile = () => path.join(careerDir(), "memory.json");
 
 // ── 长期记忆系统 ────────────────────────────────────────────────────────
 type MemoryEntry = { key: string; value: string; source: string; createdAt: string };
 
 function loadMemory(): MemoryEntry[] {
   try {
-    if (!existsSync(MEMORY_FILE)) return [];
-    return JSON.parse(readFileSync(MEMORY_FILE, "utf-8"));
+    if (!existsSync(memoryFile())) return [];
+    return JSON.parse(readFileSync(memoryFile(), "utf-8"));
   } catch { return []; }
 }
 
@@ -701,7 +710,7 @@ function saveMemoryEntry(entry: Omit<MemoryEntry, "createdAt">) {
   if (idx >= 0) memories[idx] = full; else memories.push(full);
   // 最多保留 50 条
   const trimmed = memories.slice(-50);
-  writeFileSync(MEMORY_FILE, JSON.stringify(trimmed, null, 2), "utf-8");
+  writeFileSync(memoryFile(), JSON.stringify(trimmed, null, 2), "utf-8");
   console.log(`[memory] saved: ${entry.key} = ${entry.value}`);
 }
 
@@ -724,8 +733,8 @@ function extractMemoryUpdates(agentReply: string): void {
     } catch {}
   }
 }
-const PROFILE_FILE = path.join(CAREER_DIR, "profile.md");
-const SKILLS_GAP_FILE = path.join(CAREER_DIR, "skills_gap.md");
+const profileFile = () => path.join(careerDir(), "profile.md");
+const skillsGapFile = () => path.join(careerDir(), "skills_gap.md");
 
 type CollaborationRow = {
   id: string;
@@ -902,7 +911,7 @@ function readAutofillProfileText(limit = 6000): string {
       return "";
     }
   };
-  return `${readIfExists(PROFILE_FILE)}\n\n${readIfExists(RESUME_MASTER_FILE)}`.trim().slice(0, limit);
+  return `${readIfExists(profileFile())}\n\n${readIfExists(resumeMasterFile())}`.trim().slice(0, limit);
 }
 
 function extractAutofillProfile() {
@@ -1043,15 +1052,15 @@ function extractSearchStrategyHeuristic(userMsg: string, state: OnboardingState)
 
 function loadCollaborationBoard(): CollaborationRow[] {
   try {
-    if (existsSync(COLLAB_BOARD_FILE)) {
-      return JSON.parse(readFileSync(COLLAB_BOARD_FILE, "utf-8"));
+    if (existsSync(collabBoardFile())) {
+      return JSON.parse(readFileSync(collabBoardFile(), "utf-8"));
     }
   } catch {}
   return [];
 }
 
 function saveCollaborationBoard(rows: CollaborationRow[]) {
-  try { writeFileSync(COLLAB_BOARD_FILE, JSON.stringify(rows, null, 2)); } catch {}
+  try { writeFileSync(collabBoardFile(), JSON.stringify(rows, null, 2)); } catch {}
 }
 
 function upsertCollaborationRow(partial: Partial<CollaborationRow> & { company?: string; role?: string; jdUrl?: string }) {
@@ -1097,12 +1106,12 @@ function upsertCollaborationRow(partial: Partial<CollaborationRow> & { company?:
 }
 
 function saveLastSearchResults(rows: SearchResultRow[]) {
-  try { writeFileSync(LAST_SEARCH_RESULTS_FILE, JSON.stringify(rows, null, 2)); } catch {}
+  try { writeFileSync(lastSearchResultsFile(), JSON.stringify(rows, null, 2)); } catch {}
 }
 
 function loadLastSearchResults(): SearchResultRow[] {
   try {
-    if (existsSync(LAST_SEARCH_RESULTS_FILE)) return JSON.parse(readFileSync(LAST_SEARCH_RESULTS_FILE, "utf-8"));
+    if (existsSync(lastSearchResultsFile())) return JSON.parse(readFileSync(lastSearchResultsFile(), "utf-8"));
   } catch {}
   return [];
 }
@@ -1156,7 +1165,7 @@ function findBoardRowsFromText(text: string) {
 
 function updateApplicationStatusFiles(row: CollaborationRow, status: "interview" | "offer" | "rejected") {
   try {
-    const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[] : [];
+    const apps = existsSync(applicationsFile()) ? JSON.parse(readFileSync(applicationsFile(), "utf-8")) as any[] : [];
     const idx = apps.findIndex((app) =>
       (row.jdUrl && app.url === row.jdUrl) ||
       ((app.company || "") === row.company && (app.role || "") === row.role)
@@ -1165,14 +1174,14 @@ function updateApplicationStatusFiles(row: CollaborationRow, status: "interview"
       apps[idx].status = status;
       apps[idx].timeline = Array.isArray(apps[idx].timeline) ? apps[idx].timeline : [];
       apps[idx].timeline.push({ date: new Date().toISOString().slice(0, 10), action: status });
-      writeFileSync(APPLICATIONS_FILE, JSON.stringify(apps, null, 2));
+      writeFileSync(applicationsFile(), JSON.stringify(apps, null, 2));
     }
   } catch {}
 }
 
 function syncJobsToCollaborationBoard() {
   try {
-    const jobs = existsSync(JOBS_FILE) ? JSON.parse(readFileSync(JOBS_FILE, "utf-8")) as any[] : [];
+    const jobs = existsSync(jobsFile()) ? JSON.parse(readFileSync(jobsFile(), "utf-8")) as any[] : [];
     for (const job of jobs) {
       upsertCollaborationRow({
         company: job.company || "",
@@ -1189,7 +1198,7 @@ function syncJobsToCollaborationBoard() {
 
 function syncApplicationsToCollaborationBoard() {
   try {
-    const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[] : [];
+    const apps = existsSync(applicationsFile()) ? JSON.parse(readFileSync(applicationsFile(), "utf-8")) as any[] : [];
     for (const app of apps) {
       upsertCollaborationRow({
         company: app.company || "",
@@ -1212,7 +1221,7 @@ function syncApplicationsToCollaborationBoard() {
 
 function syncContactsToCollaborationBoard() {
   try {
-    const contacts = existsSync(CONTACTS_FILE) ? JSON.parse(readFileSync(CONTACTS_FILE, "utf-8")) as any[] : [];
+    const contacts = existsSync(contactsFile()) ? JSON.parse(readFileSync(contactsFile(), "utf-8")) as any[] : [];
     for (const contact of contacts) {
       const relatedUrl = contact.jobUrl || contact.url || "";
       upsertCollaborationRow({
@@ -1234,8 +1243,8 @@ function syncContactsToCollaborationBoard() {
 
 function loadOnboardingState(): OnboardingState {
   try {
-    if (existsSync(ONBOARDING_STATE_FILE)) {
-      const raw = JSON.parse(readFileSync(ONBOARDING_STATE_FILE, "utf-8"));
+    if (existsSync(onboardingStateFile())) {
+      const raw = JSON.parse(readFileSync(onboardingStateFile(), "utf-8"));
       return {
         ...createDefaultOnboardingState(),
         ...raw,
@@ -1245,16 +1254,16 @@ function loadOnboardingState(): OnboardingState {
     }
   } catch {}
   // 只有 profile.md 有实质内容时才认为 onboarding 已完成
-  if (existsSync(PROFILE_FILE)) {
+  if (existsSync(profileFile())) {
     try {
-      const content = readFileSync(PROFILE_FILE, "utf8").trim();
+      const content = readFileSync(profileFile(), "utf8").trim();
       if (content.length > 50) {
         return {
           ...createDefaultOnboardingState(),
           phase: "completed",
           currentStep: null,
           completed: true,
-          resumeUploaded: existsSync(RESUME_MASTER_FILE),
+          resumeUploaded: existsSync(resumeMasterFile()),
         };
       }
     } catch {}
@@ -1263,7 +1272,7 @@ function loadOnboardingState(): OnboardingState {
 }
 
 function saveOnboardingState(state: OnboardingState, io?: Server) {
-  try { writeFileSync(ONBOARDING_STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+  try { writeFileSync(onboardingStateFile(), JSON.stringify(state, null, 2)); } catch {}
   // 通知前端更新进度条
   if (io) io.emit("onboarding_phase", { phase: state.phase, completed: state.completed });
 }
@@ -1339,7 +1348,7 @@ function handleOnboardingNavigationCommand(
 
 function persistProfileFromOnboarding(state: OnboardingState) {
   try {
-    writeFileSync(PROFILE_FILE, renderProfileMarkdown(state), "utf-8");
+    writeFileSync(profileFile(), renderProfileMarkdown(state), "utf-8");
   } catch {}
 }
 
@@ -1350,7 +1359,7 @@ function saveInitialResumeMaster(rawContent: string, fileName: string) {
     .trim();
   if (!cleaned) return;
   try {
-    writeFileSync(RESUME_MASTER_FILE, `# 原始简历\n\n来源文件: ${fileName}\n\n## 提取文本\n\n${cleaned}\n`, "utf-8");
+    writeFileSync(resumeMasterFile(), `# 原始简历\n\n来源文件: ${fileName}\n\n## 提取文本\n\n${cleaned}\n`, "utf-8");
   } catch {}
 }
 
@@ -1641,7 +1650,7 @@ function renderCollaborationBoardChatTable(rows: CollaborationRow[], title = "�
 // ── 多 Agent 工作区文件加载 ─────────────────────────────────────
 // 每个 Agent 的 SOUL.md 存储在 career/workspaces/<agentId>/SOUL.md
 function loadAgentSoul(agentId: string): string {
-  const soulPath = path.join(CAREER_DIR, "workspaces", agentId, "SOUL.md");
+  const soulPath = path.join(careerDir(), "workspaces", agentId, "SOUL.md");
   try {
     if (existsSync(soulPath)) return readFileSync(soulPath, "utf-8").trim();
   } catch {}
@@ -1649,7 +1658,7 @@ function loadAgentSoul(agentId: string): string {
 }
 
 function loadAgentUserContext(agentId: string): string {
-  const userPath = path.join(CAREER_DIR, "workspaces", agentId, "USER.md");
+  const userPath = path.join(careerDir(), "workspaces", agentId, "USER.md");
   try {
     if (existsSync(userPath)) return readFileSync(userPath, "utf-8").trim();
   } catch {}
@@ -1663,7 +1672,7 @@ function loadProfileInfo(): {
 } {
   const empty = { name: "", email: "", summary: "", targetRoles: [], jobType: "", skills: [] };
   try {
-    const profilePath = path.join(CAREER_DIR, "profile.md");
+    const profilePath = path.join(careerDir(), "profile.md");
     if (!existsSync(profilePath)) return empty;
     const md = readFileSync(profilePath, "utf-8");
 
@@ -1697,13 +1706,13 @@ function loadProfileInfo(): {
 
 function loadMessages(): any[] {
   try {
-    if (existsSync(MESSAGES_FILE)) return JSON.parse(readFileSync(MESSAGES_FILE, "utf-8"));
+    if (existsSync(messagesFile())) return JSON.parse(readFileSync(messagesFile(), "utf-8"));
   } catch {}
   return [];
 }
 
 function saveMessages(msgs: any[]) {
-  try { writeFileSync(MESSAGES_FILE, JSON.stringify(msgs, null, 2)); } catch {}
+  try { writeFileSync(messagesFile(), JSON.stringify(msgs, null, 2)); } catch {}
 }
 
 function appendChatLog(agent: { id: string; name: string }, userMsg: string, replySnippet: string) {
@@ -1712,7 +1721,7 @@ function appendChatLog(agent: { id: string; name: string }, userMsg: string, rep
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
     }).replace(/\//g, "-");
-    appendFileSync(CHAT_LOG, formatLogEntry({
+    appendFileSync(chatLogFile(), formatLogEntry({
       at: now,
       agentName: agent.name,
       agentId: agent.id,
@@ -1727,7 +1736,7 @@ const REVIEWED_AGENTS = new Set(["resume-expert", "interview-coach", "profession
 const REFLECTION_ENABLED = process.env.PAWPALS_REFLECTION_ENABLED !== "false";
 const PROJECT_ROOT = process.env.PAWPALS_APP_UNPACKED_ROOT || process.env.PAWPALS_APP_ROOT || process.cwd();
 const RUBRICS_DIR = path.join(PROJECT_ROOT, "evals", "rubrics");
-const REVIEWS_FILE = path.join(CAREER_DIR, "reviews.jsonl");
+const reviewsFile = () => path.join(careerDir(), "reviews.jsonl");
 
 type ReviewResult = {
   passed: boolean;
@@ -1749,7 +1758,7 @@ async function runReviewer(
     return null;
   }
   let profileCtx = "";
-  try { profileCtx = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").slice(0, 1500); } catch {}
+  try { profileCtx = readFileSync(path.join(careerDir(), "profile.md"), "utf8").slice(0, 1500); } catch {}
 
   const sys = `你是质检员，严格按 rubric 给 agent 回复打分。只输出 JSON，不要任何其他文字。
 
@@ -1820,14 +1829,14 @@ function appendReviewLog(payload: {
       issues: payload.review.issues,
       reply_preview: payload.originalReply.slice(0, 300),
     }) + "\n";
-    appendFileSync(REVIEWS_FILE, line, "utf-8");
+    appendFileSync(reviewsFile(), line, "utf-8");
   } catch (e: any) {
     console.warn("[reviewer] log failed:", e?.message || e);
   }
 }
 
 // ── Eval 中圈：埋点收集 ──────────────────────────────────────────────
-const EVENTS_FILE = path.join(CAREER_DIR, "events.jsonl");
+const eventsFile = () => path.join(careerDir(), "events.jsonl");
 
 type EvalEvent =
   | { type: "agent_response"; agentId: string; msgId: string; groupId: string; replyLength: number; calledApply: boolean }
@@ -1839,7 +1848,7 @@ type EvalEvent =
 function recordEvalEvent(event: EvalEvent) {
   try {
     const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n";
-    appendFileSync(EVENTS_FILE, line, "utf-8");
+    appendFileSync(eventsFile(), line, "utf-8");
   } catch {}
 }
 
@@ -1899,8 +1908,8 @@ function saveMailWatcherState(state: MailWatcherState) {
 
 function loadPetRuntimeProfile() {
   try {
-    if (existsSync(PET_FILE)) {
-      const raw = JSON.parse(readFileSync(PET_FILE, "utf-8"));
+    if (existsSync(petFile())) {
+      const raw = JSON.parse(readFileSync(petFile(), "utf-8"));
       return {
         name: String(raw?.name || raw?.petName || "团团"),
         personality: String(raw?.personality || raw?.petPersonality || "温柔体贴，偶尔有点小调皮，最喜欢看你认真学习的样子。"),
@@ -2142,7 +2151,7 @@ const AGENT_TOOLS: Record<string, string[]> = {
 const CONFIRM_REQUIRED_TOOLS = new Set(["apply_job"]);
 
 // ── 每个 Agent 的自动上下文注入配置（不靠关键词，按职责自动注入）────────
-// files: 启动时自动读取并注入的文件（相对于 CAREER_DIR）
+// files: 启动时自动读取并注入的文件（相对于 careerDir()）
 // tools: 启动时自动执行并注入结果的工具
 const AGENT_CONTEXT_CONFIG: Record<string, {
   files?: Array<{ path: string; label: string; lines?: number }>;
@@ -2420,8 +2429,8 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
     }
 
     if (name === "read_applications") {
-      if (!existsSync(APPLICATIONS_FILE)) return "暂无投递记录。";
-      const apps = JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[];
+      if (!existsSync(applicationsFile())) return "暂无投递记录。";
+      const apps = JSON.parse(readFileSync(applicationsFile(), "utf-8")) as any[];
       const byStatus: Record<string, any[]> = {};
       for (const a of apps) {
         (byStatus[a.status] = byStatus[a.status] || []).push(a);
@@ -2448,8 +2457,8 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
     }
 
     if (name === "get_followups") {
-      if (!existsSync(APPLICATIONS_FILE)) return "暂无投递记录。";
-      const apps = JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) as any[];
+      if (!existsSync(applicationsFile())) return "暂无投递记录。";
+      const apps = JSON.parse(readFileSync(applicationsFile(), "utf-8")) as any[];
       const today = new Date().toISOString().slice(0, 10);
       const overdue = apps.filter(a =>
         ["contact_started", "submitted", "applied"].includes(a.status) && a.followUpDate && a.followUpDate <= today
@@ -2460,7 +2469,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
     }
 
     if (name === "record_application") {
-      const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf-8")) : [];
+      const apps = existsSync(applicationsFile()) ? JSON.parse(readFileSync(applicationsFile(), "utf-8")) : [];
       const existing = apps.find((app: any) =>
         (args.url && app.url && app.url === args.url) ||
         ((app.company || "") === (args.company || "") && (app.role || "") === (args.role || ""))
@@ -2484,14 +2493,14 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
         timeline: [{ date: new Date().toISOString().slice(0, 10), action: timelineAction }],
       };
       apps.push(newApp);
-      writeFileSync(APPLICATIONS_FILE, JSON.stringify(apps, null, 2));
+      writeFileSync(applicationsFile(), JSON.stringify(apps, null, 2));
       syncApplicationsToCollaborationBoard();
       return `[OK] 已记录状态：${args.company} — ${args.role}（${status === "contact_started" ? "已发起沟通" : "已提交"}），follow-up 提醒设在 ${followUpDate}。`;
     }
 
     if (name === "read_jobs") {
-      if (!existsSync(JOBS_FILE)) return "岗位库为空。";
-      const jobs = JSON.parse(readFileSync(JOBS_FILE, "utf-8")) as any[];
+      if (!existsSync(jobsFile())) return "岗位库为空。";
+      const jobs = JSON.parse(readFileSync(jobsFile(), "utf-8")) as any[];
       const pending = jobs.filter(j => !j.applied).slice(0, 10);
       if (!pending.length) return "没有待投递的岗位。";
       return `📋 待投递岗位（${pending.length} 条）：\n\n` +
@@ -2582,7 +2591,7 @@ async function __executeToolInner(name: string, args: any): Promise<string> {
           readProfile: () => profileText,
           findResume: () => pickResumeFile({
             envPath: process.env.PAWPALS_RESUME_FILE,
-            dirs: [CAREER_DIR, path.join(process.env.HOME || "", "Downloads")],
+            dirs: [careerDir(), path.join(process.env.HOME || "", "Downloads")],
             exists: (p: string) => existsSync(p),
             list: (dir: string) => readdirSync(dir),
           }),
@@ -2645,7 +2654,7 @@ const JOB_AGENTS = [
 ];
 
 // ── 人设投递：把仓库模板里的 SOUL.md 铺到用户工作区 ──────────────────
-// loadAgentSoul() 从 CAREER_DIR/workspaces/<id>/SOUL.md 读，模板却在 resources/ 下。
+// loadAgentSoul() 从 careerDir()/workspaces/<id>/SOUL.md 读，模板却在 resources/ 下。
 // 两者之间原本靠 bootstrap-pawpals-runtime.mjs 搬运，它的 npm 入口随 openclaw
 // 一起被删后就没人调用了，于是 7 份人设从未进过用户工作区。
 const SOUL_TEMPLATE_DIR = path.join(PROJECT_ROOT, "resources", "openclaw-template", "workspace", "career", "workspaces");
@@ -2655,11 +2664,11 @@ function seedAgentSouls() {
   try {
     const plan = planSoulSeed(JOB_AGENTS.map((a) => a.id), {
       templateExists: (id) => existsSync(soulPath(SOUL_TEMPLATE_DIR, id)),
-      destExists: (id) => existsSync(soulPath(path.join(CAREER_DIR, "workspaces"), id)),
+      destExists: (id) => existsSync(soulPath(path.join(careerDir(), "workspaces"), id)),
     });
     if (!plan.length) return;
     for (const { agentId } of plan) {
-      const dest = soulPath(path.join(CAREER_DIR, "workspaces"), agentId);
+      const dest = soulPath(path.join(careerDir(), "workspaces"), agentId);
       mkdirSync(path.dirname(dest), { recursive: true });
       copyFileSync(soulPath(SOUL_TEMPLATE_DIR, agentId), dest);
     }
@@ -2827,7 +2836,7 @@ async function streamAgent(
     toolInjections.push(
       ...buildFileInjections(agentCtx.files, (relPath) => {
         try {
-          return readFileSync(path.join(CAREER_DIR, relPath), "utf8");
+          return readFileSync(path.join(careerDir(), relPath), "utf8");
         } catch {
           return null;
         }
@@ -2840,7 +2849,7 @@ async function streamAgent(
     if (agent.id !== "career-planner") {
       try {
         toolInjections.push(
-          ...renderAgentLog(readFileSync(CHAT_LOG, "utf8"), agent.id, {
+          ...renderAgentLog(readFileSync(chatLogFile(), "utf8"), agent.id, {
             ownEntries: 3,
             teamEntries: 5,
           })
@@ -2877,12 +2886,12 @@ async function streamAgent(
     if (allowedToolNames.includes("search_jobs") &&
         /boss|搜|找工作|岗位|实习|intern|job|职位|帮我搜|重新搜|搜索|产品经理|AI.*经理|请处理|用户原始请求/i.test(userMsgNoMention)) {
       let profileText = "";
-      try { profileText = readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8"); } catch {}
+      try { profileText = readFileSync(path.join(careerDir(), "profile.md"), "utf8"); } catch {}
 
       // 如果 profile.md 是空的，从最近聊天记录里补充上下文
       if (!profileText.trim() || profileText.trim().length < 30) {
         try {
-          const chatLog = readFileSync(path.join(CAREER_DIR, "chat_log.md"), "utf8");
+          const chatLog = readFileSync(path.join(careerDir(), "chat_log.md"), "utf8");
           profileText = "【从聊天记录提取的用户信息】\n" + chatLog.slice(-2000);
         } catch {}
       }
@@ -2923,8 +2932,8 @@ async function streamAgent(
       const answers = parseUserAnswers(lastUserMsg, lastAskedProfileLabels);
       if (Object.keys(answers).length) {
         try {
-          const current = existsSync(PROFILE_FILE) ? readFileSync(PROFILE_FILE, "utf8") : "";
-          writeFileSync(PROFILE_FILE, upsertAnswers(current, answers), "utf-8");
+          const current = existsSync(profileFile()) ? readFileSync(profileFile(), "utf8") : "";
+          writeFileSync(profileFile(), upsertAnswers(current, answers), "utf-8");
           lastAskedProfileLabels = lastAskedProfileLabels.filter((label) => !(label in answers));
           toolInjections.push(`【已记住】${Object.entries(answers).map(([k, v]) => `${k}: ${v}`).join("；")}——以后投递不会再问这几项。`);
           console.log(`[profile] 记住 ${Object.keys(answers).join("、")}`);
@@ -3096,7 +3105,7 @@ async function streamAgent(
         .replace(/\{\{petName\}\}/g, petName)
         .replace(/\{\{petPersonality\}\}/g, petPersonality)
         .replace(/\{\{OPENCLAW_HOME\}\}/g, APP_DATA_DIR)
-        .replace(/\{\{CAREER_DIR\}\}/g, CAREER_DIR)
+        .replace(/\{\{CAREER_DIR\}\}/g, careerDir())
         .replace(/\{\{APP_DATA_DIR\}\}/g, APP_DATA_DIR);
       systemParts.push(resolvedSoul);
       if (userCtx) systemParts.push(`【用户背景】\n${userCtx}`);
@@ -3283,11 +3292,11 @@ async function streamAgent(
     // 兜底：根据文件状态自动推断阶段（LLM 不输出 PHASE_UPDATE 也能更新进度条）
     if (groupId === "job") {
       const state = loadOnboardingState();
-      const hasProfile = (() => { try { return readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").trim().length > 50; } catch { return false; } })();
-      const hasResume = (() => { try { return readFileSync(RESUME_MASTER_FILE, "utf8").trim().length > 50; } catch { return false; } })();
-      const hasSkillsGap = existsSync(path.join(CAREER_DIR, "skills_gap.md"));
-      const hasJobs = (() => { try { const j = JSON.parse(readFileSync(path.join(CAREER_DIR, "jobs.json"), "utf8")); return Array.isArray(j) && j.length > 0; } catch { return false; } })();
-      const hasApps = (() => { try { const a = JSON.parse(readFileSync(path.join(CAREER_DIR, "applications.json"), "utf8")); return Array.isArray(a) && a.length > 0; } catch { return false; } })();
+      const hasProfile = (() => { try { return readFileSync(path.join(careerDir(), "profile.md"), "utf8").trim().length > 50; } catch { return false; } })();
+      const hasResume = (() => { try { return readFileSync(resumeMasterFile(), "utf8").trim().length > 50; } catch { return false; } })();
+      const hasSkillsGap = existsSync(path.join(careerDir(), "skills_gap.md"));
+      const hasJobs = (() => { try { const j = JSON.parse(readFileSync(path.join(careerDir(), "jobs.json"), "utf8")); return Array.isArray(j) && j.length > 0; } catch { return false; } })();
+      const hasApps = (() => { try { const a = JSON.parse(readFileSync(path.join(careerDir(), "applications.json"), "utf8")); return Array.isArray(a) && a.length > 0; } catch { return false; } })();
 
       let inferredPhase = state.phase;
       if (hasApps) inferredPhase = "first_application";
@@ -3459,8 +3468,8 @@ async function runAgentChain(
       // 读取档案和简历注入上下文
       let sharedProfileCtx = "";
       try {
-        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8") : "";
-        const resume = existsSync(path.join(CAREER_DIR, "resume_master.md")) ? readFileSync(path.join(CAREER_DIR, "resume_master.md"), "utf8") : "";
+        const profile = existsSync(path.join(careerDir(), "profile.md")) ? readFileSync(path.join(careerDir(), "profile.md"), "utf8") : "";
+        const resume = existsSync(path.join(careerDir(), "resume_master.md")) ? readFileSync(path.join(careerDir(), "resume_master.md"), "utf8") : "";
         if (profile) sharedProfileCtx += `\n【用户档案】\n${profile}`;
         if (resume) sharedProfileCtx += `\n\n【简历原文】\n${resume.slice(0, 3000)}`;
       } catch {}
@@ -3513,7 +3522,7 @@ async function runAgentChain(
       io.emit("agent_thinking", { agentName: routeTarget.name, groupId });
       let profileCtx = "";
       try {
-        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8") : "";
+        const profile = existsSync(path.join(careerDir(), "profile.md")) ? readFileSync(path.join(careerDir(), "profile.md"), "utf8") : "";
         if (profile) profileCtx = `\n\n【用户档案】\n${profile}`;
       } catch {}
       const expertMessages = [
@@ -3534,8 +3543,8 @@ async function runAgentChain(
     // 读取用户档案和简历，注入给子 agent
     let profileCtx = "";
     try {
-      const profilePath = path.join(CAREER_DIR, "profile.md");
-      const resumePath = path.join(CAREER_DIR, "resume_master.md");
+      const profilePath = path.join(careerDir(), "profile.md");
+      const resumePath = path.join(careerDir(), "resume_master.md");
       const profile = existsSync(profilePath) ? readFileSync(profilePath, "utf8") : "";
       const resume = existsSync(resumePath) ? readFileSync(resumePath, "utf8") : "";
       if (profile) profileCtx += `\n【用户档案】\n${profile}`;
@@ -3588,8 +3597,8 @@ async function runAgentChain(
 function loadProfileContext(): string {
   let ctx = "";
   try {
-    const profilePath = path.join(CAREER_DIR, "profile.md");
-    const resumePath = path.join(CAREER_DIR, "resume_master.md");
+    const profilePath = path.join(careerDir(), "profile.md");
+    const resumePath = path.join(careerDir(), "resume_master.md");
     const profile = existsSync(profilePath) ? readFileSync(profilePath, "utf8") : "";
     const resume = existsSync(resumePath) ? readFileSync(resumePath, "utf8") : "";
     if (profile) ctx += `【用户档案】\n${profile}`;
@@ -3917,7 +3926,7 @@ async function handleJobOnboarding(
   }
 
   // Guard 2: 如果 profile.md 是空的但聊天里已有足够信息，自动写入
-  const profileContent = (() => { try { return readFileSync(PROFILE_FILE, "utf8").trim(); } catch { return ""; } })();
+  const profileContent = (() => { try { return readFileSync(profileFile(), "utf8").trim(); } catch { return ""; } })();
   if (profileContent.length < 50 && allMessages.filter((m: any) => m.groupId === "job").length > 5) {
     try {
       const recentChat = allMessages
@@ -3936,7 +3945,7 @@ async function handleJobOnboarding(
       });
       const text = result.content;
       if (text.includes("方向") && text.length > 50) {
-        writeFileSync(PROFILE_FILE, text, "utf8");
+        writeFileSync(profileFile(), text, "utf8");
         console.log("[auto-profile] wrote profile.md from chat history");
       }
     } catch (e) {
@@ -3999,7 +4008,7 @@ async function parseAndUpdatePhase(reply: string, io: Server, allMessages?: any[
     if (profileData.targetRole) {
       const profileMd = `# 用户档案\n\n方向: ${profileData.targetRole || ""}\n类型: ${profileData.jobType || ""}\n市场: ${profileData.market || ""}\n时间: ${profileData.timeRange || ""}\n城市: ${profileData.targetCity || ""}\n范围: ${profileData.roleScope || ""}\n公司偏好: ${profileData.companyPreference || ""}\n个人特质: ${profileData.traits || ""}\n\n## 技能\n${(profileData.skills || []).map((s: string) => `- ${s}`).join("\n")}\n`;
       try {
-        writeFileSync(path.join(CAREER_DIR, "profile.md"), profileMd, "utf8");
+        writeFileSync(path.join(careerDir(), "profile.md"), profileMd, "utf8");
         console.log("[profile_confirm] wrote profile.md");
       } catch {}
     }
@@ -4180,7 +4189,7 @@ async function handleApplyReadyWorkflow(
 
   const appTracker = JOB_AGENTS.find((a) => a.id === "app-tracker")!;
   const networker = JOB_AGENTS.find((a) => a.id === "networker")!;
-  const profileText = existsSync(PROFILE_FILE) ? readFileSync(PROFILE_FILE, "utf8") : "";
+  const profileText = existsSync(profileFile()) ? readFileSync(profileFile(), "utf8") : "";
   const shouldRunNetworker = /海外|国外|美国|欧洲|新加坡|remote/i.test(profileText);
 
   for (const row of targetRows) {
@@ -4453,6 +4462,10 @@ async function handlePipelineSignalWorkflow(
 }
 
 async function startServer() {
+  // 单人模式下 startServer 跑在 local 上下文里，可以建目录；多用户模式没有「启动期的用户」，
+  // 目录由注册端点和每用户状态创建时分别负责。
+  if (!MULTI_USER) ensureDir(careerDir());
+
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -4604,14 +4617,14 @@ async function startServer() {
 
   // ── 宠物档案持久化 ──────────────────────────────────────────────────
   app.get("/api/pet", (_req: any, res: any) => {
-    if (existsSync(PET_FILE)) {
-      try { return res.json(JSON.parse(readFileSync(PET_FILE, "utf-8"))); } catch {}
+    if (existsSync(petFile())) {
+      try { return res.json(JSON.parse(readFileSync(petFile(), "utf-8"))); } catch {}
     }
     res.json(null);
   });
   app.post("/api/pet", (req: any, res: any) => {
     try {
-      writeFileSync(PET_FILE, JSON.stringify(req.body, null, 2), "utf-8");
+      writeFileSync(petFile(), JSON.stringify(req.body, null, 2), "utf-8");
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
@@ -5073,9 +5086,9 @@ async function startServer() {
       // 读取求职进度上下文
       let progressCtx = "";
       try {
-        const chatLog = existsSync(CHAT_LOG) ? readFileSync(CHAT_LOG, "utf8").slice(-1500) : "";
-        const profile = existsSync(path.join(CAREER_DIR, "profile.md")) ? readFileSync(path.join(CAREER_DIR, "profile.md"), "utf8").slice(0, 800) : "";
-        const apps = existsSync(APPLICATIONS_FILE) ? JSON.parse(readFileSync(APPLICATIONS_FILE, "utf8")) : [];
+        const chatLog = existsSync(chatLogFile()) ? readFileSync(chatLogFile(), "utf8").slice(-1500) : "";
+        const profile = existsSync(path.join(careerDir(), "profile.md")) ? readFileSync(path.join(careerDir(), "profile.md"), "utf8").slice(0, 800) : "";
+        const apps = existsSync(applicationsFile()) ? JSON.parse(readFileSync(applicationsFile(), "utf8")) : [];
         if (chatLog || profile || apps.length > 0) {
           progressCtx = `\n\n【求职进度参考（用来说具体的话，不要说模板）】\n`;
           if (profile) progressCtx += `用户档案摘要：${profile.slice(0, 300)}\n`;
@@ -5300,7 +5313,7 @@ async function startServer() {
       ok: true,
       mode: "standalone",
       appDataDir: APP_DATA_DIR,
-      workspaceRoot: CAREER_DIR,
+      workspaceRoot: careerDir(),
       gatewayReachable: true,
       webChannelReady: true,
     });
@@ -5508,7 +5521,7 @@ async function startServer() {
     const entry = pendingSearchQueue.entries().next().value;
     if (!entry) return res.json({ task: null });
     const [id, { query, city, cookieFile }] = entry;
-    res.json({ task: { id, query, city, careerDir: CAREER_DIR, cookieFile } });
+    res.json({ task: { id, query, city, careerDir: careerDir(), cookieFile } });
   });
 
   app.post("/api/internal/browser-search-done", (req: any, res: any) => {
@@ -5639,7 +5652,7 @@ async function startServer() {
     io.emit("boss_login_result", { ok });
     if (!ok) console.warn("[boss-login] failed:", error || "unknown error");
     if (ok) {
-      const petData = (() => { try { return existsSync(PET_FILE) ? JSON.parse(readFileSync(PET_FILE, "utf8")) : {}; } catch { return {}; } })();
+      const petData = (() => { try { return existsSync(petFile()) ? JSON.parse(readFileSync(petFile(), "utf8")) : {}; } catch { return {}; } })();
       const pn = petData.name || "团团";
       const pp = petData.personality || "";
 
@@ -5758,8 +5771,8 @@ async function startServer() {
   });
 
   // ── Manage Panel ──────────────────────────────────────────────────────────
-  const MANAGE_CONFIG_FILE = path.join(CAREER_DIR, "manage_config.json");
-  const MANAGE_UPLOADS_DIR = path.join(CAREER_DIR, "uploads");
+  const MANAGE_CONFIG_FILE = path.join(careerDir(), "manage_config.json");
+  const MANAGE_UPLOADS_DIR = path.join(careerDir(), "uploads");
   ensureDir(MANAGE_UPLOADS_DIR);
 
   function readManageConfig() {
@@ -5824,7 +5837,7 @@ async function startServer() {
   });
 
   // Resume / document upload — saves to inbound dir and parses text server-side
-  const INBOUND_DIR = path.join(CAREER_DIR, "media", "inbound");
+  const INBOUND_DIR = path.join(careerDir(), "media", "inbound");
   ensureDir(INBOUND_DIR);
   const resumeUpload = multer({ dest: os.tmpdir() });
   app.post("/api/upload/resume", resumeUpload.single("file"), async (req: any, res: any) => {
@@ -5926,7 +5939,7 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   });
   app.delete("/api/memory/:key", (req: any, res: any) => {
     const memories = loadMemory().filter(m => m.key !== req.params.key);
-    writeFileSync(MEMORY_FILE, JSON.stringify(memories, null, 2), "utf-8");
+    writeFileSync(memoryFile(), JSON.stringify(memories, null, 2), "utf-8");
     res.json({ ok: true });
   });
 
@@ -6018,4 +6031,10 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
   console.log("⏰ 定时任务已注册：9AM 搜岗+follow-up | 10AM 行业学习 | 14PM 午间速递 | 15PM 主动跟进 | 18PM 进度简报 | 21PM 晚间分享（洛杉矶时间）");
 }
 
-startServer();
+/**
+ * 单人模式：整个服务跑在 local 用户的上下文里。startServer() 里创建的
+ * setInterval、scheduleJob、闭包都会继承它，所以启动期读写 careerDir() 的代码
+ * 不用改。多用户模式没有"启动期的用户"——所有访问都必须来自请求，见后续任务。
+ */
+if (MULTI_USER) startServer();
+else runWithUser(LOCAL_USER_ID, () => startServer());
