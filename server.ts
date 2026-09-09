@@ -84,7 +84,7 @@ function ensureDir(dir: string) {
 
 const APP_DATA_DIR = resolveAppDataDir();
 const WORKSPACE_DIR = path.join(APP_DATA_DIR, "workspace");
-/** 改造前的 careerDir()。单人模式下 local 用户仍用它；多用户模式下迁移到 users/local/career。 */
+/** 改造前的 CAREER_DIR。单人模式下 local 用户仍用它；多用户模式下迁移到 users/local/career。 */
 const LEGACY_CAREER_DIR = process.env.PAWPALS_WORKSPACE || path.join(WORKSPACE_DIR, "career");
 initTenancy({ dataRoot: APP_DATA_DIR, localCareerDir: MULTI_USER ? undefined : LEGACY_CAREER_DIR });
 const COOKIE_DIR = process.env.PAWPALS_COOKIE_DIR || path.join(APP_DATA_DIR, "jobclaw", "cookies");
@@ -4472,6 +4472,22 @@ async function startServer() {
     cors: {
       origin: "*",
     },
+  });
+
+  /**
+   * 把每个进来的 socket 包放进用户上下文。
+   *
+   * AsyncLocalStorage 传得到 Express 处理器，但**传不到** socket.io 的
+   * connection 回调和 socket.on 处理器——engine.io 的连接生命周期走的是它自己的
+   * 异步资源，链在那里断了。实测过：`[PawPals] 聊天记录已清空` 打印了，
+   * pawpals_messages.json 根本没写出来，因为 saveMessages 的空 catch 把
+   * careerDir() 的抛错吞掉了。
+   *
+   * 多用户模式接进来之后，这里的固定用户会换成握手认出来的那个人。
+   */
+  io.use((socket, next) => {
+    socket.use((_packet, nextPacket) => runWithUser(LOCAL_USER_ID, () => nextPacket()));
+    next();
   });
 
   /**
