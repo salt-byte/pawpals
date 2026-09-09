@@ -249,11 +249,19 @@ const userStates: UserStateStore<UserState> = createUserStateStore<UserState>({
     // 这些在单人模式的 startServer() 里做过了，不重复；多用户模式只能在这做。
     _bootstrapped: MULTI_USER
       ? (() => {
-          ensureDir(careerDir());
-          seedAgentSouls();
-          syncJobsToCollaborationBoard();
-          syncApplicationsToCollaborationBoard();
-          syncContactsToCollaborationBoard();
+          // 这是尽力而为的初始化，不能是必须成功的关卡：create 只跑一次，这里抛出去
+          // 会把这个用户的容器直接毒死——之后每次 state() 都跟着抛，连 socket 连接
+          // 回调第一行都会炸。哪一步失败就跳过哪一步，不阻塞其余步骤，和
+          // seedAgentSouls() 自己内部的 try/catch 是一个思路。
+          try {
+            ensureDir(careerDir());
+            seedAgentSouls();
+            syncJobsToCollaborationBoard();
+            syncApplicationsToCollaborationBoard();
+            syncContactsToCollaborationBoard();
+          } catch (e: any) {
+            console.warn(`[bootstrap] 用户 ${userId} 初始化失败：`, e?.message || e);
+          }
           return true;
         })()
       : false,
@@ -408,35 +416,54 @@ const kLoginStateTtlMs  = 60 * 60 * 1000;  // 1小时后清理状态
 interface LoginState { attempts: number; windowStart: number; lockUntil: number; failStreak: number; lastSeenAt: number; }
 const _loginStates = new Map<string, LoginState>();
 
-function _getLoginState(ip: string, now: number): LoginState {
-  const s = _loginStates.get(ip);
+function _getLoginStateIn(store: Map<string, LoginState>, key: string, now: number): LoginState {
+  const s = store.get(key);
   if (s) { s.lastSeenAt = now; return s; }
   const n: LoginState = { attempts: 0, windowStart: now, lockUntil: 0, failStreak: 0, lastSeenAt: now };
-  _loginStates.set(ip, n);
+  store.set(key, n);
   return n;
 }
-function _checkThrottle(ip: string): { blocked: boolean; retryAfterSec: number } {
+function _checkThrottleIn(store: Map<string, LoginState>, key: string): { blocked: boolean; retryAfterSec: number } {
   const now = Date.now();
-  const s = _getLoginState(ip, now);
+  const s = _getLoginStateIn(store, key, now);
   if (s.lockUntil > now) return { blocked: true, retryAfterSec: Math.ceil((s.lockUntil - now) / 1000) };
   if (now - s.windowStart >= kLoginWindowMs) { s.attempts = 0; s.windowStart = now; }
   return { blocked: false, retryAfterSec: 0 };
 }
-function _recordFailure(ip: string) {
+function _recordFailureIn(store: Map<string, LoginState>, key: string, maxAttempts: number) {
   const now = Date.now();
-  const s = _getLoginState(ip, now);
+  const s = _getLoginStateIn(store, key, now);
   if (now - s.windowStart >= kLoginWindowMs) { s.attempts = 0; s.windowStart = now; }
   s.attempts += 1;
-  if (s.attempts < kLoginMaxAttempts) return;
+  if (s.attempts < maxAttempts) return;
   s.failStreak += 1; s.attempts = 0; s.windowStart = now;
   const lockMs = Math.min(kLoginBaseLockMs * Math.pow(2, s.failStreak - 1), kLoginMaxLockMs);
   s.lockUntil = now + lockMs;
 }
+function _checkThrottle(ip: string): { blocked: boolean; retryAfterSec: number } { return _checkThrottleIn(_loginStates, ip); }
+function _recordFailure(ip: string) { _recordFailureIn(_loginStates, ip, kLoginMaxAttempts); }
 function _recordSuccess(ip: string) { _loginStates.delete(ip); }
+
+/**
+ * 第二层：只按 IP 的宽松上限。
+ *
+ * 上面那套的键是「IP|邮箱」——同一来源换一个邮箱就是全新的桶，可以无限换邮箱试
+ * 下去，撞库、密码喷洒正是这个形状。这里另开一个只看 IP 的桶，一起看：上限比
+ * 单邮箱的 5 次宽松不少（一整个学校共享出口 IP，各自试自己的密码不该互相锁死），
+ * 但仍然远低于脚本遍历几十上百个邮箱的量级，任一桶触发都拦。
+ */
+const kIpLoginMaxAttempts = 10; // 5 分钟窗口内；明显高于单个邮箱的正常人类用量，远低于脚本遍历
+const _ipLoginStates = new Map<string, LoginState>();
+function _checkIpThrottle(ip: string): { blocked: boolean; retryAfterSec: number } { return _checkThrottleIn(_ipLoginStates, ip); }
+function _recordIpFailure(ip: string) { _recordFailureIn(_ipLoginStates, ip, kIpLoginMaxAttempts); }
+function _recordIpSuccess(ip: string) { _ipLoginStates.delete(ip); }
+
 setInterval(() => {
   const now = Date.now();
   for (const [k, s] of _loginStates.entries())
     if (s.lockUntil <= now && now - s.lastSeenAt > kLoginStateTtlMs) _loginStates.delete(k);
+  for (const [k, s] of _ipLoginStates.entries())
+    if (s.lockUntil <= now && now - s.lastSeenAt > kLoginStateTtlMs) _ipLoginStates.delete(k);
 }, 10 * 60 * 1000);
 
 // ── PIN Auth System ────────────────────────────────────────────────────
@@ -514,8 +541,19 @@ function resolveRequestUser(req: any): string | null {
   return userId && isValidUserId(userId) ? userId : null;
 }
 
-function sessionCookie(token: string): string {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+/**
+ * 该路径是否豁免登录。纯函数，不读取任何进程状态，方便单测覆盖。
+ *
+ * 前缀表只用于「这一类路径下的所有子路径」（如 /api/auth/login、/api/auth/register）；
+ * 需要豁免但又不能被前缀误伤兄弟路径的（/api/health 之于 /api/health-anything，
+ * /api/extension/pair 之于需要登录的 /api/extension/pair-code）一律放精确匹配表。
+ */
+export function isAuthExempt(path: string, exemptPrefixes: string[], exemptExact: string[]): boolean {
+  return exemptPrefixes.some((p) => path.startsWith(p)) || exemptExact.includes(path);
+}
+
+export function sessionCookie(token: string, env: NodeJS.ProcessEnv = process.env): string {
+  const secure = env.NODE_ENV === "production" ? "; Secure" : "";
   return `paw_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${kSessionTtlMs / 1000}${secure}`;
 }
 
@@ -4620,6 +4658,17 @@ async function handlePipelineSignalWorkflow(
 }
 
 async function startServer() {
+  // 多用户模式下这个开发期后门会把所有请求都认成 local，认证名存实亡——
+  // 真部署上手滑设了这个变量就是所有账号共享一份数据。留着（开发要用），
+  // 但必须在启动日志里大声喊出来，不能一声不响。
+  if (MULTI_USER && process.env.PAWPALS_DEV_NO_AUTH === "1") {
+    const bang = "!".repeat(70);
+    console.warn(bang);
+    console.warn("!! 警告 WARNING：PAWPALS_DEV_NO_AUTH=1 已开启，认证已关闭 !!");
+    console.warn("!! 所有请求都会被当成 local 用户处理，所有账号会共用同一份数据 !!");
+    console.warn("!! 这是仅供本地开发调试用的后门，真实部署绝不能设置这个环境变量 !!");
+    console.warn(bang);
+  }
   // 单人模式下 startServer 跑在 local 上下文里，可以建目录；多用户模式没有「启动期的用户」，
   // 目录由注册端点和每用户状态创建时分别负责。
   if (!MULTI_USER) ensureDir(careerDir());
@@ -4750,13 +4799,16 @@ async function startServer() {
   }
 
   // ── Auth 中间件：单人模式非 localhost 访问需要 PIN；多用户模式需要会话 ──
-  const AUTH_EXEMPT_PREFIX = ["/api/auth/", "/api/health"];
-  // 精确匹配：前缀匹配会把需要登录的 /api/extension/pair-code 一起放过去
-  const AUTH_EXEMPT_EXACT = ["/api/extension/pair"];
+  const AUTH_EXEMPT_PREFIX = ["/api/auth/"];
+  // 精确匹配，不能放进前缀表：前缀匹配会把 /api/health-anything 也一起放过去，
+  // 需要登录的 /api/extension/pair-code 同理会被 /api/extension/pair 的前缀捎带免认证。
+  const AUTH_EXEMPT_EXACT = ["/api/extension/pair", "/api/health"];
   app.use((req: any, res: any, next: any) => {
-    const isExempt = AUTH_EXEMPT_PREFIX.some(p => req.path.startsWith(p)) || AUTH_EXEMPT_EXACT.includes(req.path);
+    const isExempt = isAuthExempt(req.path, AUTH_EXEMPT_PREFIX, AUTH_EXEMPT_EXACT);
     const userId = resolveRequestUser(req);
     if (isExempt && !userId) return next();
+    // 注意：豁免路径认出了合法会话时不会在这里短路——会往下走进用户上下文。
+    // 这是故意的：/api/auth/status、/api/auth/me 就是靠这个才能在已登录时报出账号信息。
     if (userId) {
       userStates.touch(userId);
       // 之后整条处理链（含 await 之后）都在该用户的上下文里
@@ -4788,13 +4840,20 @@ async function startServer() {
   app.post("/api/auth/login", (req: any, res: any) => {
     if (MULTI_USER) {
       const { email, password } = req.body || {};
-      // 限流键从 IP 改为 IP + 邮箱：一个 IP 后面可能是一整个学校
-      const key = `${_getClientIp(req)}|${String(email || "").trim().toLowerCase()}`;
-      const { blocked, retryAfterSec } = _checkThrottle(key);
-      if (blocked) return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
+      const ip = _getClientIp(req);
+      // 限流键从 IP 改为 IP + 邮箱：一个 IP 后面可能是一整个学校。
+      // 但这也意味着换个邮箱就是全新的桶——撞库、密码喷洒正是这个形状，所以再加
+      // 一层只看 IP 的宽松上限（kIpLoginMaxAttempts），两个桶一起看，任一触发都拦。
+      const key = `${ip}|${String(email || "").trim().toLowerCase()}`;
+      const emailThrottle = _checkThrottle(key);
+      const ipThrottle = _checkIpThrottle(ip);
+      if (emailThrottle.blocked || ipThrottle.blocked) {
+        const retryAfterSec = Math.max(emailThrottle.retryAfterSec, ipThrottle.retryAfterSec);
+        return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
+      }
       const user = userStore!.authenticate(email, password);
-      if (!user) { _recordFailure(key); return res.status(401).json({ ok: false, error: "邮箱或密码不对" }); }
-      _recordSuccess(key);
+      if (!user) { _recordFailure(key); _recordIpFailure(ip); return res.status(401).json({ ok: false, error: "邮箱或密码不对" }); }
+      _recordSuccess(key); _recordIpSuccess(ip);
       const token = sessionStore!.issue(user.id);
       res.setHeader("Set-Cookie", sessionCookie(token));
       return res.json({ ok: true, token, user: { id: user.id, email: user.email } });
@@ -4821,10 +4880,17 @@ async function startServer() {
 
   app.post("/api/auth/register", (req: any, res: any) => {
     if (!MULTI_USER) return res.status(404).json({ ok: false, error: "单人模式没有注册" });
+    const ip = _getClientIp(req);
+    // 注册此前完全不限流：循环调用就能无限建账号和目录树。复用登录同一套节流器，
+    // 键只用 IP——不管这次注册成不成功都要计数，否则用不同邮箱反复注册（全部
+    // 成功）就会绕开限流，起不到拦截作用。
+    const { blocked, retryAfterSec } = _checkThrottle(ip);
+    if (blocked) return res.status(429).json({ ok: false, error: `尝试次数过多，请 ${retryAfterSec} 秒后重试` });
+    _recordFailure(ip);
     const { email, password } = req.body || {};
     const r = userStore!.register(email, password);
     if (r.ok === false) return res.status(400).json({ ok: false, error: r.error });
-    ensureDir(path.join(APP_DATA_DIR, "users", r.user.id, "career"));
+    runWithUser(r.user.id, () => ensureDir(careerDir()));
     const token = sessionStore!.issue(r.user.id);
     res.setHeader("Set-Cookie", sessionCookie(token));
     console.log(`[auth] 新用户注册 ${r.user.id}`);
@@ -5110,8 +5176,12 @@ async function startServer() {
    * 新数组，这个人的聊天记录就悄悄劈成了两份。
    * officialTaskHub.size() 目前没有按用户的签名（Task 7 才有），先按「有任何扩展
    * 连着就都不卸」处理——宁可多留，不能错卸。
+   *
+   * 单人模式没有别的用户可卸，local 之所以从没被卸掉纯粹是巧合——楼上那些
+   * 60 秒/120 秒的定时器一直在调用 state()，把它捎带"续命"了。把这层巧合改成
+   * 显式：单人模式压根不跑这个定时器。
    */
-  setInterval(() => {
+  if (MULTI_USER) setInterval(() => {
     const active = new Set<string>();
     for (const s of io.sockets.sockets.values()) {
       const uid = (s.data as any)?.userId;
@@ -6272,6 +6342,13 @@ print(json.dumps({"text": "\\n\\n".join(pages)}))
  * 单人模式：整个服务跑在 local 用户的上下文里。startServer() 里创建的
  * setInterval、scheduleJob、闭包都会继承它，所以启动期读写 careerDir() 的代码
  * 不用改。多用户模式没有"启动期的用户"——所有访问都必须来自请求，见后续任务。
+ *
+ * Vitest 跑测试时会 import 这个文件（为了单测 isAuthExempt / sessionCookie 这两个
+ * 纯函数），import 会执行到文件底部——不加这层守卫，每次 `npm test` 都会真的监听
+ * 端口、跑定时任务、读写这台机器上真实的 APP_DATA_DIR。Vitest 自己会设
+ * process.env.VITEST，用它来判断是不是被当作脚本直接跑。
  */
-if (MULTI_USER) startServer();
-else runWithUser(LOCAL_USER_ID, () => startServer());
+if (!process.env.VITEST) {
+  if (MULTI_USER) startServer();
+  else runWithUser(LOCAL_USER_ID, () => startServer());
+}
